@@ -1,11 +1,135 @@
 // Resolves the per-call config and hands it from the TwiML webhook to the
 // media-stream WebSocket, keyed by Twilio CallSid.
+//
+// Config lives in Supabase (public.phone_configs), one row per phone number in
+// E.164. A row may describe an inbound caller (a personal override) or one of
+// our Twilio lines (the default for anyone dialling it), so lookups try the
+// caller first and fall back to the line, then to DEFAULT_CONFIG.
+//
+// Answering a call must never depend on Supabase being reachable: every failure
+// path here returns DEFAULT_CONFIG.
 
+import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_CONFIG } from './config.js';
 
-// Stub: always returns defaults. Replaced by a Supabase lookup (keyed by
-// phone number) in a later step — the call sites won't need to change.
+const LOOKUP_TIMEOUT_MS = 1500;
+const ROW_CACHE_TTL_MS = 60 * 1000;
+
+// Read env on first use, not at import time: ES module imports are evaluated
+// before index.js calls dotenv.config(), so reading it here at module scope
+// would silently see no credentials and disable config for every call.
+let supabase; // undefined = not yet initialised, null = disabled
+
+function getClient() {
+    if (supabase !== undefined) return supabase;
+
+    const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_CONFIG_ENABLED } = process.env;
+    const requested = SUPABASE_CONFIG_ENABLED === 'true';
+    const credentialed = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
+
+    if (requested && !credentialed) {
+        console.warn('SUPABASE_CONFIG_ENABLED is true but SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are missing — using default config for every call.');
+    }
+
+    supabase = requested && credentialed
+        ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+        : null;
+
+    console.log(`Supabase call config ${supabase ? 'enabled' : 'disabled'}`);
+    return supabase;
+}
+
+// Maps a phone_configs row onto DEFAULT_CONFIG. Null/undefined columns fall
+// back field by field, so a row only needs to set what it wants to change.
+export function rowToConfig(row) {
+    const pick = (value, fallback) => (value === null || value === undefined ? fallback : value);
+
+    return {
+        model: pick(row.model, DEFAULT_CONFIG.model),
+        effort: pick(row.effort, DEFAULT_CONFIG.effort),
+        voice: pick(row.call_voice, DEFAULT_CONFIG.voice),
+        temperature: row.temperature === null || row.temperature === undefined
+            ? DEFAULT_CONFIG.temperature
+            : Number(row.temperature), // numeric arrives as a string
+        systemMessage: pick(row.call_system_prompt, DEFAULT_CONFIG.systemMessage),
+        introMessage: pick(row.intro_message, DEFAULT_CONFIG.introMessage),
+        introMessage2: pick(row.intro_message_2, DEFAULT_CONFIG.introMessage2),
+        introVoice: pick(row.intro_voice, DEFAULT_CONFIG.introVoice),
+        greetingText: pick(row.call_greeting, DEFAULT_CONFIG.greetingText),
+        aiSpeaksFirst: pick(row.ai_speaks_first, DEFAULT_CONFIG.aiSpeaksFirst),
+    };
+}
+
+// phoneNumber -> { row, fetchedAt }. Caches misses (row: null) too, so unknown
+// callers don't hit the database on every call.
+const rowCache = new Map();
+
+function cached(phoneNumber) {
+    const entry = rowCache.get(phoneNumber);
+    if (!entry) return undefined;
+    if (Date.now() - entry.fetchedAt >= ROW_CACHE_TTL_MS) {
+        rowCache.delete(phoneNumber);
+        return undefined;
+    }
+    return entry.row;
+}
+
+// Fetches every candidate in one round trip — the caller waits on this before
+// any TwiML is returned, so a second sequential query would double the delay.
+async function fetchRows(client, phoneNumbers) {
+    const query = client
+        .from('phone_configs')
+        .select('*')
+        .in('twilio_number', phoneNumbers)
+        .eq('call_enabled', true);
+
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Supabase lookup timed out after ${LOOKUP_TIMEOUT_MS}ms`)), LOOKUP_TIMEOUT_MS);
+    });
+
+    try {
+        const { data, error } = await Promise.race([query, timeout]);
+        if (error) throw new Error(error.message);
+
+        const byNumber = new Map((data ?? []).map((row) => [row.twilio_number, row]));
+        const fetchedAt = Date.now();
+        for (const phoneNumber of phoneNumbers) {
+            rowCache.set(phoneNumber, { row: byNumber.get(phoneNumber) ?? null, fetchedAt });
+        }
+        return byNumber;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Resolve the config for a call. `from` is the caller, `to` the number dialled.
 export async function resolveConfig({ from, to, direction }) {
+    const client = getClient();
+    if (!client) return DEFAULT_CONFIG;
+
+    // Inbound: the caller's own config wins, else the line they dialled.
+    // Outbound: we are the caller, so `from` is our line.
+    const candidates = (direction === 'outbound' ? [from] : [from, to]).filter(Boolean);
+    if (candidates.length === 0) return DEFAULT_CONFIG;
+
+    try {
+        const uncached = candidates.filter((phoneNumber) => cached(phoneNumber) === undefined);
+        const fetched = uncached.length > 0 ? await fetchRows(client, uncached) : new Map();
+
+        // Candidate order is the precedence order.
+        for (const phoneNumber of candidates) {
+            const row = fetched.get(phoneNumber) ?? cached(phoneNumber);
+            if (row) {
+                console.log(`Config matched ${phoneNumber} (${row.name || 'unnamed'})`);
+                return rowToConfig(row);
+            }
+        }
+        console.log(`No config row for ${candidates.join(' or ')} — using defaults`);
+    } catch (error) {
+        console.error('Config lookup failed, using defaults:', error.message);
+    }
+
     return DEFAULT_CONFIG;
 }
 
