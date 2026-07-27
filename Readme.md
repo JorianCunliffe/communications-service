@@ -10,8 +10,10 @@ This application uses the following Twilio products in conjuction with OpenAI's 
 - Voice (and TwiML, Media Streams)
 - Phone Numbers
 
-> [!NOTE]
-> Outbound calling is beyond the scope of this app. However, we demoed [one way to do it here](https://www.twilio.com/en-us/blog/outbound-calls-node-openai-realtime-api-voice).
+Per-call settings (model, voice, prompt, intro messages) can be loaded from
+Supabase based on the phone number involved, and calls can be placed
+programmatically. See [Call configuration](#call-configuration) and
+[Outbound calls](#outbound-calls).
 
 ## Prerequisites
 
@@ -70,6 +72,10 @@ cp .env.example .env
 
 In the .env file, update the `OPENAI_API_KEY` to your OpenAI API key from the **Prerequisites**.
 
+The remaining variables are optional — leave them as-is to run with the
+built-in defaults. See [Call configuration](#call-configuration) and
+[Outbound calls](#outbound-calls).
+
 ## Run the app
 Once ngrok is running, dependencies are installed, Twilio is configured properly, and the `.env` is set up, run the dev server with the following command:
 ```
@@ -78,10 +84,76 @@ node index.js
 ## Test the app
 With the development server running, call the phone number you purchased in the **Prerequisites**. After the introduction, you should be able to talk to the AI Assistant. Have fun!
 
+## Call configuration
+
+Every tunable lives in `DEFAULT_CONFIG` in `config.js`: `model`, `effort`,
+`voice`, `temperature`, `systemMessage`, the two `<Say>` intro lines and their
+`introVoice`, `greetingText`, and `aiSpeaksFirst`. With no database configured
+these defaults apply to every call, exactly as the original app behaved.
+
+### Per-number config from Supabase
+
+Set `SUPABASE_CONFIG_ENABLED=true` along with `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY` to load settings from `public.phone_configs`. Each
+row is keyed by a phone number in E.164 (`twilio_number`) and lookup runs in
+this order:
+
+1. **The caller's number** — a per-person override.
+2. **The number they dialled** — the default persona for that line.
+3. **`DEFAULT_CONFIG`** — if neither has a row.
+
+Outbound calls key on the `from` number only.
+
+Columns map to config fields as: `model`, `effort`, `temperature`,
+`intro_message`, `intro_message_2`, `intro_voice`, `ai_speaks_first`, plus the
+pre-existing `call_voice`, `call_system_prompt` and `call_greeting`. **Any
+column left null falls back to the default**, so a row only needs to set what
+it actually changes. A row with `call_enabled = false` is ignored.
+
+Config never blocks a call: a lookup that times out (1500 ms), errors, or
+matches nothing falls back to the defaults and the call proceeds. Rows are
+cached for 60 seconds. Setting `SUPABASE_CONFIG_ENABLED` to anything but `true`
+turns the whole feature off.
+
+### Reasoning effort
+
+`effort` applies to reasoning-capable models such as `gpt-realtime-2`
+(`minimal`, `low`, `medium`, `high`, `xhigh`). It is only sent when set, so the
+original `gpt-realtime` model is unaffected. `low` is a good starting point for
+voice — higher values add latency.
+
+## Outbound calls
+
+`POST /outbound-call` places a call and bridges it into the same assistant.
+It requires `API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and
+`PUBLIC_URL`; **if `API_KEY` is unset the endpoint is disabled and returns 503**,
+so an incomplete deploy can't leave call placing open to the internet.
+
+```bash
+curl -X POST https://your-app.example.com/outbound-call \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "to": "+447700900123",
+        "from": "+447700900999",
+        "overrides": { "voice": "cedar", "aiSpeaksFirst": true }
+      }'
+```
+
+`to` and `from` must be E.164. `overrides` is optional and may only contain
+`DEFAULT_CONFIG` field names; anything else is rejected with a 400. Twilio then
+fetches `/outbound-answer`, which skips the "please wait" intro since the callee
+has just picked up.
+
+`GET /health` reports whether the Supabase config and outbound calling are
+wired up.
+
 ## Special features
 
 ### Have the AI speak first
-To have the AI voice assistant talk before the user, uncomment the line `// sendInitialConversationItem();`. The initial greeting is controlled in `sendInitialConversationItem`.
+Set `aiSpeaksFirst` to `true` — in `DEFAULT_CONFIG` (`config.js`) to change it
+everywhere, or in the `ai_speaks_first` column for one phone number. What the
+assistant says is the `greetingText` / `call_greeting` value.
 
 ### Interrupt handling/AI preemption
 When the user speaks and OpenAI sends `input_audio_buffer.speech_started`, the code will clear the Twilio Media Streams buffer and send OpenAI `conversation.item.truncate`.
