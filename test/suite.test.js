@@ -141,17 +141,30 @@ describe('WebSocket – /media-stream', () => {
         )
     );
 
+    // Uses Twilio's documented start payload rather than a minimal stub: the
+    // per-call config is looked up by start.callSid, so that field's presence
+    // and position is load-bearing.
+    // https://www.twilio.com/docs/voice/media-streams/websocket-messages
     test('Server stays open when "start" carries a callSid with no stored config (default fallback)', () =>
         wsPromise(
             `${WS_BASE}/media-stream`,
             {},
             (ws, done) => {
                 ws.on('open', () => {
+                    // Twilio always sends 'connected' before 'start'.
+                    ws.send(JSON.stringify({ event: 'connected', protocol: 'Call', version: '1.0.0' }));
+
                     ws.send(JSON.stringify({
                         event: 'start',
+                        sequenceNumber: '1',
+                        streamSid: 'MZtest0000000000000000000000004',
                         start: {
-                            streamSid: 'test-stream-sid-004',
+                            accountSid: 'ACtest0000000000000000000000004',
+                            streamSid: 'MZtest0000000000000000000000004',
                             callSid: 'CAtest00000000000000000000000004',
+                            tracks: ['inbound'],
+                            mediaFormat: { encoding: 'audio/x-mulaw', sampleRate: 8000, channels: 1 },
+                            customParameters: {},
                         },
                     }));
 
