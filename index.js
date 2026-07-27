@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
+import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate } from './config.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -20,10 +21,7 @@ const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-// Constants
-const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.';
-const VOICE = 'alloy';
-const TEMPERATURE = 0.8; // Controls the randomness of the AI's responses
+// Constants (per-call tunables live in config.js)
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 
 // List of Event Types to log to the console. See the OpenAI Realtime API Documentation: https://platform.openai.com/docs/api-reference/realtime
@@ -50,11 +48,12 @@ fastify.get('/', async (request, reply) => {
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', async (request, reply) => {
+    const config = DEFAULT_CONFIG;
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say voice="Google.en-US-Chirp3-HD-Aoede">Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open A I Realtime API</Say>
+                              <Say voice="${config.introVoice}">${config.introMessage}</Say>
                               <Pause length="1"/>
-                              <Say voice="Google.en-US-Chirp3-HD-Aoede">O.K. you can start talking!</Say>
+                              <Say voice="${config.introVoice}">${config.introMessage2}</Say>
                               <Connect>
                                   <Stream url="wss://${request.headers.host}/media-stream" />
                               </Connect>
@@ -75,7 +74,7 @@ fastify.register(async (fastify) => {
         let markQueue = [];
         let responseStartTimestampTwilio = null;
 
-        const openAiWs = new WebSocket(`wss://api.openai.com/v1/realtime?model=gpt-realtime&temperature=${TEMPERATURE}`, {
+        const openAiWs = new WebSocket(buildRealtimeUrl(DEFAULT_CONFIG), {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
             }
@@ -83,19 +82,7 @@ fastify.register(async (fastify) => {
 
         // Control initial session with OpenAI
         const initializeSession = () => {
-            const sessionUpdate = {
-                type: 'session.update',
-                session: {
-                    type: 'realtime',
-                    model: "gpt-realtime",
-                    output_modalities: ["audio"],
-                    audio: {
-                        input: { format: { type: 'audio/pcmu' }, turn_detection: { type: "server_vad" } },
-                        output: { format: { type: 'audio/pcmu' }, voice: VOICE },
-                    },
-                    instructions: SYSTEM_MESSAGE,
-                },
-            };
+            const sessionUpdate = buildSessionUpdate(DEFAULT_CONFIG);
 
             console.log('Sending session update:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
@@ -114,7 +101,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Greet the user with "Hello there! I am an AI voice assistant powered by Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or anything you can imagine. How can I help you?"'
+                            text: DEFAULT_CONFIG.greetingText
                         }
                     ]
                 }
