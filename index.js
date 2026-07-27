@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate } from './config.js';
+import { resolveConfig, storeCallConfig, takeCallConfig } from './configResolver.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -48,7 +49,11 @@ fastify.get('/', async (request, reply) => {
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', async (request, reply) => {
-    const config = DEFAULT_CONFIG;
+    const params = { ...request.query, ...request.body };
+    const config = await resolveConfig({ from: params.From, to: params.To, direction: 'inbound' });
+    storeCallConfig(params.CallSid, config);
+    console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'}`);
+
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
                               <Say voice="${config.introVoice}">${config.introMessage}</Say>
@@ -73,22 +78,17 @@ fastify.register(async (fastify) => {
         let lastAssistantItem = null;
         let markQueue = [];
         let responseStartTimestampTwilio = null;
-
-        const openAiWs = new WebSocket(buildRealtimeUrl(DEFAULT_CONFIG), {
-            headers: {
-                Authorization: `Bearer ${OPENAI_API_KEY}`,
-            }
-        });
+        let config = DEFAULT_CONFIG; // replaced by the per-call config on 'start'
+        let openAiWs = null; // created on 'start', once the CallSid identifies the call
 
         // Control initial session with OpenAI
         const initializeSession = () => {
-            const sessionUpdate = buildSessionUpdate(DEFAULT_CONFIG);
+            const sessionUpdate = buildSessionUpdate(config);
 
             console.log('Sending session update:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
 
-            // Uncomment the following line to have AI speak first:
-            // sendInitialConversationItem();
+            if (config.aiSpeaksFirst) sendInitialConversationItem();
         };
 
         // Send initial conversation item if AI talks first
@@ -101,7 +101,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: DEFAULT_CONFIG.greetingText
+                            text: config.greetingText
                         }
                     ]
                 }
@@ -155,13 +155,13 @@ fastify.register(async (fastify) => {
         };
 
         // Open event for OpenAI WebSocket
-        openAiWs.on('open', () => {
+        const handleOpenAiOpen = () => {
             console.log('Connected to the OpenAI Realtime API');
             setTimeout(initializeSession, 100);
-        });
+        };
 
         // Listen for messages from the OpenAI WebSocket (and send to Twilio if necessary)
-        openAiWs.on('message', (data) => {
+        const handleOpenAiMessage = (data) => {
             try {
                 const response = JSON.parse(data);
 
@@ -196,7 +196,7 @@ fastify.register(async (fastify) => {
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
             }
-        });
+        };
 
         // Handle incoming messages from Twilio
         connection.on('message', (message) => {
@@ -207,7 +207,7 @@ fastify.register(async (fastify) => {
                     case 'media':
                         latestMediaTimestamp = data.media.timestamp;
                         if (SHOW_TIMING_MATH) console.log(`Received media message with timestamp: ${latestMediaTimestamp}ms`);
-                        if (openAiWs.readyState === WebSocket.OPEN) {
+                        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
                             const audioAppend = {
                                 type: 'input_audio_buffer.append',
                                 audio: data.media.payload
@@ -217,11 +217,17 @@ fastify.register(async (fastify) => {
                         break;
                     case 'start':
                         streamSid = data.start.streamSid;
-                        console.log('Incoming stream has started', streamSid);
+                        console.log('Incoming stream has started', streamSid, data.start.callSid || '(no callSid)');
+
+                        // Pick up the config stored by the TwiML webhook for this
+                        // CallSid; streams without one (tests) keep the defaults.
+                        config = takeCallConfig(data.start.callSid) || config;
 
                         // Reset start and media timestamp on a new stream
-                        responseStartTimestampTwilio = null; 
+                        responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
+
+                        if (!openAiWs) connectToOpenAi();
                         break;
                     case 'mark':
                         if (markQueue.length > 0) {
@@ -239,18 +245,33 @@ fastify.register(async (fastify) => {
 
         // Handle connection close
         connection.on('close', () => {
-            if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
             console.log('Client disconnected.');
         });
 
         // Handle WebSocket close and errors
-        openAiWs.on('close', () => {
+        const handleOpenAiClose = () => {
             console.log('Disconnected from the OpenAI Realtime API');
-        });
+        };
 
-        openAiWs.on('error', (error) => {
+        const handleOpenAiError = (error) => {
             console.error('Error in the OpenAI WebSocket:', error);
-        });
+        };
+
+        // Create the OpenAI WebSocket for this call. Deferred until the Twilio
+        // 'start' event so the per-call config (looked up by CallSid) is known.
+        const connectToOpenAi = () => {
+            openAiWs = new WebSocket(buildRealtimeUrl(config), {
+                headers: {
+                    Authorization: `Bearer ${OPENAI_API_KEY}`,
+                }
+            });
+
+            openAiWs.on('open', handleOpenAiOpen);
+            openAiWs.on('message', handleOpenAiMessage);
+            openAiWs.on('close', handleOpenAiClose);
+            openAiWs.on('error', handleOpenAiError);
+        };
     });
 });
 

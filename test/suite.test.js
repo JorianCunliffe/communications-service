@@ -141,6 +141,39 @@ describe('WebSocket – /media-stream', () => {
         )
     );
 
+    test('Server stays open when "start" carries a callSid with no stored config (default fallback)', () =>
+        wsPromise(
+            `${WS_BASE}/media-stream`,
+            {},
+            (ws, done) => {
+                ws.on('open', () => {
+                    ws.send(JSON.stringify({
+                        event: 'start',
+                        start: {
+                            streamSid: 'test-stream-sid-004',
+                            callSid: 'CAtest00000000000000000000000004',
+                        },
+                    }));
+
+                    setTimeout(() => {
+                        assert.equal(
+                            ws.readyState,
+                            WebSocket.OPEN,
+                            'Connection should remain open when callSid has no stored config'
+                        );
+                        done();
+                    }, 500);
+                });
+
+                ws.on('close', (code) => {
+                    if (code !== 1000 && code !== 1005 && code !== undefined) {
+                        done(new Error(`Server closed unexpectedly with code ${code}`));
+                    }
+                });
+            }
+        )
+    );
+
     test('Server stays open after receiving Twilio "media" event', () =>
         wsPromise(
             `${WS_BASE}/media-stream`,
