@@ -63,8 +63,14 @@ export function buildTwiml(config, host, { includeIntro = true } = {}) {
 }
 
 // WebSocket URL for the OpenAI Realtime API.
+//
+// Reasoning models (gpt-realtime-2 and later) steer with reasoning.effort in
+// session.update rather than temperature, and reasoning models elsewhere in the
+// API reject temperature outright. Sending it would fail the connection and
+// kill the call, so it is omitted whenever effort is set.
 export function buildRealtimeUrl(config) {
-    return `wss://api.openai.com/v1/realtime?model=${config.model}&temperature=${config.temperature}`;
+    const url = `wss://api.openai.com/v1/realtime?model=${config.model}`;
+    return config.effort ? url : `${url}&temperature=${config.temperature}`;
 }
 
 // The session.update event sent after the OpenAI WebSocket opens.
