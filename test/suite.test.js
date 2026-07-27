@@ -280,7 +280,59 @@ describe('WebSocket – /media-stream', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. OpenAI Realtime API: direct connectivity
+// 4. HTTP: /outbound-call guard rails
+//
+// These assert only that the endpoint refuses bad input — no call is placed.
+// ---------------------------------------------------------------------------
+describe('HTTP – /outbound-call guard rails', () => {
+    const validBody = { to: '+15551230000', from: '+15551239999' };
+
+    const postOutbound = (body, headers = {}) =>
+        fetch(`${BASE_URL}/outbound-call`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...headers },
+            body: JSON.stringify(body),
+        });
+
+    test('rejects a request with no API key', async () => {
+        const res = await postOutbound(validBody);
+        assert.ok(
+            res.status === 401 || res.status === 503,
+            `Expected 401 (key set) or 503 (outbound not configured), got ${res.status}`
+        );
+    });
+
+    test('rejects an incorrect API key', async () => {
+        const res = await postOutbound(validBody, { 'x-api-key': 'definitely-not-the-key' });
+        assert.ok(
+            res.status === 401 || res.status === 503,
+            `Expected 401 or 503, got ${res.status}`
+        );
+    });
+
+    test('never places a call for an unauthenticated request', async () => {
+        const res = await postOutbound(validBody, { 'x-api-key': 'definitely-not-the-key' });
+        assert.notEqual(res.status, 201, 'Unauthenticated request must not create a call');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 5. HTTP: /health
+// ---------------------------------------------------------------------------
+describe('HTTP – /health', () => {
+    test('GET /health reports status and feature wiring', async () => {
+        const res = await fetch(`${BASE_URL}/health`);
+        assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
+
+        const body = await res.json();
+        assert.equal(body.status, 'ok');
+        assert.equal(typeof body.supabaseConfig, 'boolean', 'supabaseConfig should be a boolean');
+        assert.equal(typeof body.outboundCalls, 'boolean', 'outboundCalls should be a boolean');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 6. OpenAI Realtime API: direct connectivity
 // ---------------------------------------------------------------------------
 describe('OpenAI Realtime API – connectivity', () => {
     test('OPENAI_API_KEY environment variable is set', () => {

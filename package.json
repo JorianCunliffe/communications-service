@@ -16,6 +16,7 @@
     "@supabase/supabase-js": "^2.110.8",
     "dotenv": "^16.4.5",
     "fastify": "^5.0.0",
+    "twilio": "^6.0.2",
     "ws": "^8.18.0"
   }
 }

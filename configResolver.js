@@ -154,6 +154,13 @@ export function takeCallConfig(callSid) {
     return entry.config;
 }
 
+// Read without consuming — for routes that run before the media stream claims
+// the config (the outbound answer webhook).
+export function peekCallConfig(callSid) {
+    const entry = callSid ? callConfigs.get(callSid) : undefined;
+    return entry ? entry.config : null;
+}
+
 function sweepExpired() {
     const cutoff = Date.now() - TTL_MS;
     for (const [sid, entry] of callConfigs) {

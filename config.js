@@ -32,6 +32,36 @@ export const DEFAULT_CONFIG = {
     aiSpeaksFirst: false,
 };
 
+// Escape text before interpolating it into TwiML. Config values come from the
+// database and from API request overrides, so an unescaped '&' or '<' would
+// produce invalid XML and Twilio would fail the call.
+export function escapeXml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+// TwiML that plays the intro lines (optional) then bridges the call into the
+// media stream. Shared by the inbound and outbound answer routes.
+export function buildTwiml(config, host, { includeIntro = true } = {}) {
+    const intro = includeIntro
+        ? `<Say voice="${escapeXml(config.introVoice)}">${escapeXml(config.introMessage)}</Say>
+                              <Pause length="1"/>
+                              <Say voice="${escapeXml(config.introVoice)}">${escapeXml(config.introMessage2)}</Say>
+                              `
+        : '';
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+                          <Response>
+                              ${intro}<Connect>
+                                  <Stream url="wss://${escapeXml(host)}/media-stream" />
+                              </Connect>
+                          </Response>`;
+}
+
 // WebSocket URL for the OpenAI Realtime API.
 export function buildRealtimeUrl(config) {
     return `wss://api.openai.com/v1/realtime?model=${config.model}&temperature=${config.temperature}`;

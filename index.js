@@ -3,8 +3,10 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
-import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate } from './config.js';
-import { resolveConfig, storeCallConfig, takeCallConfig } from './configResolver.js';
+import twilio from 'twilio';
+import { timingSafeEqual } from 'node:crypto';
+import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
+import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig } from './configResolver.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -46,6 +48,15 @@ fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server is running!' });
 });
 
+// Health check: reports which optional features are wired up.
+fastify.get('/health', async (request, reply) => {
+    reply.send({
+        status: 'ok',
+        supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
+        outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
+    });
+});
+
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', async (request, reply) => {
@@ -54,17 +65,100 @@ fastify.all('/incoming-call', async (request, reply) => {
     storeCallConfig(params.CallSid, config);
     console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'}`);
 
-    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
-                          <Response>
-                              <Say voice="${config.introVoice}">${config.introMessage}</Say>
-                              <Pause length="1"/>
-                              <Say voice="${config.introVoice}">${config.introMessage2}</Say>
-                              <Connect>
-                                  <Stream url="wss://${request.headers.host}/media-stream" />
-                              </Connect>
-                          </Response>`;
+    reply.type('text/xml').send(buildTwiml(config, request.headers.host));
+});
 
-    reply.type('text/xml').send(twimlResponse);
+// --- Outbound calls --------------------------------------------------------
+
+// Fields a caller of /outbound-call may override per request.
+const OVERRIDABLE_FIELDS = [
+    'model', 'effort', 'voice', 'temperature', 'systemMessage',
+    'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst',
+];
+
+const E164 = /^\+[1-9]\d{1,14}$/;
+
+// Fails closed: without API_KEY set, the endpoint stays disabled rather than
+// letting anyone place calls on this Twilio account.
+function isAuthorized(request) {
+    const expected = process.env.API_KEY;
+    if (!expected) return false;
+
+    const provided = request.headers['x-api-key'];
+    if (typeof provided !== 'string') return false;
+
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+
+fastify.post('/outbound-call', async (request, reply) => {
+    if (!process.env.API_KEY) {
+        console.warn('Rejected /outbound-call: API_KEY is not configured');
+        return reply.code(503).send({ error: 'Outbound calling is not configured' });
+    }
+    if (!isAuthorized(request)) {
+        return reply.code(401).send({ error: 'Invalid or missing X-API-Key' });
+    }
+
+    const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, PUBLIC_URL } = process.env;
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !PUBLIC_URL) {
+        console.error('Outbound call rejected: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN or PUBLIC_URL is missing');
+        return reply.code(503).send({ error: 'Outbound calling is not configured' });
+    }
+
+    const { to, from, overrides } = request.body || {};
+    if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 number, e.g. +447700900123' });
+    if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 number you own on Twilio' });
+
+    if (overrides && typeof overrides === 'object') {
+        const unknown = Object.keys(overrides).filter((key) => !OVERRIDABLE_FIELDS.includes(key));
+        if (unknown.length > 0) {
+            return reply.code(400).send({ error: `Unknown override field(s): ${unknown.join(', ')}` });
+        }
+    }
+
+    // Outbound config is keyed on the number we are calling from.
+    const resolved = await resolveConfig({ from, direction: 'outbound' });
+    const config = { ...resolved, ...(overrides || {}) };
+
+    try {
+        const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+        const call = await client.calls.create({
+            to,
+            from,
+            url: `${PUBLIC_URL.replace(/\/$/, '')}/outbound-answer`,
+        });
+
+        // The media stream finds this via the same CallSid on its 'start' event.
+        storeCallConfig(call.sid, config);
+        console.log(`Outbound call ${call.sid} to ${to} from ${from}`);
+
+        return reply.code(201).send({ callSid: call.sid, to, from, status: call.status });
+    } catch (error) {
+        console.error('Failed to place outbound call:', error.message);
+        return reply.code(502).send({ error: 'Failed to place call', detail: error.message });
+    }
+});
+
+// Twilio fetches this once the callee answers.
+fastify.all('/outbound-answer', async (request, reply) => {
+    const params = { ...request.query, ...request.body };
+
+    // Peek, don't consume: the media stream still needs this config when its
+    // 'start' event arrives for the same CallSid.
+    let config = peekCallConfig(params.CallSid);
+    if (!config) {
+        // Only if /outbound-call somehow didn't store one — re-resolve and
+        // store so the media stream gets the same config (minus overrides).
+        config = await resolveConfig({ from: params.From, direction: 'outbound' });
+        storeCallConfig(params.CallSid, config);
+    }
+
+    console.log(`Outbound call ${params.CallSid || '(no CallSid)'} answered by ${params.To || 'unknown'}`);
+
+    // No "please wait" intro: the callee picked up expecting us to speak.
+    reply.type('text/xml').send(buildTwiml(config, request.headers.host, { includeIntro: false }));
 });
 
 // WebSocket route for media-stream
