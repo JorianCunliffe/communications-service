@@ -10,7 +10,7 @@
 // path here returns DEFAULT_CONFIG.
 
 import { createClient } from '@supabase/supabase-js';
-import { DEFAULT_CONFIG } from './config.js';
+import { DEFAULT_CONFIG, personaliseConfig } from './config.js';
 
 const LOOKUP_TIMEOUT_MS = 2500;
 const WARM_UP_TIMEOUT_MS = 10000;
@@ -104,6 +104,43 @@ async function fetchRows(client, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
     }
 }
 
+// phoneNumber -> { name, fetchedAt }
+const contactCache = new Map();
+
+// Looks up the caller's name so {{name}} can be filled in. Never throws: an
+// unknown name is cosmetic, and must not cost anyone their call. Note that
+// public.contacts has RLS enabled, so this needs the service-role key —
+// with the anon key it simply returns null and templates fall back to "there".
+async function fetchContactName(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) {
+    const entry = contactCache.get(phoneNumber);
+    if (entry && Date.now() - entry.fetchedAt < ROW_CACHE_TTL_MS) return entry.name;
+
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`contact lookup timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+
+    try {
+        const query = client
+            .from('contacts')
+            .select('name')
+            .eq('phone_number', phoneNumber)
+            .maybeSingle();
+
+        const { data, error } = await Promise.race([query, timeout]);
+        if (error) throw new Error(error.message);
+
+        const name = data?.name?.trim() || null;
+        contactCache.set(phoneNumber, { name, fetchedAt: Date.now() });
+        return name;
+    } catch (error) {
+        console.warn(`Caller name lookup failed for ${phoneNumber}: ${error.message}`);
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Prime the connection at boot. The first query of a process pays for DNS, the
 // TLS handshake and client setup — measured at ~1.8s versus ~0.3s once warm,
 // which is enough to blow the per-call timeout and silently fall back to
@@ -134,24 +171,37 @@ export async function resolveConfig({ from, to, direction }) {
     const candidates = (direction === 'outbound' ? [from] : [from, to]).filter(Boolean);
     if (candidates.length === 0) return DEFAULT_CONFIG;
 
+    let config = DEFAULT_CONFIG;
+    let callerName = null;
+
     try {
         const uncached = candidates.filter((phoneNumber) => cached(phoneNumber) === undefined);
-        const fetched = uncached.length > 0 ? await fetchRows(client, uncached) : new Map();
+
+        // Both lookups run together so the caller's name costs no extra latency.
+        const [fetched, name] = await Promise.all([
+            uncached.length > 0 ? fetchRows(client, uncached) : new Map(),
+            from ? fetchContactName(client, from) : null,
+        ]);
+        callerName = name;
 
         // Candidate order is the precedence order.
+        let matched = false;
         for (const phoneNumber of candidates) {
             const row = fetched.get(phoneNumber) ?? cached(phoneNumber);
             if (row) {
-                console.log(`Config matched ${phoneNumber} (${row.name || 'unnamed'})`);
-                return rowToConfig(row);
+                console.log(`Config matched ${phoneNumber} (${row.name || 'unnamed'})${callerName ? `, caller is ${callerName}` : ''}`);
+                config = rowToConfig(row);
+                matched = true;
+                break;
             }
         }
-        console.log(`No config row for ${candidates.join(' or ')} — using defaults`);
+        if (!matched) console.log(`No config row for ${candidates.join(' or ')} — using defaults`);
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
+        return DEFAULT_CONFIG;
     }
 
-    return DEFAULT_CONFIG;
+    return personaliseConfig(config, callerName);
 }
 
 // --- CallSid → config handoff ----------------------------------------------

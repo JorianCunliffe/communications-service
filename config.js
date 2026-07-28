@@ -32,6 +32,40 @@ export const DEFAULT_CONFIG = {
     aiSpeaksFirst: false,
 };
 
+// Text fields that may contain {{name}} placeholders.
+const TEMPLATED_FIELDS = ['systemMessage', 'introMessage', 'introMessage2', 'greetingText'];
+
+const NAME_PLACEHOLDER = /\{\{\s*name\s*(?:\|([^}]*))?\}\}/gi;
+
+// Fills {{name}} with the caller's name.
+//
+// The fallback for an unknown caller has to suit the sentence it sits in:
+// "Hi {{name}}" wants "there", but "speaking with {{name}}" needs "the caller"
+// or it reads as "speaking with there". Write {{name|the caller}} to choose,
+// otherwise it falls back to "there".
+export function renderTemplate(text, callerName) {
+    return String(text ?? '').replace(NAME_PLACEHOLDER, (_match, fallback) =>
+        callerName || (fallback === undefined ? 'there' : fallback.trim())
+    );
+}
+
+// Applies the caller's name to a config's text fields. Returns the config
+// unchanged — same object identity — when it holds no placeholders, so configs
+// without templates stay byte-identical.
+export function personaliseConfig(config, callerName) {
+    const needsRender = TEMPLATED_FIELDS.some((field) => {
+        NAME_PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
+        return NAME_PLACEHOLDER.test(config[field] ?? '');
+    });
+    if (!needsRender) return config;
+
+    const personalised = { ...config };
+    for (const field of TEMPLATED_FIELDS) {
+        personalised[field] = renderTemplate(config[field], callerName);
+    }
+    return personalised;
+}
+
 // Escape text before interpolating it into TwiML. Config values come from the
 // database and from API request overrides, so an unescaped '&' or '<' would
 // produce invalid XML and Twilio would fail the call.

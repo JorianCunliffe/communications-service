@@ -115,6 +115,33 @@ matches nothing falls back to the defaults and the call proceeds. Rows are
 cached for 60 seconds. Setting `SUPABASE_CONFIG_ENABLED` to anything but `true`
 turns the whole feature off.
 
+### Using the caller's name
+
+Any of `call_system_prompt`, `intro_message`, `intro_message_2` and
+`call_greeting` may contain a `{{name}}` placeholder. It is filled from
+`public.contacts.name`, matched on the caller's number:
+
+```sql
+insert into public.contacts (phone_number, name) values ('+447700900123', 'Sam');
+update public.phone_configs
+   set intro_message = 'Hi {{name}}, connecting you now.'
+ where twilio_number = '+447700900123';
+```
+
+For callers with no contact row, `{{name}}` becomes "there" — fine for
+"Hi {{name}}", wrong for "speaking with {{name}}". Write `{{name|the caller}}`
+to choose the fallback per placeholder:
+
+| Template | Known caller | Unknown caller |
+|---|---|---|
+| `Hi {{name}}` | `Hi Sam` | `Hi there` |
+| `speaking with {{name\|the caller}}` | `speaking with Sam` | `speaking with the caller` |
+
+The contact lookup runs in parallel with the config lookup, so it costs no
+extra latency, and a failure only means the fallback is used — it never affects
+the call. Note `public.contacts` has RLS enabled, so this needs the
+service-role key.
+
 ### Reasoning effort
 
 `effort` applies to reasoning-capable models such as `gpt-realtime-2`
