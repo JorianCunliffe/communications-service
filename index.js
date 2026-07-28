@@ -66,6 +66,23 @@ fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server is running!' });
 });
 
+// Test console. Served from this app so its buttons are same-origin and can
+// reach the API directly. Holds no secrets: the API key is entered by the
+// operator and kept in their browser.
+const CONSOLE_HTML = (() => {
+    try {
+        return readFileSync(new URL('./console.html', import.meta.url), 'utf8');
+    } catch (error) {
+        console.warn(`Test console unavailable: ${error.message}`);
+        return null;
+    }
+})();
+
+fastify.get('/console', async (request, reply) => {
+    if (!CONSOLE_HTML) return reply.code(404).send({ error: 'Test console not available' });
+    reply.type('text/html').send(CONSOLE_HTML);
+});
+
 // Health check: reports which optional features are wired up.
 fastify.get('/health', async (request, reply) => {
     reply.send({
@@ -173,6 +190,42 @@ fastify.post('/outbound-call', async (request, reply) => {
     } catch (error) {
         console.error('Failed to place outbound call:', error.message);
         return reply.code(502).send({ error: 'Failed to place call', detail: error.message });
+    }
+});
+
+fastify.post('/sms', async (request, reply) => {
+    if (!process.env.API_KEY) {
+        console.warn('Rejected /sms: API_KEY is not configured');
+        return reply.code(503).send({ error: 'Messaging is not configured' });
+    }
+    if (!isAuthorized(request)) {
+        return reply.code(401).send({ error: 'Invalid or missing X-API-Key' });
+    }
+
+    const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+        console.error('SMS rejected: TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is missing');
+        return reply.code(503).send({ error: 'Messaging is not configured' });
+    }
+
+    const { to, from, body } = request.body || {};
+    if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 number, e.g. +447700900123' });
+    if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 number you own on Twilio' });
+    if (typeof body !== 'string' || body.trim() === '') return reply.code(400).send({ error: '"body" must be a non-empty message' });
+    if (body.length > 1600) return reply.code(400).send({ error: '"body" must be 1600 characters or fewer' });
+
+    ensureContact(to);
+    warnIfSuppressed(to, 'SMS');
+
+    try {
+        const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+        const message = await client.messages.create({ to, from, body });
+
+        console.log(`SMS ${message.sid} to ${to} from ${from}`);
+        return reply.code(201).send({ messageSid: message.sid, to, from, status: message.status });
+    } catch (error) {
+        console.error('Failed to send SMS:', error.message);
+        return reply.code(502).send({ error: 'Failed to send message', detail: error.message });
     }
 });
 

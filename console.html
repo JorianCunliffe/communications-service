@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Assistant test console</title>
+<style>
+  :root {
+    --paper:#F4F5F7; --surface:#fff; --surface-2:#EAEDF1; --line:#D5DAE1;
+    --text:#1B222C; --dim:#5A6675; --accent:#A85F2C; --accent-soft:#F0E2D6;
+    --good:#2F7D5C; --good-soft:#DDEDE5; --bad:#A3402F; --bad-soft:#F6E0DC;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#0E1218; --surface:#161C24; --surface-2:#1D242E; --line:#2A333F;
+      --text:#DCE3EB; --dim:#8794A5; --accent:#D08A52; --accent-soft:#33241A;
+      --good:#5FB78F; --good-soft:#16281F; --bad:#E08573; --bad-soft:#2C1A16;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--paper); color:var(--text);
+    font-family:var(--sans); font-size:15px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:640px; margin:0 auto; padding:32px 20px 72px; }
+  h1 { font-size:22px; margin:0 0 4px; letter-spacing:-.01em; }
+  .sub { color:var(--dim); margin:0 0 24px; font-size:14px; }
+  .card {
+    background:var(--surface); border:1px solid var(--line); border-radius:6px;
+    padding:18px; margin-bottom:16px;
+  }
+  h2 {
+    font-family:var(--mono); font-size:11px; letter-spacing:.11em; text-transform:uppercase;
+    color:var(--dim); margin:0 0 14px; font-weight:600;
+  }
+  label { display:block; font-size:13px; color:var(--dim); margin:0 0 5px; }
+  .field { margin-bottom:13px; }
+  input, textarea {
+    width:100%; padding:9px 11px; font-family:var(--mono); font-size:14px;
+    background:var(--paper); color:var(--text);
+    border:1px solid var(--line); border-radius:4px;
+  }
+  textarea { font-family:var(--sans); resize:vertical; min-height:72px; }
+  input:focus, textarea:focus { outline:2px solid var(--accent); outline-offset:1px; border-color:transparent; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .row > * { flex:1 1 180px; }
+  button {
+    font:inherit; font-weight:600; padding:10px 18px; border-radius:4px; cursor:pointer;
+    border:1px solid var(--accent); background:var(--accent); color:#fff;
+  }
+  button.ghost { background:transparent; color:var(--accent); }
+  button:hover:not(:disabled) { filter:brightness(1.08); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button:focus-visible { outline:2px solid var(--text); outline-offset:2px; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:4px; }
+  .hint { font-size:12.5px; color:var(--dim); margin:9px 0 0; }
+  .out {
+    font-family:var(--mono); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+    padding:12px 14px; border-radius:4px; margin-top:14px;
+    background:var(--surface-2); border-left:3px solid var(--line);
+  }
+  .out.good { background:var(--good-soft); border-left-color:var(--good); }
+  .out.bad  { background:var(--bad-soft);  border-left-color:var(--bad); }
+  .out:empty { display:none; }
+  .status { display:flex; gap:8px; flex-wrap:wrap; font-family:var(--mono); font-size:11px; margin-bottom:20px; }
+  .chip {
+    padding:3px 9px; border-radius:20px; border:1px solid var(--line);
+    color:var(--dim); background:var(--surface);
+  }
+  .chip.on  { color:var(--good); border-color:var(--good); background:var(--good-soft); }
+  .chip.off { color:var(--bad);  border-color:var(--bad);  background:var(--bad-soft); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Assistant test console</h1>
+  <p class="sub">Place a call or send a message through this server. Nothing here is stored on the server &mdash; your key stays in this browser.</p>
+
+  <div class="status" id="status"><span class="chip">checking&hellip;</span></div>
+
+  <div class="card">
+    <h2>Credentials</h2>
+    <div class="field">
+      <label for="key">API key <span style="opacity:.7">(X-API-Key, saved in this browser only)</span></label>
+      <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="paste your API_KEY">
+    </div>
+    <div class="field">
+      <label for="from">From &mdash; your Twilio number</label>
+      <input id="from" type="tel" inputmode="tel" spellcheck="false" placeholder="+61468271148">
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Place a call</h2>
+    <div class="field">
+      <label for="callTo">Number to call</label>
+      <input id="callTo" type="tel" inputmode="tel" spellcheck="false" placeholder="+61415828522">
+    </div>
+    <div class="actions">
+      <button id="callBtn" type="button">Call this number</button>
+    </div>
+    <p class="hint">The assistant opens the conversation in its configured voice.</p>
+    <div class="out" id="callOut" role="status" aria-live="polite"></div>
+  </div>
+
+  <div class="card">
+    <h2>Send a message</h2>
+    <div class="field">
+      <label for="smsTo">Number to text</label>
+      <input id="smsTo" type="tel" inputmode="tel" spellcheck="false" placeholder="+61415828522">
+    </div>
+    <div class="field">
+      <label for="smsBody">Message</label>
+      <textarea id="smsBody" maxlength="1600" placeholder="Type the message to send"></textarea>
+    </div>
+    <div class="actions">
+      <button id="smsBtn" type="button" class="ghost">Send message</button>
+    </div>
+    <p class="hint">Sends immediately via Twilio. Not yet stored in the database.</p>
+    <div class="out" id="smsOut" role="status" aria-live="polite"></div>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const STORE = 'assistant-console';
+
+  // Remember everything except the message body. The key lives in this
+  // browser's localStorage and is never sent anywhere but this server.
+  const saved = JSON.parse(localStorage.getItem(STORE) || '{}');
+  for (const id of ['key', 'from', 'callTo', 'smsTo']) {
+    if (saved[id]) $(id).value = saved[id];
+    $(id).addEventListener('input', () => {
+      const next = JSON.parse(localStorage.getItem(STORE) || '{}');
+      next[id] = $(id).value.trim();
+      localStorage.setItem(STORE, JSON.stringify(next));
+    });
+  }
+
+  const E164 = /^\+[1-9]\d{1,14}$/;
+
+  function show(el, ok, text) {
+    el.className = 'out ' + (ok ? 'good' : 'bad');
+    el.textContent = text;
+  }
+
+  async function post(path, payload, out, button, label) {
+    const key = $('key').value.trim();
+    if (!key) return show(out, false, 'Enter your API key first.');
+
+    button.disabled = true;
+    const original = button.textContent;
+    button.textContent = label;
+    show(out, true, 'Working…');
+
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+        body: JSON.stringify(payload),
+      });
+
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+
+      if (res.ok) {
+        show(out, true, res.status + ' ' + JSON.stringify(data, null, 2));
+      } else if (res.status === 401) {
+        show(out, false, '401 — that API key was rejected. Check it matches API_KEY on the server.');
+      } else if (res.status === 503) {
+        show(out, false, '503 — the server is missing Twilio credentials or API_KEY. Check /health.');
+      } else if (res.status === 404) {
+        show(out, false, '404 — this endpoint does not exist on the running deployment yet.');
+      } else {
+        show(out, false, res.status + ' ' + JSON.stringify(data, null, 2));
+      }
+    } catch (error) {
+      show(out, false, 'Could not reach the server: ' + error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+
+  $('callBtn').addEventListener('click', () => {
+    const to = $('callTo').value.trim();
+    const from = $('from').value.trim();
+    if (!E164.test(to))   return show($('callOut'), false, 'Number to call must be E.164, like +61415828522.');
+    if (!E164.test(from)) return show($('callOut'), false, 'Your Twilio number must be E.164, like +61468271148.');
+    post('/outbound-call', { to, from }, $('callOut'), $('callBtn'), 'Calling…');
+  });
+
+  $('smsBtn').addEventListener('click', () => {
+    const to = $('smsTo').value.trim();
+    const from = $('from').value.trim();
+    const body = $('smsBody').value.trim();
+    if (!E164.test(to))   return show($('smsOut'), false, 'Number to text must be E.164, like +61415828522.');
+    if (!E164.test(from)) return show($('smsOut'), false, 'Your Twilio number must be E.164, like +61468271148.');
+    if (!body)            return show($('smsOut'), false, 'Type a message to send.');
+    post('/sms', { to, from, body }, $('smsOut'), $('smsBtn'), 'Sending…');
+  });
+
+  // Report what the server can actually do, so a 503 is never a surprise.
+  fetch('/health')
+    .then((r) => r.json())
+    .then((h) => {
+      $('status').innerHTML = '';
+      const chip = (label, state) => {
+        const el = document.createElement('span');
+        el.className = 'chip' + (state === null ? '' : state ? ' on' : ' off');
+        el.textContent = label;
+        $('status').appendChild(el);
+      };
+      chip(h.version || 'unknown', null);
+      chip('model ' + h.model, null);
+      chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
+      chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
+    })
+    .catch(() => {
+      $('status').innerHTML = '<span class="chip off">server unreachable</span>';
+    });
+</script>
+</body>
+</html>
