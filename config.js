@@ -17,19 +17,28 @@ export const DEFAULT_CONFIG = {
     temperature: 0.8,
 
     // System prompt / instructions for the AI.
-    systemMessage: 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.',
+    systemMessage: 'You are Iris, a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.',
+
+    // Whether Twilio speaks the intro lines below before the media stream
+    // connects. Twilio's text-to-speech is a different voice from the
+    // assistant's, so leaving this off keeps one voice across the whole call.
+    // The lines are retained so it can be switched back on per number.
+    playIntro: false,
 
     // Twilio <Say> lines played before the stream connects, and their voice.
+    // Only used when playIntro is true.
     introMessage: 'Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open A I Realtime API',
     introMessage2: 'O.K. you can start talking!',
     introVoice: 'Google.en-US-Chirp3-HD-Aoede',
 
-    // Instruction sent as a user message when the AI speaks first.
-    greetingText: 'Greet the user with "Hello there! I am an AI voice assistant powered by Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or anything you can imagine. How can I help you?"',
+    // Instruction sent as a user message when the AI speaks first. Spoken in
+    // the assistant's own voice, so this is where the call's opening line
+    // belongs when playIntro is off.
+    greetingText: 'Open by saying "Iris here." then greet {{name|the caller}} by name and ask how you can help. Keep the whole greeting to one or two short sentences.',
 
     // When true, the AI greets the caller (sends greetingText + response.create)
     // instead of waiting for the caller to speak.
-    aiSpeaksFirst: false,
+    aiSpeaksFirst: true,
 };
 
 // Text fields that may contain {{name}} placeholders.
@@ -88,7 +97,7 @@ export function escapeXml(value) {
 export function buildTwiml(config, host, { includeIntro = true } = {}) {
     const INDENT = ' '.repeat(30);
 
-    const spokenLines = includeIntro
+    const spokenLines = includeIntro && config.playIntro
         ? [config.introMessage, config.introMessage2].filter((line) => String(line ?? '').trim() !== '')
         : [];
 

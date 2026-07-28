@@ -53,6 +53,7 @@ export function rowToConfig(row) {
             ? DEFAULT_CONFIG.temperature
             : Number(row.temperature), // numeric arrives as a string
         systemMessage: pick(row.call_system_prompt, DEFAULT_CONFIG.systemMessage),
+        playIntro: pick(row.play_intro, DEFAULT_CONFIG.playIntro),
         introMessage: pick(row.intro_message, DEFAULT_CONFIG.introMessage),
         introMessage2: pick(row.intro_message_2, DEFAULT_CONFIG.introMessage2),
         introVoice: pick(row.intro_voice, DEFAULT_CONFIG.introVoice),
@@ -162,14 +163,17 @@ export async function warmUp() {
 }
 
 // Resolve the config for a call. `from` is the caller, `to` the number dialled.
+// Every exit runs through personaliseConfig, including the failure paths:
+// DEFAULT_CONFIG itself contains a {{name}} placeholder, so returning it raw
+// would send the literal braces to the model or to Twilio's text-to-speech.
 export async function resolveConfig({ from, to, direction }) {
     const client = getClient();
-    if (!client) return DEFAULT_CONFIG;
+    if (!client) return personaliseConfig(DEFAULT_CONFIG, null);
 
     // Inbound: the caller's own config wins, else the line they dialled.
     // Outbound: we are the caller, so `from` is our line.
     const candidates = (direction === 'outbound' ? [from] : [from, to]).filter(Boolean);
-    if (candidates.length === 0) return DEFAULT_CONFIG;
+    if (candidates.length === 0) return personaliseConfig(DEFAULT_CONFIG, null);
 
     let config = DEFAULT_CONFIG;
     let callerName = null;
@@ -198,7 +202,7 @@ export async function resolveConfig({ from, to, direction }) {
         if (!matched) console.log(`No config row for ${candidates.join(' or ')} — using defaults`);
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
-        return DEFAULT_CONFIG;
+        return personaliseConfig(DEFAULT_CONFIG, callerName);
     }
 
     return personaliseConfig(config, callerName);

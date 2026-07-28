@@ -144,21 +144,25 @@ service-role key.
 
 ### One voice for the whole call
 
-The `<Say>` intro is spoken by Twilio's text-to-speech, which is a different
-voice from the assistant's — the caller hears two voices. To use only the
-assistant's voice, blank both intro lines and let it open the conversation:
+The `<Say>` intro is spoken by Twilio's text-to-speech, a different voice from
+the assistant's, so playing it means the caller hears two different voices.
+**`playIntro` is off by default**: no `<Say>` is emitted, `aiSpeaksFirst` is on,
+and the assistant opens the call itself in its own voice using `greetingText`:
 
-```sql
-update public.phone_configs
-   set intro_message = '', intro_message_2 = '',
-       ai_speaks_first = true,
-       call_greeting = 'Greet {{name|the caller}} by name, warmly and briefly, then ask how you can help.'
- where twilio_number = '+447700900123';
+```js
+greetingText: 'Open by saying "Iris here." then greet {{name|the caller}} by name and ask how you can help.',
 ```
 
-Blank means the empty string, not null — null falls back to the default intro.
-With no `<Say>`, the caller hears a second or so of silence while the realtime
-session opens, then the assistant speaks in its configured voice.
+The caller hears a second or so of silence while the realtime session opens,
+then the assistant speaks. The intro code and its messages are retained — set
+`play_intro = true` on a number to bring the Twilio intro back for that line:
+
+```sql
+update public.phone_configs set play_intro = true where twilio_number = '+447700900123';
+```
+
+With `playIntro` on, the original TwiML renders byte-for-byte as it always did.
+Blanking an individual intro message drops just that `<Say>` and its `<Pause>`.
 
 ### Reasoning effort
 
