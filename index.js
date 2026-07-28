@@ -8,7 +8,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
-import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp } from './configResolver.js';
+import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact } from './configResolver.js';
 import { recordCall, updateCallStatus } from './callLog.js';
 
 // Load environment variables from .env file
@@ -142,6 +142,11 @@ fastify.post('/outbound-call', async (request, reply) => {
     // Outbound config is keyed on the number we are calling from.
     const resolved = await resolveConfig({ from, direction: 'outbound' });
     const config = { ...resolved, ...(overrides || {}) };
+
+    // The callee gets a contact record so history attaches, and a note in the
+    // log if they are marked do_not_contact. Neither blocks the call.
+    ensureContact(to);
+    warnIfSuppressed(to, 'outbound call');
 
     try {
         const base = PUBLIC_URL.replace(/\/$/, '');

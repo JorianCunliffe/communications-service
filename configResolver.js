@@ -160,6 +160,22 @@ async function fetchContact(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) 
     }
 }
 
+// Notes when we are contacting someone marked do_not_contact. Deliberately
+// advisory: it records the fact and does not block the call. Fire-and-forget,
+// so it costs the outbound path nothing.
+export function warnIfSuppressed(phoneNumber, context = 'outbound') {
+    const client = getClient();
+    if (!client || !phoneNumber) return;
+
+    fetchContact(client, phoneNumber)
+        .then((contact) => {
+            if (contact?.do_not_contact) {
+                console.warn(`do_not_contact is set for ${contact.name || phoneNumber} — proceeding with ${context} anyway`);
+            }
+        })
+        .catch(() => {}); // fetchContact already logs its own failures
+}
+
 // Creates a contact for a number we have never seen, so history can attach to
 // it from the first interaction. Fire-and-forget: never awaited on the call
 // path, and a failure is logged and ignored.
