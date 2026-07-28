@@ -12,7 +12,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_CONFIG } from './config.js';
 
-const LOOKUP_TIMEOUT_MS = 1500;
+const LOOKUP_TIMEOUT_MS = 2500;
+const WARM_UP_TIMEOUT_MS = 10000;
 const ROW_CACHE_TTL_MS = 60 * 1000;
 
 // Read env on first use, not at import time: ES module imports are evaluated
@@ -76,7 +77,7 @@ function cached(phoneNumber) {
 
 // Fetches every candidate in one round trip — the caller waits on this before
 // any TwiML is returned, so a second sequential query would double the delay.
-async function fetchRows(client, phoneNumbers) {
+async function fetchRows(client, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
     const query = client
         .from('phone_configs')
         .select('*')
@@ -85,7 +86,7 @@ async function fetchRows(client, phoneNumbers) {
 
     let timer;
     const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Supabase lookup timed out after ${LOOKUP_TIMEOUT_MS}ms`)), LOOKUP_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error(`Supabase lookup timed out after ${timeoutMs}ms`)), timeoutMs);
     });
 
     try {
@@ -100,6 +101,26 @@ async function fetchRows(client, phoneNumbers) {
         return byNumber;
     } finally {
         clearTimeout(timer);
+    }
+}
+
+// Prime the connection at boot. The first query of a process pays for DNS, the
+// TLS handshake and client setup — measured at ~1.8s versus ~0.3s once warm,
+// which is enough to blow the per-call timeout and silently fall back to
+// defaults on the first call after every deploy. Runs in the background; the
+// server does not wait for it.
+export async function warmUp() {
+    const client = getClient();
+    if (!client) return;
+
+    const started = Date.now();
+    try {
+        // A number that will never match: we want the round trip, not the row.
+        await fetchRows(client, ['+00000000000'], WARM_UP_TIMEOUT_MS);
+        rowCache.delete('+00000000000');
+        console.log(`Supabase config warmed up in ${Date.now() - started}ms`);
+    } catch (error) {
+        console.warn(`Supabase config warm-up failed after ${Date.now() - started}ms (${error.message}) — the first call may fall back to defaults`);
     }
 }
 

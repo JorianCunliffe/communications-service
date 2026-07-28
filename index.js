@@ -6,7 +6,7 @@ import fastifyWs from '@fastify/websocket';
 import twilio from 'twilio';
 import { timingSafeEqual } from 'node:crypto';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
-import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig } from './configResolver.js';
+import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp } from './configResolver.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -212,7 +212,9 @@ fastify.register(async (fastify) => {
                 const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
                 if (SHOW_TIMING_MATH) console.log(`Calculating elapsed time for truncation: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
 
-                if (lastAssistantItem) {
+                // A non-positive elapsed time would truncate at or before the
+                // start of the item, which OpenAI rejects.
+                if (lastAssistantItem && elapsedTime > 0) {
                     const truncateEvent = {
                         type: 'conversation.item.truncate',
                         item_id: lastAssistantItem,
@@ -327,6 +329,16 @@ fastify.register(async (fastify) => {
                         if (markQueue.length > 0) {
                             markQueue.shift();
                         }
+
+                        // An empty queue means everything we sent has finished
+                        // playing, so the next response needs its own baseline.
+                        // Without this the baseline stays at the first response
+                        // of the call and a later interruption asks OpenAI to
+                        // truncate past the end of the item it is playing.
+                        if (markQueue.length === 0) {
+                            responseStartTimestampTwilio = null;
+                            lastAssistantItem = null;
+                        }
                         break;
                     default:
                         console.log('Received non-media event:', data.event);
@@ -375,4 +387,7 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
         process.exit(1);
     }
     console.log(`Server is listening on port ${PORT}`);
+
+    // Don't make the first caller pay for the cold connection.
+    warmUp();
 });
