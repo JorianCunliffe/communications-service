@@ -5,6 +5,8 @@ import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 import twilio from 'twilio';
 import { timingSafeEqual } from 'node:crypto';
+import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp } from './configResolver.js';
 
@@ -26,6 +28,21 @@ fastify.register(fastifyWs);
 
 // Constants (per-call tunables live in config.js)
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
+
+// The commit this process is running, so a deployment can be identified without
+// guessing. Resolved once at boot; deployments without a .git directory fall
+// back to the package version.
+const VERSION = (() => {
+    try {
+        return execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    } catch (_) {
+        try {
+            return `v${JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version}`;
+        } catch (__) {
+            return 'unknown';
+        }
+    }
+})();
 
 // List of Event Types to log to the console. See the OpenAI Realtime API Documentation: https://platform.openai.com/docs/api-reference/realtime
 const LOG_EVENT_TYPES = [
@@ -52,6 +69,9 @@ fastify.get('/', async (request, reply) => {
 fastify.get('/health', async (request, reply) => {
     reply.send({
         status: 'ok',
+        version: VERSION,
+        model: DEFAULT_CONFIG.model,
+        playIntro: DEFAULT_CONFIG.playIntro,
         supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
     });
