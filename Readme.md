@@ -194,8 +194,19 @@ curl -X POST https://your-app.example.com/outbound-call \
 fetches `/outbound-answer`, which skips the "please wait" intro since the callee
 has just picked up.
 
-`GET /health` reports whether the Supabase config and outbound calling are
-wired up.
+Twilio also reports call progress to `/call-status` (ringing, answered,
+completed, failed) and each outbound call is recorded in `public.calls` with its
+status and duration. Both are best-effort: a database that is slow or
+unreachable is logged and ignored rather than affecting the call. Note
+`public.calls` has RLS enabled, so recording needs the service-role key.
+
+`GET /health` reports the running commit plus whether the Supabase config and
+outbound calling are wired up:
+
+```json
+{"status":"ok","version":"aaf24bd","model":"gpt-realtime",
+ "playIntro":false,"supabaseConfig":true,"outboundCalls":false}
+```
 
 ## Special features
 

@@ -9,6 +9,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp } from './configResolver.js';
+import { recordCall, updateCallStatus } from './callLog.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -143,16 +144,25 @@ fastify.post('/outbound-call', async (request, reply) => {
     const config = { ...resolved, ...(overrides || {}) };
 
     try {
+        const base = PUBLIC_URL.replace(/\/$/, '');
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
         const call = await client.calls.create({
             to,
             from,
-            url: `${PUBLIC_URL.replace(/\/$/, '')}/outbound-answer`,
+            url: `${base}/outbound-answer`,
+            // Without this we never learn whether the callee answered, was busy,
+            // or let it ring out — the call is otherwise fire-and-forget.
+            statusCallback: `${base}/call-status`,
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+            statusCallbackMethod: 'POST',
         });
 
         // The media stream finds this via the same CallSid on its 'start' event.
         storeCallConfig(call.sid, config);
         console.log(`Outbound call ${call.sid} to ${to} from ${from}`);
+
+        // Not awaited: a slow database write must not delay the response.
+        recordCall({ callSid: call.sid, otherParty: to, direction: 'outbound', config, metadata: { from } });
 
         return reply.code(201).send({ callSid: call.sid, to, from, status: call.status });
     } catch (error) {
@@ -179,6 +189,23 @@ fastify.all('/outbound-answer', async (request, reply) => {
 
     // No "please wait" intro: the callee picked up expecting us to speak.
     reply.type('text/xml').send(buildTwiml(config, request.headers.host, { includeIntro: false }));
+});
+
+// Twilio reports call progress here. Always answer 200 — a non-2xx makes Twilio
+// retry, and nothing here is worth retrying.
+fastify.all('/call-status', async (request, reply) => {
+    const params = { ...request.query, ...request.body };
+    const duration = Number.parseInt(params.CallDuration, 10);
+
+    console.log(`Call ${params.CallSid || '(no CallSid)'} is ${params.CallStatus || 'unknown'}${Number.isFinite(duration) ? ` after ${duration}s` : ''}`);
+
+    await updateCallStatus({
+        callSid: params.CallSid,
+        status: params.CallStatus,
+        durationSeconds: Number.isFinite(duration) ? duration : undefined,
+    });
+
+    reply.code(204).send();
 });
 
 // WebSocket route for media-stream
