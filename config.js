@@ -78,19 +78,27 @@ export function escapeXml(value) {
         .replace(/'/g, '&apos;');
 }
 
-// TwiML that plays the intro lines (optional) then bridges the call into the
-// media stream. Shared by the inbound and outbound answer routes.
+// TwiML that plays the intro lines then bridges the call into the media stream.
+// Shared by the inbound and outbound answer routes.
+//
+// The intro is spoken by Twilio's text-to-speech, which is a different voice
+// from the assistant's. Blank both intro messages to skip it entirely so the
+// caller only ever hears the assistant — pair that with aiSpeaksFirst so the
+// assistant opens the conversation itself.
 export function buildTwiml(config, host, { includeIntro = true } = {}) {
-    const intro = includeIntro
-        ? `<Say voice="${escapeXml(config.introVoice)}">${escapeXml(config.introMessage)}</Say>
-                              <Pause length="1"/>
-                              <Say voice="${escapeXml(config.introVoice)}">${escapeXml(config.introMessage2)}</Say>
-                              `
-        : '';
+    const INDENT = ' '.repeat(30);
+
+    const spokenLines = includeIntro
+        ? [config.introMessage, config.introMessage2].filter((line) => String(line ?? '').trim() !== '')
+        : [];
+
+    const intro = spokenLines
+        .map((line) => `<Say voice="${escapeXml(config.introVoice)}">${escapeXml(line)}</Say>`)
+        .join(`\n${INDENT}<Pause length="1"/>\n${INDENT}`);
 
     return `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              ${intro}<Connect>
+                              ${intro ? `${intro}\n${INDENT}` : ''}<Connect>
                                   <Stream url="wss://${escapeXml(host)}/media-stream" />
                               </Connect>
                           </Response>`;

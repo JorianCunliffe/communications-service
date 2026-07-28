@@ -142,6 +142,24 @@ extra latency, and a failure only means the fallback is used — it never affect
 the call. Note `public.contacts` has RLS enabled, so this needs the
 service-role key.
 
+### One voice for the whole call
+
+The `<Say>` intro is spoken by Twilio's text-to-speech, which is a different
+voice from the assistant's — the caller hears two voices. To use only the
+assistant's voice, blank both intro lines and let it open the conversation:
+
+```sql
+update public.phone_configs
+   set intro_message = '', intro_message_2 = '',
+       ai_speaks_first = true,
+       call_greeting = 'Greet {{name|the caller}} by name, warmly and briefly, then ask how you can help.'
+ where twilio_number = '+447700900123';
+```
+
+Blank means the empty string, not null — null falls back to the default intro.
+With no `<Say>`, the caller hears a second or so of silence while the realtime
+session opens, then the assistant speaks in its configured voice.
+
 ### Reasoning effort
 
 `effort` applies to reasoning-capable models such as `gpt-realtime-2`
