@@ -40,25 +40,39 @@ function getClient() {
     return supabase;
 }
 
-// Maps a phone_configs row onto DEFAULT_CONFIG. Null/undefined columns fall
-// back field by field, so a row only needs to set what it wants to change.
-export function rowToConfig(row) {
-    const pick = (value, fallback) => (value === null || value === undefined ? fallback : value);
+// Maps a settings row onto DEFAULT_CONFIG. Works for contact_config and
+// phone_configs alike — they mirror each other's columns.
+//
+// Within a row, a direction-specific column beats the generic call_* one, which
+// in turn beats the app default. So outbound_call_prompt wins on an outbound
+// call, otherwise call_system_prompt, otherwise DEFAULT_CONFIG.systemMessage.
+export function rowToConfig(row, direction = 'inbound') {
+    const set = (value) => value !== null && value !== undefined;
+    // Falls through to the last value — the app default — even when that
+    // default is itself null, so an unset effort stays null and not undefined.
+    const pick = (...values) => {
+        const found = values.find(set);
+        return found === undefined ? values[values.length - 1] : found;
+    };
+    const outbound = direction === 'outbound';
+
+    const prompt = outbound ? row.outbound_call_prompt : row.inbound_call_prompt;
+    const greeting = outbound ? row.outbound_call_greeting : row.inbound_call_greeting;
+    const speaksFirst = outbound ? row.outbound_ai_speaks_first : row.inbound_ai_speaks_first;
 
     return {
         model: pick(row.model, DEFAULT_CONFIG.model),
         effort: pick(row.effort, DEFAULT_CONFIG.effort),
         voice: pick(row.call_voice, DEFAULT_CONFIG.voice),
-        temperature: row.temperature === null || row.temperature === undefined
-            ? DEFAULT_CONFIG.temperature
-            : Number(row.temperature), // numeric arrives as a string
-        systemMessage: pick(row.call_system_prompt, DEFAULT_CONFIG.systemMessage),
+        temperature: set(row.temperature) ? Number(row.temperature) : DEFAULT_CONFIG.temperature,
+        systemMessage: pick(prompt, row.call_system_prompt, DEFAULT_CONFIG.systemMessage),
         playIntro: pick(row.play_intro, DEFAULT_CONFIG.playIntro),
         introMessage: pick(row.intro_message, DEFAULT_CONFIG.introMessage),
         introMessage2: pick(row.intro_message_2, DEFAULT_CONFIG.introMessage2),
         introVoice: pick(row.intro_voice, DEFAULT_CONFIG.introVoice),
-        greetingText: pick(row.call_greeting, DEFAULT_CONFIG.greetingText),
-        aiSpeaksFirst: pick(row.ai_speaks_first, DEFAULT_CONFIG.aiSpeaksFirst),
+        greetingText: pick(greeting, row.call_greeting, DEFAULT_CONFIG.greetingText),
+        aiSpeaksFirst: pick(speaksFirst, row.ai_speaks_first, DEFAULT_CONFIG.aiSpeaksFirst),
+        assistantName: pick(row.assistant_name, DEFAULT_CONFIG.assistantName),
     };
 }
 
@@ -105,16 +119,16 @@ async function fetchRows(client, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
     }
 }
 
-// phoneNumber -> { name, fetchedAt }
+// phoneNumber -> { contact, fetchedAt }
 const contactCache = new Map();
 
-// Looks up the caller's name so {{name}} can be filled in. Never throws: an
-// unknown name is cosmetic, and must not cost anyone their call. Note that
-// public.contacts has RLS enabled, so this needs the service-role key —
-// with the anon key it simply returns null and templates fall back to "there".
-async function fetchContactName(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) {
+// Fetches the contact, their settings and their history digest in one round
+// trip. Never throws: losing this costs personalisation, not the call. Note
+// contacts and contact_config have RLS enabled, so this needs the service-role
+// key — with the anon key it returns null and everything falls back.
+async function fetchContact(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) {
     const entry = contactCache.get(phoneNumber);
-    if (entry && Date.now() - entry.fetchedAt < ROW_CACHE_TTL_MS) return entry.name;
+    if (entry && Date.now() - entry.fetchedAt < ROW_CACHE_TTL_MS) return entry.contact;
 
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -124,22 +138,45 @@ async function fetchContactName(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_
     try {
         const query = client
             .from('contacts')
-            .select('name')
+            .select('id, name, combined_history, do_not_contact, contact_config(*)')
             .eq('phone_number', phoneNumber)
             .maybeSingle();
 
         const { data, error } = await Promise.race([query, timeout]);
         if (error) throw new Error(error.message);
 
-        const name = data?.name?.trim() || null;
-        contactCache.set(phoneNumber, { name, fetchedAt: Date.now() });
-        return name;
+        // PostgREST returns a one-to-one embed as an object or a single-element
+        // array depending on how the relationship is detected.
+        const config = Array.isArray(data?.contact_config) ? data.contact_config[0] : data?.contact_config;
+        const contact = data ? { ...data, contact_config: config ?? null } : null;
+
+        contactCache.set(phoneNumber, { contact, fetchedAt: Date.now() });
+        return contact;
     } catch (error) {
-        console.warn(`Caller name lookup failed for ${phoneNumber}: ${error.message}`);
+        console.warn(`Contact lookup failed for ${phoneNumber}: ${error.message}`);
         return null;
     } finally {
         clearTimeout(timer);
     }
+}
+
+// Creates a contact for a number we have never seen, so history can attach to
+// it from the first interaction. Fire-and-forget: never awaited on the call
+// path, and a failure is logged and ignored.
+export function ensureContact(phoneNumber) {
+    const client = getClient();
+    if (!client || !phoneNumber) return;
+
+    client
+        .from('contacts')
+        .upsert({ phone_number: phoneNumber }, { onConflict: 'phone_number', ignoreDuplicates: true })
+        .then(({ error }) => {
+            if (error) console.warn(`Could not create contact for ${phoneNumber}: ${error.message}`);
+            else {
+                contactCache.delete(phoneNumber); // so the next call sees the new row
+                console.log(`Created contact for ${phoneNumber}`);
+            }
+        });
 }
 
 // Prime the connection at boot. The first query of a process pays for DNS, the
@@ -176,36 +213,42 @@ export async function resolveConfig({ from, to, direction }) {
     if (candidates.length === 0) return personaliseConfig(DEFAULT_CONFIG, null);
 
     let config = DEFAULT_CONFIG;
-    let callerName = null;
+    let contact = null;
 
     try {
         const uncached = candidates.filter((phoneNumber) => cached(phoneNumber) === undefined);
 
-        // Both lookups run together so the caller's name costs no extra latency.
-        const [fetched, name] = await Promise.all([
+        // Contact and line settings are fetched together, so the richer lookup
+        // costs no more than the old one did.
+        const [fetched, found] = await Promise.all([
             uncached.length > 0 ? fetchRows(client, uncached) : new Map(),
-            from ? fetchContactName(client, from) : null,
+            from ? fetchContact(client, from) : null,
         ]);
-        callerName = name;
+        contact = found;
 
-        // Candidate order is the precedence order.
-        let matched = false;
-        for (const phoneNumber of candidates) {
-            const row = fetched.get(phoneNumber) ?? cached(phoneNumber);
-            if (row) {
-                console.log(`Config matched ${phoneNumber} (${row.name || 'unnamed'})${callerName ? `, caller is ${callerName}` : ''}`);
-                config = rowToConfig(row);
-                matched = true;
-                break;
+        // The person's own settings beat the line's, which beat the defaults.
+        if (contact?.contact_config) {
+            console.log(`Config from contact ${contact.name || from} (${contact.contact_config.name || 'unnamed'})`);
+            config = rowToConfig(contact.contact_config, direction);
+        } else {
+            const line = candidates.map((n) => fetched.get(n) ?? cached(n)).find(Boolean);
+            if (line) {
+                console.log(`Config from line ${line.twilio_number} (${line.name || 'unnamed'})${contact?.name ? `, caller is ${contact.name}` : ''}`);
+                config = rowToConfig(line, direction);
+            } else {
+                console.log(`No config for ${candidates.join(' or ')} — using defaults`);
             }
         }
-        if (!matched) console.log(`No config row for ${candidates.join(' or ')} — using defaults`);
+
+        // First contact from this number: create the record so history has
+        // something to attach to. Not awaited — the call must not wait on it.
+        if (!contact && from) ensureContact(from);
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
-        return personaliseConfig(DEFAULT_CONFIG, callerName);
+        return personaliseConfig(DEFAULT_CONFIG, contact);
     }
 
-    return personaliseConfig(config, callerName);
+    return personaliseConfig(config, contact);
 }
 
 // --- CallSid → config handoff ----------------------------------------------

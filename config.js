@@ -16,6 +16,9 @@ export const DEFAULT_CONFIG = {
     // Controls the randomness of the AI's responses.
     temperature: 0.8,
 
+    // The assistant's name, available to prompts as {{assistant}}.
+    assistantName: 'Iris',
+
     // System prompt / instructions for the AI.
     systemMessage: 'You are Iris, a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.',
 
@@ -41,36 +44,53 @@ export const DEFAULT_CONFIG = {
     aiSpeaksFirst: true,
 };
 
-// Text fields that may contain {{name}} placeholders.
+// Text fields that may contain placeholders.
 const TEMPLATED_FIELDS = ['systemMessage', 'introMessage', 'introMessage2', 'greetingText'];
 
-const NAME_PLACEHOLDER = /\{\{\s*name\s*(?:\|([^}]*))?\}\}/gi;
+// {{token}} or {{token|fallback when empty}}
+const PLACEHOLDER = /\{\{\s*(name|assistant|combined_history)\s*(?:\|([^}]*))?\}\}/gi;
 
-// Fills {{name}} with the caller's name.
-//
-// The fallback for an unknown caller has to suit the sentence it sits in:
-// "Hi {{name}}" wants "there", but "speaking with {{name}}" needs "the caller"
-// or it reads as "speaking with there". Write {{name|the caller}} to choose,
-// otherwise it falls back to "there".
-export function renderTemplate(text, callerName) {
-    return String(text ?? '').replace(NAME_PLACEHOLDER, (_match, fallback) =>
-        callerName || (fallback === undefined ? 'there' : fallback.trim())
-    );
+// Default when a value is missing and no explicit fallback is given. A single
+// default cannot suit every sentence: "Hi {{name}}" wants "there", but
+// "speaking with {{name}}" would read as "speaking with there" — write
+// {{name|the caller}} to choose per placeholder.
+const IMPLICIT_FALLBACK = {
+    name: 'there',
+    assistant: 'the assistant',
+    combined_history: 'No previous contact on record.',
+};
+
+// Fills placeholders from the caller's record and the active config.
+export function renderTemplate(text, values = {}) {
+    return String(text ?? '').replace(PLACEHOLDER, (_match, token, fallback) => {
+        const key = token.toLowerCase();
+        const value = values[key];
+        if (value !== null && value !== undefined && String(value).trim() !== '') return String(value).trim();
+        return fallback === undefined ? IMPLICIT_FALLBACK[key] : fallback.trim();
+    });
 }
 
-// Applies the caller's name to a config's text fields. Returns the config
-// unchanged — same object identity — when it holds no placeholders, so configs
-// without templates stay byte-identical.
-export function personaliseConfig(config, callerName) {
+// Applies the contact's details to a config's text fields. Returns the config
+// unchanged — same object identity — when it holds no placeholders.
+//
+// `contact` is the row from public.contacts, or null for an unknown caller;
+// every placeholder degrades to a readable fallback rather than leaking braces.
+export function personaliseConfig(config, contact) {
     const needsRender = TEMPLATED_FIELDS.some((field) => {
-        NAME_PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
-        return NAME_PLACEHOLDER.test(config[field] ?? '');
+        PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
+        return PLACEHOLDER.test(config[field] ?? '');
     });
     if (!needsRender) return config;
 
+    const values = {
+        name: contact?.name ?? null,
+        assistant: config.assistantName ?? DEFAULT_CONFIG.assistantName,
+        combined_history: contact?.combined_history ?? null,
+    };
+
     const personalised = { ...config };
     for (const field of TEMPLATED_FIELDS) {
-        personalised[field] = renderTemplate(config[field], callerName);
+        personalised[field] = renderTemplate(config[field], values);
     }
     return personalised;
 }
