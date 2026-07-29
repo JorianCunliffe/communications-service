@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Twilio media stream server</title>
+<style>
+  :root {
+    --paper:#F4F5F7; --surface:#fff; --surface-2:#EAEDF1; --line:#D5DAE1;
+    --text:#1B222C; --dim:#5A6675; --accent:#A85F2C; --accent-soft:#F0E2D6;
+    --good:#2F7D5C; --good-soft:#DDEDE5; --bad:#A3402F; --bad-soft:#F6E0DC;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#0E1218; --surface:#161C24; --surface-2:#1D242E; --line:#2A333F;
+      --text:#DCE3EB; --dim:#8794A5; --accent:#D08A52; --accent-soft:#33241A;
+      --good:#5FB78F; --good-soft:#16281F; --bad:#E08573; --bad-soft:#2C1A16;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--paper); color:var(--text);
+    font-family:var(--sans); font-size:15px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:640px; margin:0 auto; padding:56px 20px 72px; }
+  h1 { font-size:22px; margin:0 0 4px; letter-spacing:-.01em; }
+  .sub { color:var(--dim); margin:0 0 24px; font-size:14px; }
+  .status { display:flex; gap:8px; flex-wrap:wrap; font-family:var(--mono); font-size:11px; margin-bottom:24px; }
+  .chip {
+    padding:3px 9px; border-radius:20px; border:1px solid var(--line);
+    color:var(--dim); background:var(--surface);
+  }
+  .chip.on  { color:var(--good); border-color:var(--good); background:var(--good-soft); }
+  .chip.off { color:var(--bad);  border-color:var(--bad);  background:var(--bad-soft); }
+  .card {
+    background:var(--surface); border:1px solid var(--line); border-radius:6px;
+    padding:18px; margin-bottom:16px;
+  }
+  h2 {
+    font-family:var(--mono); font-size:11px; letter-spacing:.11em; text-transform:uppercase;
+    color:var(--dim); margin:0 0 12px; font-weight:600;
+  }
+  .cta {
+    display:inline-block; font-weight:600; padding:10px 18px; border-radius:4px;
+    border:1px solid var(--accent); background:var(--accent); color:#fff;
+    text-decoration:none;
+  }
+  .cta:hover { filter:brightness(1.08); }
+  .cta:focus-visible { outline:2px solid var(--text); outline-offset:2px; }
+  .hint { font-size:12.5px; color:var(--dim); margin:11px 0 0; }
+  dl { margin:0; display:grid; grid-template-columns:auto 1fr; gap:7px 14px; align-items:baseline; }
+  dt { font-family:var(--mono); font-size:12.5px; color:var(--accent); }
+  dd { margin:0; font-size:13.5px; color:var(--dim); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Twilio media stream server</h1>
+  <p class="sub">Bridges Twilio voice calls to the OpenAI Realtime API.</p>
+
+  <div class="status" id="status"><span class="chip">checking&hellip;</span></div>
+
+  <div class="card">
+    <h2>Try it</h2>
+    <a class="cta" href="/console">Open the test console &rarr;</a>
+    <p class="hint">Place a call or send a message. Your API key stays in your browser.</p>
+  </div>
+
+  <div class="card">
+    <h2>Endpoints</h2>
+    <dl>
+      <dt>/health</dt>          <dd><a href="/health">Status and feature wiring</a></dd>
+      <dt>/incoming-call</dt>   <dd>TwiML for Twilio to answer an inbound call</dd>
+      <dt>/outbound-call</dt>   <dd>Place a call &mdash; POST, needs <code>X-API-Key</code></dd>
+      <dt>/sms</dt>             <dd>Send a message &mdash; POST, needs <code>X-API-Key</code></dd>
+      <dt>/media-stream</dt>    <dd>WebSocket carrying call audio</dd>
+    </dl>
+    <p class="hint">
+      Full request and response detail lives in the
+      <a href="https://claude.ai/code/artifact/a78c590e-6c98-4cfe-94ab-7860d5e127f4"
+         target="_blank" rel="noopener">API reference &rarr;</a>
+    </p>
+  </div>
+</div>
+
+<script>
+  // Mirror the console's status chips so both pages agree on what is wired up.
+  fetch('/health')
+    .then((r) => r.json())
+    .then((h) => {
+      const bar = document.getElementById('status');
+      bar.innerHTML = '';
+      const chip = (label, state) => {
+        const el = document.createElement('span');
+        el.className = 'chip' + (state === null ? '' : state ? ' on' : ' off');
+        el.textContent = label;
+        bar.appendChild(el);
+      };
+      chip(h.version || 'unknown', null);
+      chip('model ' + h.model, null);
+      chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
+      chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
+    })
+    .catch(() => {
+      document.getElementById('status').innerHTML =
+        '<span class="chip off">server unreachable</span>';
+    });
+</script>
+</body>
+</html>

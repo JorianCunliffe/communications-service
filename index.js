@@ -61,22 +61,29 @@ const LOG_EVENT_TYPES = [
 // Show AI response elapsed timing calculations
 const SHOW_TIMING_MATH = false;
 
-// Root Route
-fastify.get('/', async (request, reply) => {
-    reply.send({ message: 'Twilio Media Stream Server is running!' });
-});
-
-// Test console. Served from this app so its buttons are same-origin and can
-// reach the API directly. Holds no secrets: the API key is entered by the
-// operator and kept in their browser.
-const CONSOLE_HTML = (() => {
+// Static pages, read once at boot. Served from this app so their buttons are
+// same-origin and can reach the API directly. They hold no secrets: the API key
+// is entered by the operator and kept in their browser.
+function loadPage(file) {
     try {
-        return readFileSync(new URL('./console.html', import.meta.url), 'utf8');
+        return readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
     } catch (error) {
-        console.warn(`Test console unavailable: ${error.message}`);
+        console.warn(`${file} unavailable: ${error.message}`);
         return null;
     }
-})();
+}
+
+const HOME_HTML = loadPage('home.html');
+const CONSOLE_HTML = loadPage('console.html');
+
+// Root Route. A browser gets a landing page pointing at the console; everything
+// else — curl, uptime checks, the test suite — keeps the original JSON.
+fastify.get('/', async (request, reply) => {
+    if (HOME_HTML && (request.headers.accept || '').includes('text/html')) {
+        return reply.type('text/html').send(HOME_HTML);
+    }
+    reply.send({ message: 'Twilio Media Stream Server is running!', console: '/console' });
+});
 
 fastify.get('/console', async (request, reply) => {
     if (!CONSOLE_HTML) return reply.code(404).send({ error: 'Test console not available' });
