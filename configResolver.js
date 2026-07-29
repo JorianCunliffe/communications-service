@@ -223,10 +223,19 @@ export async function resolveConfig({ from, to, direction }) {
     const client = getClient();
     if (!client) return personaliseConfig(DEFAULT_CONFIG, null);
 
+    const outbound = direction === 'outbound';
+
     // Inbound: the caller's own config wins, else the line they dialled.
     // Outbound: we are the caller, so `from` is our line.
-    const candidates = (direction === 'outbound' ? [from] : [from, to]).filter(Boolean);
-    if (candidates.length === 0) return personaliseConfig(DEFAULT_CONFIG, null);
+    const candidates = (outbound ? [from] : [from, to]).filter(Boolean);
+
+    // Whose record personalises the call: always the person on the other end,
+    // which is `to` when we placed the call and `from` when they did. Keying
+    // this on `from` either way looks up our own line on every outbound call,
+    // so the callee's settings and name are never found.
+    const otherParty = outbound ? to : from;
+
+    if (candidates.length === 0 && !otherParty) return personaliseConfig(DEFAULT_CONFIG, null);
 
     let config = DEFAULT_CONFIG;
     let contact = null;
@@ -238,13 +247,13 @@ export async function resolveConfig({ from, to, direction }) {
         // costs no more than the old one did.
         const [fetched, found] = await Promise.all([
             uncached.length > 0 ? fetchRows(client, uncached) : new Map(),
-            from ? fetchContact(client, from) : null,
+            otherParty ? fetchContact(client, otherParty) : null,
         ]);
         contact = found;
 
         // The person's own settings beat the line's, which beat the defaults.
         if (contact?.contact_config) {
-            console.log(`Config from contact ${contact.name || from} (${contact.contact_config.name || 'unnamed'})`);
+            console.log(`Config from contact ${contact.name || otherParty} (${contact.contact_config.name || 'unnamed'})`);
             config = rowToConfig(contact.contact_config, direction);
         } else {
             const line = candidates.map((n) => fetched.get(n) ?? cached(n)).find(Boolean);
@@ -256,9 +265,9 @@ export async function resolveConfig({ from, to, direction }) {
             }
         }
 
-        // First contact from this number: create the record so history has
+        // First contact with this number: create the record so history has
         // something to attach to. Not awaited — the call must not wait on it.
-        if (!contact && from) ensureContact(from);
+        if (!contact && otherParty) ensureContact(otherParty);
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
         return personaliseConfig(DEFAULT_CONFIG, contact);

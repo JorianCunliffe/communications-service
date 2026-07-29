@@ -163,8 +163,9 @@ fastify.post('/outbound-call', async (request, reply) => {
         }
     }
 
-    // Outbound config is keyed on the number we are calling from.
-    const resolved = await resolveConfig({ from, direction: 'outbound' });
+    // Line settings come from the number we call from; the person's own
+    // settings and name come from the number we are calling.
+    const resolved = await resolveConfig({ from, to, direction: 'outbound' });
     const config = { ...resolved, ...(overrides || {}) };
 
     // The callee gets a contact record so history attaches, and a note in the
@@ -246,7 +247,7 @@ fastify.all('/outbound-answer', async (request, reply) => {
     if (!config) {
         // Only if /outbound-call somehow didn't store one — re-resolve and
         // store so the media stream gets the same config (minus overrides).
-        config = await resolveConfig({ from: params.From, direction: 'outbound' });
+        config = await resolveConfig({ from: params.From, to: params.To, direction: 'outbound' });
         storeCallConfig(params.CallSid, config);
     }
 
