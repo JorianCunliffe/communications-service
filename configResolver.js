@@ -186,12 +186,17 @@ export function ensureContact(phoneNumber) {
     client
         .from('contacts')
         .upsert({ phone_number: phoneNumber }, { onConflict: 'phone_number', ignoreDuplicates: true })
-        .then(({ error }) => {
-            if (error) console.warn(`Could not create contact for ${phoneNumber}: ${error.message}`);
-            else {
-                contactCache.delete(phoneNumber); // so the next call sees the new row
-                console.log(`Created contact for ${phoneNumber}`);
-            }
+        .select('id')
+        .then(({ data, error }) => {
+            if (error) return console.warn(`Could not create contact for ${phoneNumber}: ${error.message}`);
+
+            // ignoreDuplicates makes this ON CONFLICT DO NOTHING, which returns
+            // no rows when the contact already existed. Announcing a creation
+            // either way made every repeat caller look like a new one.
+            if (!data?.length) return;
+
+            contactCache.delete(phoneNumber); // so the next call sees the new row
+            console.log(`Created contact for ${phoneNumber}`);
         });
 }
 
