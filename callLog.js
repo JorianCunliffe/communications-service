@@ -39,8 +39,10 @@ async function withTimeout(query, label) {
 }
 
 // Called once a call has been created or answered. `otherParty` is whoever we
-// are talking to: the callee outbound, the caller inbound.
-export async function recordCall({ callSid, otherParty, direction, config, metadata = {} }) {
+// are talking to: the callee outbound, the caller inbound. `status` is the
+// call's state at the moment we record it — we create an outbound call
+// ourselves, but only hear about an inbound one once it is already ringing.
+export async function recordCall({ callSid, otherParty, direction, config, status = 'initiated', metadata = {} }) {
     const db = getClient();
     if (!db || !callSid) return;
 
@@ -50,7 +52,7 @@ export async function recordCall({ callSid, otherParty, direction, config, metad
                 twilio_call_sid: callSid,
                 phone_number: otherParty || 'unknown',
                 direction,
-                status: 'initiated',
+                status,
                 system_prompt: config?.systemMessage ?? null,
                 metadata: { model: config?.model, voice: config?.voice, effort: config?.effort, ...metadata },
                 started_at: new Date().toISOString(),

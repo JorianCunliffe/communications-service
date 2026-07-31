@@ -111,6 +111,20 @@ fastify.all('/incoming-call', async (request, reply) => {
     storeCallConfig(params.CallSid, config);
     console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'}`);
 
+    // Same record an outbound call gets, so both directions are inspectable.
+    // Not awaited: a slow database write must not delay answering the call.
+    // 'ringing' rather than 'initiated' — Twilio only fetches this once the
+    // call is already coming in. /call-status carries it the rest of the way,
+    // which needs the number's status callback pointed at this app.
+    recordCall({
+        callSid: params.CallSid,
+        otherParty: params.From,
+        direction: 'inbound',
+        config,
+        status: 'ringing',
+        metadata: { to: params.To },
+    });
+
     reply.type('text/xml').send(buildTwiml(config, request.headers.host));
 });
 
