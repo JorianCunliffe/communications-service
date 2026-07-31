@@ -31,8 +31,9 @@ async function withTimeout(query, label) {
     });
 
     try {
-        const { error } = await Promise.race([query, timeout]);
+        const { data, error } = await Promise.race([query, timeout]);
         if (error) throw new Error(error.message);
+        return data;
     } finally {
         clearTimeout(timer);
     }
@@ -47,16 +48,30 @@ export async function recordCall({ callSid, otherParty, direction, config, statu
     if (!db || !callSid) return;
 
     try {
+        const row = {
+            twilio_call_sid: callSid,
+            phone_number: otherParty || 'unknown',
+            direction,
+            status,
+            system_prompt: config?.systemMessage ?? null,
+            metadata: { model: config?.model, voice: config?.voice, effort: config?.effort, ...metadata },
+            started_at: new Date().toISOString(),
+        };
+
+        // Link the call to the contact, the way SMS threads are linked, so a
+        // person's calls can be found without matching on phone number. Set
+        // only when one exists: the upsert writes every column it is given, so
+        // a null here would clear the link if this call were ever re-recorded.
+        if (otherParty) {
+            const contact = await withTimeout(
+                db.from('contacts').select('id').eq('phone_number', otherParty).maybeSingle(),
+                'Contact lookup for call record'
+            );
+            if (contact?.id) row.contact_id = contact.id;
+        }
+
         await withTimeout(
-            db.from('calls').upsert({
-                twilio_call_sid: callSid,
-                phone_number: otherParty || 'unknown',
-                direction,
-                status,
-                system_prompt: config?.systemMessage ?? null,
-                metadata: { model: config?.model, voice: config?.voice, effort: config?.effort, ...metadata },
-                started_at: new Date().toISOString(),
-            }, { onConflict: 'twilio_call_sid' }),
+            db.from('calls').upsert(row, { onConflict: 'twilio_call_sid' }),
             'Call record insert'
         );
     } catch (error) {
