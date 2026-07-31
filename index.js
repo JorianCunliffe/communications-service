@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact } from './configResolver.js';
 import { recordCall, updateCallStatus } from './callLog.js';
+import { recordMessage } from './smsLog.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -230,11 +231,48 @@ fastify.post('/sms', async (request, reply) => {
         const message = await client.messages.create({ to, from, body });
 
         console.log(`SMS ${message.sid} to ${to} from ${from}`);
+
+        // Not awaited: a slow database write must not delay the response.
+        recordMessage({
+            otherParty: to,
+            twilioNumber: from,
+            direction: 'outbound',
+            body,
+            messageSid: message.sid,
+            status: message.status,
+        });
+
         return reply.code(201).send({ messageSid: message.sid, to, from, status: message.status });
     } catch (error) {
         console.error('Failed to send SMS:', error.message);
         return reply.code(502).send({ error: 'Failed to send message', detail: error.message });
     }
+});
+
+// Twilio posts inbound messages here. Deliberately separate from POST /sms:
+// that route sends, and requires an API key Twilio has no way to present.
+//
+// Replies with empty TwiML — nothing answers automatically yet, the message is
+// only recorded. Unlike the send path this awaits the write: no one is waiting
+// on the response, and the record is the only reason the endpoint exists. The
+// 2.5s write timeout keeps it well inside Twilio's webhook budget.
+fastify.all('/incoming-sms', async (request, reply) => {
+    const params = { ...request.query, ...request.body };
+    const { From: from, To: to, Body: body, MessageSid: messageSid } = params;
+
+    console.log(`Inbound SMS ${messageSid || '(no sid)'} from ${from || 'unknown'} to ${to || 'unknown'}`);
+
+    ensureContact(from);
+    await recordMessage({
+        otherParty: from,
+        twilioNumber: to,
+        direction: 'inbound',
+        body,
+        messageSid,
+        status: params.SmsStatus || params.MessageStatus,
+    });
+
+    reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<Response/>');
 });
 
 // Twilio fetches this once the callee answers.
