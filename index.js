@@ -63,7 +63,11 @@ const BUILD = (() => {
         for (const file of SOURCES) {
             hash.update(file);
             try {
-                hash.update(readFileSync(new URL(`./${file}`, import.meta.url)));
+                // Line endings are normalised out. A Windows checkout stores
+                // CRLF and a Linux deployment stores LF, so hashing raw bytes
+                // made the same commit fingerprint differently on each host —
+                // which defeated the point of comparing local to deployed.
+                hash.update(readFileSync(new URL(`./${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n'));
             } catch (_) {
                 // A missing file is itself part of the fingerprint.
                 hash.update('<missing>');
