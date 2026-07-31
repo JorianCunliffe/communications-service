@@ -216,6 +216,9 @@
         $('status').appendChild(el);
       };
       chip(h.version || 'unknown', null);
+      // The source fingerprint, not the commit: on hosts without git it is the
+      // only thing that actually changes when a deploy lands.
+      if (h.build) chip('build ' + h.build, null);
       chip('model ' + h.model, null);
       chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
       chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);

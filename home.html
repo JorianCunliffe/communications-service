@@ -102,6 +102,7 @@
         bar.appendChild(el);
       };
       chip(h.version || 'unknown', null);
+      if (h.build) chip('build ' + h.build, null);
       chip('model ' + h.model, null);
       chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
       chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);

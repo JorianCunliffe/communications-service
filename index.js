@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 import twilio from 'twilio';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
@@ -43,6 +43,36 @@ const VERSION = (() => {
         } catch (__) {
             return 'unknown';
         }
+    }
+})();
+
+// A fingerprint of the code actually running, for hosts where VERSION cannot
+// identify it. Replit deployments carry no .git, so `git rev-parse` fails there
+// and VERSION falls back to the package version — which is identical across
+// every commit, making "is my change deployed?" unanswerable. Hashing the
+// source needs no git, works on any host, and changes exactly when the code
+// does. Files are hashed by name as well as content so a rename still moves it.
+const BUILD = (() => {
+    const SOURCES = [
+        'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
+        'console.html', 'home.html', 'package.json',
+    ];
+
+    try {
+        const hash = createHash('sha256');
+        for (const file of SOURCES) {
+            hash.update(file);
+            try {
+                hash.update(readFileSync(new URL(`./${file}`, import.meta.url)));
+            } catch (_) {
+                // A missing file is itself part of the fingerprint.
+                hash.update('<missing>');
+            }
+        }
+        return hash.digest('hex').slice(0, 12);
+    } catch (error) {
+        console.warn(`Could not fingerprint source: ${error.message}`);
+        return 'unknown';
     }
 })();
 
@@ -96,6 +126,7 @@ fastify.get('/health', async (request, reply) => {
     reply.send({
         status: 'ok',
         version: VERSION,
+        build: BUILD,
         model: DEFAULT_CONFIG.model,
         playIntro: DEFAULT_CONFIG.playIntro,
         supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
