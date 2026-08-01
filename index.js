@@ -9,8 +9,9 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact } from './configResolver.js';
-import { recordCall, updateCallStatus } from './callLog.js';
+import { recordCall, updateCallStatus, recordToolCall } from './callLog.js';
 import { recordMessage } from './smsLog.js';
+import { executeTool } from './tools.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -374,6 +375,17 @@ fastify.register(async (fastify) => {
         let responseStartTimestampTwilio = null;
         let config = DEFAULT_CONFIG; // replaced by the per-call config on 'start'
         let openAiWs = null; // created on 'start', once the CallSid identifies the call
+        let callSid = null; // recorded on 'start', so tool calls can be attributed
+
+        // Tool call bookkeeping. call_id -> tool name, captured from
+        // response.output_item.added because that event documents the name;
+        // the arguments.done event carries it too but that field is undocumented.
+        const pendingToolNames = new Map();
+
+        // Bumped whenever the caller interrupts. A tool result that comes back
+        // carrying a stale generation belongs to a response that no longer
+        // exists, and is dropped rather than injected into a moved-on conversation.
+        let toolGeneration = 0;
 
         // Control initial session with OpenAI
         const initializeSession = () => {
@@ -434,7 +446,62 @@ fastify.register(async (fastify) => {
                 markQueue = [];
                 lastAssistantItem = null;
                 responseStartTimestampTwilio = null;
+
+                // The response being played has been cancelled, so any tool
+                // still running for it is now answering a question the caller
+                // has talked over.
+                toolGeneration++;
             }
+        };
+
+        // Runs a tool the model asked for and hands the result back. Never
+        // throws: executeTool resolves with an error rather than rejecting, so
+        // a broken tool produces something the model can say out loud instead
+        // of an exception that leaves the caller in silence.
+        const handleToolCall = async (event) => {
+            const toolCallId = event.call_id;
+            const name = pendingToolNames.get(toolCallId) ?? event.name;
+            pendingToolNames.delete(toolCallId);
+
+            if (!toolCallId || !name) {
+                console.warn('Tool call arrived with no name or call_id — ignoring');
+                return;
+            }
+
+            let args = {};
+            try {
+                if (event.arguments) args = JSON.parse(event.arguments);
+            } catch (_) {
+                console.warn(`Tool ${name} sent arguments that would not parse: ${event.arguments}`);
+            }
+
+            const generation = toolGeneration;
+            const { output, error, durationMs } = await executeTool(name, args, { callSid });
+            console.log(`Tool ${name} ${error ? `failed: ${error}` : 'ok'} (${durationMs}ms)`);
+
+            // Not awaited: the model is waiting on the result, not the audit row.
+            recordToolCall({
+                callSid, openAiCallId: toolCallId, name, args,
+                result: output ?? null, error: error ?? null, durationMs,
+            });
+
+            if (generation !== toolGeneration) {
+                console.log(`Discarding ${name} result — the caller interrupted while it ran`);
+                return;
+            }
+            if (!openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
+
+            openAiWs.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                    type: 'function_call_output',
+                    call_id: toolCallId,
+                    // Always a JSON string, including for failures, so the
+                    // model gets a readable reason rather than an empty result.
+                    output: JSON.stringify(error ? { error } : output),
+                },
+            }));
+            openAiWs.send(JSON.stringify({ type: 'response.create' }));
         };
 
         // Send mark messages to Media Streams so we know if and when AI response playback is finished
@@ -489,6 +556,16 @@ fastify.register(async (fastify) => {
                 if (response.type === 'input_audio_buffer.speech_started') {
                     handleSpeechStartedEvent();
                 }
+
+                // Tool calls. Unreachable unless this call advertised tools:
+                // with none in session.update the model never emits these.
+                if (response.type === 'response.output_item.added' && response.item?.type === 'function_call') {
+                    if (response.item.call_id) pendingToolNames.set(response.item.call_id, response.item.name);
+                }
+
+                if (response.type === 'response.function_call_arguments.done') {
+                    handleToolCall(response);
+                }
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
             }
@@ -513,6 +590,7 @@ fastify.register(async (fastify) => {
                         break;
                     case 'start':
                         streamSid = data.start.streamSid;
+                        callSid = data.start.callSid || null;
                         console.log('Incoming stream has started', streamSid, data.start.callSid || '(no callSid)');
 
                         // Pick up the config stored by the TwiML webhook for this

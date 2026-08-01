@@ -59,6 +59,7 @@ export function rowToConfig(row, direction = 'inbound') {
     const prompt = outbound ? row.outbound_call_prompt : row.inbound_call_prompt;
     const greeting = outbound ? row.outbound_call_greeting : row.inbound_call_greeting;
     const speaksFirst = outbound ? row.outbound_ai_speaks_first : row.inbound_ai_speaks_first;
+    const tools = outbound ? row.outbound_enabled_tools : row.inbound_enabled_tools;
 
     return {
         model: pick(row.model, DEFAULT_CONFIG.model),
@@ -73,6 +74,10 @@ export function rowToConfig(row, direction = 'inbound') {
         greetingText: pick(greeting, row.call_greeting, DEFAULT_CONFIG.greetingText),
         aiSpeaksFirst: pick(speaksFirst, row.ai_speaks_first, DEFAULT_CONFIG.aiSpeaksFirst),
         assistantName: pick(row.assistant_name, DEFAULT_CONFIG.assistantName),
+        // An empty array is a deliberate "no tools on this direction", so it
+        // has to beat the generic list rather than being treated as unset —
+        // which is why this tests length instead of leaning on pick().
+        tools: tools ?? row.enabled_tools ?? DEFAULT_CONFIG.tools,
     };
 }
 

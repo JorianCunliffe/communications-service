@@ -79,6 +79,41 @@ export async function recordCall({ callSid, otherParty, direction, config, statu
     }
 }
 
+// Records one tool invocation and its result. Fire-and-forget like the rest of
+// this module: the model is already being answered, and losing the audit row
+// must not delay that. Stores the result, not just the fact of the call, so a
+// conversation can be reconstructed afterwards.
+export async function recordToolCall({ callSid, openAiCallId, name, args, result, error, durationMs }) {
+    const db = getClient();
+    if (!db || !name) return;
+
+    try {
+        const row = {
+            twilio_call_sid: callSid ?? null,
+            openai_call_id: openAiCallId ?? null,
+            tool_name: name,
+            arguments: args ?? null,
+            result: result ?? null,
+            error: error ?? null,
+            duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+        };
+
+        // Link to the call row when there is one, so tool calls can be read
+        // back with the call instead of joined on the Twilio SID by hand.
+        if (callSid) {
+            const call = await withTimeout(
+                db.from('calls').select('id').eq('twilio_call_sid', callSid).maybeSingle(),
+                'Call lookup for tool call'
+            );
+            if (call?.id) row.call_id = call.id;
+        }
+
+        await withTimeout(db.from('tool_calls').insert(row), 'Tool call insert');
+    } catch (error) {
+        console.warn(`Could not record tool call ${name}: ${error.message}`);
+    }
+}
+
 // Called from Twilio's status callback as the call progresses.
 export async function updateCallStatus({ callSid, status, durationSeconds }) {
     const db = getClient();

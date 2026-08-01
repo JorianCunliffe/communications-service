@@ -2,6 +2,8 @@
 // DEFAULT_CONFIG is the single source of truth for every per-call tunable;
 // callers without a specific config (and any lookup failure) fall back to it.
 
+import { buildToolDefinitions } from './tools.js';
+
 export const DEFAULT_CONFIG = {
     // OpenAI Realtime model. 'gpt-realtime-2' / 'gpt-realtime-2.1' also supported.
     model: 'gpt-realtime',
@@ -42,6 +44,12 @@ export const DEFAULT_CONFIG = {
     // When true, the AI greets the caller (sends greetingText + response.create)
     // instead of waiting for the caller to speak.
     aiSpeaksFirst: true,
+
+    // Names of tools the assistant may call, from the registry in tools.js.
+    // Empty by default: with no tools advertised the model never emits a
+    // function call, so the session and the call behave exactly as before.
+    // Enable per contact or per line via inbound_/outbound_enabled_tools.
+    tools: [],
 };
 
 // Text fields that may contain placeholders.
@@ -159,6 +167,16 @@ export function buildSessionUpdate(config) {
 
     if (config.effort) {
         session.reasoning = { effort: config.effort };
+    }
+
+    // Only sent when a call actually has tools. Omitting the keys entirely
+    // keeps this payload byte-identical to the long-standing one for every
+    // call that has none, so enabling tools for one contact cannot change how
+    // any other call is set up.
+    const tools = buildToolDefinitions(config.tools);
+    if (tools.length > 0) {
+        session.tools = tools;
+        session.tool_choice = 'auto';
     }
 
     return {
