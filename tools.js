@@ -15,6 +15,11 @@
 // about a second and a half reads as a dropped line, so every tool carries a
 // short timeout and returns a structured failure rather than hanging. The model
 // is told to say what it is doing before calling one, which covers the gap.
+//
+// A failure must always be legible as a failure. Tools return { error } rather
+// than an empty result, and their descriptions tell the model to admit it could
+// not check — an unreachable calendar reported as "nothing on" is a confident
+// wrong answer, which is the worst outcome this feature can produce.
 
 const DEFAULT_TIMEOUT_MS = 2500;
 
@@ -29,9 +34,13 @@ const TOOLS = {
         type: 'http',
         timeoutMs: 3000,
         description:
-            "Check the user's calendar for events in a date range. Use this whenever the caller asks " +
-            'what is on, whether a time is free, or when something is scheduled. Say that you are ' +
-            'checking before you call it, so the caller is not left in silence.',
+            "Check the calendar of the person you are acting for, over a date range. Use this whenever " +
+            'the caller asks what is on, whether a time is free, or when something is scheduled. Say that ' +
+            'you are checking before you call it, so the caller is not left in silence. ' +
+            'If the result contains an error, say plainly that you could not reach the calendar and ' +
+            'cannot say what is on. Never treat a failure, or a result you cannot read, as meaning the ' +
+            'time is free — saying someone is free when the calendar could not be checked is worse than ' +
+            'admitting you do not know.',
         parameters: {
             type: 'object',
             properties: {
