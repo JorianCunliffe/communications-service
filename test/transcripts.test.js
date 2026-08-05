@@ -48,7 +48,18 @@ describe('transcripts – segments', () => {
         assert.equal(buildSegment({ role: 'user', text: '  spaced  ' }).text, 'spaced');
         assert.equal(buildSegment({ role: 'user', text: 'x', startMs: -5 }).startMs, 0);
         assert.equal(buildSegment({ role: 'user', text: 'x', startMs: NaN }).startMs, null);
+    });
+
+    test('a numeric string is not a number', () => {
+        // Deliberate, and it has already caught something real: Twilio sends
+        // media.timestamp as a string, everything downstream coerced it
+        // silently ("4820" - 100 works), and the first live transcript came
+        // back with every start time null. The fix belongs at the boundary
+        // where the wire format is known — see streamMs() in index.js — not in
+        // loosening this. If a caller passes a string, it is a bug in the
+        // caller, and this is what makes it visible instead of plausible.
         assert.equal(buildSegment({ role: 'user', text: 'x', startMs: '100' }).startMs, null);
+        assert.equal(buildSegment({ role: 'user', text: 'x', startMs: Number('100') }).startMs, 100);
     });
 });
 

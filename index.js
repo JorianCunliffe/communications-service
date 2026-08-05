@@ -419,7 +419,23 @@ fastify.register(async (fastify) => {
         // chance.
         const MAX_SEGMENTS = 500;
 
+        // Twilio sends media.timestamp as a JSON *string*. The interruption
+        // maths downstream coerces it silently ("4820" - 100 works), so nothing
+        // ever noticed; buildSegment is strict about types and turned every
+        // start time into null. Coerced here, at the boundary where the wire
+        // format is known, rather than by loosening the shape for everyone.
+        const streamMs = () => {
+            const value = Number(latestMediaTimestamp);
+            return Number.isFinite(value) ? value : null;
+        };
+
         const noteSegment = (segment) => {
+            // The flag has to gate the capture, not just the session payload.
+            // OpenAI returns the assistant's own output transcript whether or
+            // not input transcription was asked for, so without this every call
+            // writes a transcript containing only Iris's half — which reads
+            // like the whole conversation to anyone who opens it later.
+            if (!config.liveTranscript) return;
             if (transcriptSegments.length >= MAX_SEGMENTS) return;
             transcriptSegments.push(segment);
 
@@ -599,7 +615,7 @@ fastify.register(async (fastify) => {
                         // used for this — it is reset when the mark queue
                         // drains, and the transcript arrives after that.
                         if (!turnStartMs.has(response.item_id)) {
-                            turnStartMs.set(response.item_id, latestMediaTimestamp);
+                            turnStartMs.set(response.item_id, streamMs());
                         }
                     }
 
@@ -609,14 +625,14 @@ fastify.register(async (fastify) => {
                 if (response.type === 'input_audio_buffer.speech_started') {
                     // Stamped before the interruption handling below, because
                     // that resets the timing state this is reading.
-                    pendingSpeechStartMs = latestMediaTimestamp;
+                    pendingSpeechStartMs = streamMs();
                     handleSpeechStartedEvent();
                 }
 
                 // Ties the caller turn that just ended to the item id its
                 // transcript will arrive under.
                 if (response.type === 'input_audio_buffer.committed' && response.item_id) {
-                    turnStartMs.set(response.item_id, pendingSpeechStartMs ?? latestMediaTimestamp);
+                    turnStartMs.set(response.item_id, pendingSpeechStartMs ?? streamMs());
                     pendingSpeechStartMs = null;
                 }
 
