@@ -62,7 +62,8 @@ const VERSION = (() => {
 const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
-        'tools.js', 'auth.js', 'api.js', 'console.html', 'home.html', 'package.json',
+        'tools.js', 'auth.js', 'api.js', 'transcripts.js',
+        'console.html', 'home.html', 'package.json',
     ];
 
     try {

@@ -86,6 +86,13 @@ export function rowToConfig(row, direction = 'inbound') {
         // has to beat the generic list rather than being treated as unset —
         // which is why this tests length instead of leaning on pick().
         tools: tools ?? row.enabled_tools ?? DEFAULT_CONFIG.tools,
+
+        // Transcription switches. Nullable in the database so an unset column
+        // falls through to the app default rather than reading as a deliberate
+        // false — pick() already does exactly that.
+        liveTranscript: pick(row.live_transcript_enabled, DEFAULT_CONFIG.liveTranscript),
+        recordCalls: pick(row.call_recording_enabled, DEFAULT_CONFIG.recordCalls),
+        summarise: pick(row.summarise_enabled, DEFAULT_CONFIG.summarise),
     };
 }
 

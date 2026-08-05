@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --test-reporter=spec test/suite.test.js"
+    "test": "node --test --test-reporter=spec test/transcripts.test.js test/suite.test.js",
+    "test:unit": "node --test --test-reporter=spec test/transcripts.test.js"
   },
   "keywords": [],
   "author": "",

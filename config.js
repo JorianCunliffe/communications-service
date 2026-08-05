@@ -50,7 +50,30 @@ export const DEFAULT_CONFIG = {
     // function call, so the session and the call behave exactly as before.
     // Enable per contact or per line via inbound_/outbound_enabled_tools.
     tools: [],
+
+    // --- Transcription -------------------------------------------------------
+    // All off by default. Each one changes what happens to a real conversation,
+    // so none of them turns on for everybody because a deploy happened.
+
+    // Ask the Realtime session to transcribe the caller's audio, so both halves
+    // of the call can be written to the call log as it happens. Costs a
+    // transcription model on top of the call and adds one field to
+    // session.update — see buildSessionUpdate for why that matters.
+    liveTranscript: false,
+
+    // Record the call through Twilio and transcribe the audio afterwards. The
+    // audio is deleted once the transcript is stored.
+    recordCalls: false,
+
+    // Summarise a finished transcript into calls.summary and prepend a line to
+    // the contact's combined_history, which is injected into future prompts.
+    summarise: false,
 };
+
+// The transcription model asked of the Realtime session when liveTranscript is
+// on. Separate from the conversation model: this one only turns the caller's
+// audio into text.
+export const LIVE_TRANSCRIPT_MODEL = 'gpt-transcribe';
 
 // Text fields that may contain placeholders.
 const TEMPLATED_FIELDS = ['systemMessage', 'introMessage', 'introMessage2', 'greetingText'];
