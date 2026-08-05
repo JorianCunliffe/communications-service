@@ -192,6 +192,15 @@ export function buildSessionUpdate(config) {
         session.reasoning = { effort: config.effort };
     }
 
+    // Transcription of the caller's audio, so the call log gets both halves of
+    // the conversation. Set only when the call asks for it — the same rule the
+    // tools below follow, and for the same reason: a call without the flag
+    // sends exactly the payload it sent before this existed, so turning this on
+    // for one contact cannot change how anyone else's call is set up.
+    if (config.liveTranscript) {
+        session.audio.input.transcription = { model: LIVE_TRANSCRIPT_MODEL };
+    }
+
     // Only sent when a call actually has tools. Omitting the keys entirely
     // keeps this payload byte-identical to the long-standing one for every
     // call that has none, so enabling tools for one contact cannot change how

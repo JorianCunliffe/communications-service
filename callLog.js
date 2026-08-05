@@ -114,6 +114,48 @@ export async function recordToolCall({ callSid, openAiCallId, name, args, result
     }
 }
 
+// Stores a finished transcript against a call. Fire-and-forget like everything
+// else here: it is written after the call has already ended, so nobody is
+// waiting, and losing it must not raise into the WebSocket close handler.
+//
+// Only writes a non-empty transcript. A call where nobody spoke produces a
+// valid transcript with no segments, and letting that overwrite a real one —
+// from the recording pipeline, say, arriving later — would lose data.
+export async function saveTranscript({ callSid, transcript, status = 'completed' }) {
+    const db = getClient();
+    if (!db || !callSid || !transcript?.segments?.length) return;
+
+    try {
+        await withTimeout(
+            db.from('calls')
+                .update({ transcript, transcription_status: status, transcription_error: null })
+                .eq('twilio_call_sid', callSid),
+            'Transcript update'
+        );
+        console.log(`Stored ${transcript.segments.length}-segment transcript for ${callSid}`);
+    } catch (error) {
+        console.warn(`Could not store transcript for ${callSid}: ${error.message}`);
+    }
+}
+
+// Records that transcription was attempted and failed, so a call with no
+// transcript can be told apart from a call nobody has tried to transcribe.
+export async function saveTranscriptionError({ callSid, message }) {
+    const db = getClient();
+    if (!db || !callSid) return;
+
+    try {
+        await withTimeout(
+            db.from('calls')
+                .update({ transcription_status: 'failed', transcription_error: String(message).slice(0, 500) })
+                .eq('twilio_call_sid', callSid),
+            'Transcription error update'
+        );
+    } catch (error) {
+        console.warn(`Could not record transcription failure for ${callSid}: ${error.message}`);
+    }
+}
+
 // Called from Twilio's status callback as the call progresses.
 export async function updateCallStatus({ callSid, status, durationSeconds }) {
     const db = getClient();

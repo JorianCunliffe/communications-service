@@ -9,7 +9,8 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact } from './configResolver.js';
-import { recordCall, updateCallStatus, recordToolCall } from './callLog.js';
+import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
+import { buildTranscript } from './transcripts.js';
 import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
@@ -394,6 +395,42 @@ fastify.register(async (fastify) => {
         // exists, and is dropped rather than injected into a moved-on conversation.
         let toolGeneration = 0;
 
+        // --- Live transcript -------------------------------------------------
+        // Collected only when config.liveTranscript is on; with the flag off
+        // OpenAI never sends the transcription events and these stay empty.
+        //
+        // Timing is the whole difficulty. A caller's transcript is only
+        // *completed* after their turn ends, which can be after Iris has
+        // already started replying — stamping segments as they arrive would
+        // interleave the conversation wrongly. So each turn is stamped when it
+        // started, using the stream clock this handler already maintains, and
+        // the segments are ordered by that at the end.
+        const transcriptSegments = [];
+
+        // A caller turn's start time, carried from speech_started through to
+        // the transcript that eventually comes back for it. Two hops, because
+        // no single event carries both: speech_started has the timing but no
+        // item id, and the committed event has the item id but not the timing.
+        let pendingSpeechStartMs = null;
+        const turnStartMs = new Map(); // item_id -> stream ms when it began
+
+        // A call long enough to hit this has other problems, but an unbounded
+        // array on a connection that stays open is not something to leave to
+        // chance.
+        const MAX_SEGMENTS = 500;
+
+        const noteSegment = (segment) => {
+            if (transcriptSegments.length >= MAX_SEGMENTS) return;
+            transcriptSegments.push(segment);
+
+            // Length and timing, never the words. This is enough to tell "the
+            // events are firing" from "they are not" when verifying a real
+            // call, without putting a stranger's conversation in the log where
+            // it would be kept far longer and less deliberately than in the
+            // database.
+            console.log(`Transcript segment: ${segment.role} ${String(segment.text ?? '').length} chars @ ${segment.startMs ?? '?'}ms`);
+        };
+
         // Control initial session with OpenAI
         const initializeSession = () => {
             const sessionUpdate = buildSessionUpdate(config);
@@ -555,13 +592,57 @@ fastify.register(async (fastify) => {
 
                     if (response.item_id) {
                         lastAssistantItem = response.item_id;
+
+                        // The first audio of a response is when Iris starts
+                        // speaking, which is the timestamp its transcript
+                        // belongs at. responseStartTimestampTwilio cannot be
+                        // used for this — it is reset when the mark queue
+                        // drains, and the transcript arrives after that.
+                        if (!turnStartMs.has(response.item_id)) {
+                            turnStartMs.set(response.item_id, latestMediaTimestamp);
+                        }
                     }
-                    
+
                     sendMark(connection, streamSid);
                 }
 
                 if (response.type === 'input_audio_buffer.speech_started') {
+                    // Stamped before the interruption handling below, because
+                    // that resets the timing state this is reading.
+                    pendingSpeechStartMs = latestMediaTimestamp;
                     handleSpeechStartedEvent();
+                }
+
+                // Ties the caller turn that just ended to the item id its
+                // transcript will arrive under.
+                if (response.type === 'input_audio_buffer.committed' && response.item_id) {
+                    turnStartMs.set(response.item_id, pendingSpeechStartMs ?? latestMediaTimestamp);
+                    pendingSpeechStartMs = null;
+                }
+
+                // The caller's words.
+                if (response.type === 'conversation.item.input_audio_transcription.completed') {
+                    noteSegment({
+                        role: 'user',
+                        speaker: 'caller',
+                        text: response.transcript,
+                        startMs: turnStartMs.get(response.item_id) ?? null,
+                    });
+                    turnStartMs.delete(response.item_id);
+                }
+
+                // Iris's own words. Note this is what she generated, which is
+                // not always what the caller heard: an interruption truncates
+                // playback mid-sentence while the transcript still carries the
+                // whole thing.
+                if (response.type === 'response.output_audio_transcript.done') {
+                    noteSegment({
+                        role: 'assistant',
+                        speaker: 'assistant',
+                        text: response.transcript,
+                        startMs: turnStartMs.get(response.item_id) ?? null,
+                    });
+                    turnStartMs.delete(response.item_id);
                 }
 
                 // Tool calls. Unreachable unless this call advertised tools:
@@ -637,8 +718,27 @@ fastify.register(async (fastify) => {
         // Handle connection close
         connection.on('close', () => {
             if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            flushTranscript();
             console.log('Client disconnected.');
         });
+
+        // Writes whatever was collected. Called once, on close: the call is
+        // already over, so nothing is waiting on this, and a failure inside it
+        // must not raise into the close handler. saveTranscript ignores an
+        // empty transcript, so a call with the flag off writes nothing.
+        const flushTranscript = () => {
+            if (transcriptSegments.length === 0) return;
+
+            const transcript = buildTranscript({
+                channel: 'call',
+                provider: 'openai-realtime',
+                model: config.model,
+                segments: transcriptSegments,
+            });
+
+            console.log(`Call ${callSid || '(no callSid)'} transcript: ${transcript.segments.length} segments`);
+            saveTranscript({ callSid, transcript });
+        };
 
         // Handle WebSocket close and errors
         const handleOpenAiClose = () => {
