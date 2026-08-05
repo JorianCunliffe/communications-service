@@ -12,7 +12,7 @@ import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp,
 import { recordCall, updateCallStatus, recordToolCall } from './callLog.js';
 import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
-import { E164, isAuthorized } from './auth.js';
+import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
 
 // Load environment variables from .env file
@@ -142,12 +142,25 @@ fastify.get('/health', async (request, reply) => {
         playIntro: DEFAULT_CONFIG.playIntro,
         supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
+        // 'warn' means signatures are being checked and logged but nothing is
+        // rejected yet — worth being able to see without reading the logs.
+        twilioSignatures: signatureMode(),
     });
 });
 
+// Route options for the webhooks Twilio calls. They cannot present an API key,
+// so they are verified by Twilio's own signature instead — see auth.js for why
+// this defaults to logging rather than rejecting.
+const twilioWebhook = {
+    preHandler: async (request, reply) => {
+        const rejected = rejectUnsignedTwilio(request, reply);
+        if (rejected) return rejected;
+    },
+};
+
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
-fastify.all('/incoming-call', async (request, reply) => {
+fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     const config = await resolveConfig({ from: params.From, to: params.To, direction: 'inbound' });
     storeCallConfig(params.CallSid, config);
@@ -299,7 +312,7 @@ fastify.post('/sms', async (request, reply) => {
 // only recorded. Unlike the send path this awaits the write: no one is waiting
 // on the response, and the record is the only reason the endpoint exists. The
 // 2.5s write timeout keeps it well inside Twilio's webhook budget.
-fastify.all('/incoming-sms', async (request, reply) => {
+fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     const { From: from, To: to, Body: body, MessageSid: messageSid } = params;
 
@@ -319,7 +332,7 @@ fastify.all('/incoming-sms', async (request, reply) => {
 });
 
 // Twilio fetches this once the callee answers.
-fastify.all('/outbound-answer', async (request, reply) => {
+fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
 
     // Peek, don't consume: the media stream still needs this config when its
@@ -340,7 +353,7 @@ fastify.all('/outbound-answer', async (request, reply) => {
 
 // Twilio reports call progress here. Always answer 200 — a non-2xx makes Twilio
 // retry, and nothing here is worth retrying.
-fastify.all('/call-status', async (request, reply) => {
+fastify.all('/call-status', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     const duration = Number.parseInt(params.CallDuration, 10);
 

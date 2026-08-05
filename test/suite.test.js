@@ -50,24 +50,59 @@ describe('HTTP – server health', () => {
     });
 });
 
+// Fetches a Twilio webhook the way Twilio would, signing the request when the
+// credentials to do so are available. Without this the whole TwiML section
+// fails against a server running TWILIO_VALIDATE_SIGNATURES=enforce — which is
+// the mode this is all eventually meant to run in, so the suite has to be able
+// to pass there. Unsigned rejection is asserted deliberately further down
+// rather than falling out of every other test.
+async function twilioFetch(path, { method = 'POST', params = {}, headers = {} } = {}) {
+    const token = process.env.TWILIO_AUTH_TOKEN;
+    const base = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+
+    const query = method === 'GET' && Object.keys(params).length > 0
+        ? `?${new URLSearchParams(params)}`
+        : '';
+    const signed = { ...headers };
+
+    if (token && base) {
+        // Signed against PUBLIC_URL — what Twilio signs — not the localhost
+        // address the request is actually sent to.
+        const { default: twilio } = await import('twilio');
+        signed['X-Twilio-Signature'] = twilio.getExpectedTwilioSignature(
+            token,
+            `${base}${path}${query}`,
+            method === 'GET' ? {} : params
+        );
+    }
+
+    if (method === 'GET') return fetch(`${BASE_URL}${path}${query}`, { method, headers: signed });
+
+    return fetch(`${BASE_URL}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...signed },
+        body: new URLSearchParams(params),
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 2. HTTP: /incoming-call (TwiML)
 // ---------------------------------------------------------------------------
 describe('HTTP – /incoming-call TwiML', () => {
     test('POST /incoming-call returns 200 with XML content-type', async () => {
-        const res = await fetch(`${BASE_URL}/incoming-call`, { method: 'POST' });
+        const res = await twilioFetch('/incoming-call');
         assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
         const ct = res.headers.get('content-type') || '';
         assert.ok(ct.includes('xml'), `Expected XML content-type, got: ${ct}`);
     });
 
     test('GET /incoming-call also returns TwiML (Twilio uses both methods)', async () => {
-        const res = await fetch(`${BASE_URL}/incoming-call`, { method: 'GET' });
+        const res = await twilioFetch('/incoming-call', { method: 'GET' });
         assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
     });
 
     test('TwiML response contains required XML elements', async () => {
-        const res = await fetch(`${BASE_URL}/incoming-call`, { method: 'POST' });
+        const res = await twilioFetch('/incoming-call');
         const text = await res.text();
 
         assert.ok(text.includes('<?xml'), 'Missing XML declaration');
@@ -77,10 +112,7 @@ describe('HTTP – /incoming-call TwiML', () => {
     });
 
     test('TwiML <Stream> URL points to /media-stream WebSocket endpoint', async () => {
-        const res = await fetch(`${BASE_URL}/incoming-call`, {
-            method: 'POST',
-            headers: { host: `localhost:${PORT}` },
-        });
+        const res = await twilioFetch('/incoming-call', { headers: { host: `localhost:${PORT}` } });
         const text = await res.text();
         assert.ok(
             text.includes('/media-stream'),
@@ -598,5 +630,98 @@ describe('HTTP – management API config preview', () => {
         // Placeholders must already be substituted: returning {{name}} here
         // would misrepresent what the caller would actually hear.
         assert.ok(!/\{\{\w+\}\}/.test(body.config.systemMessage), 'Placeholders must be resolved');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// 8. HTTP: Twilio webhook signatures
+// ---------------------------------------------------------------------------
+//
+// The mode is a deploy-time setting, so these assert the contract that holds
+// under whichever mode the server is running rather than forcing one. That is
+// the useful thing to pin down: 'warn' must not reject real traffic, and
+// 'enforce' must not accept forged traffic.
+import twilio from 'twilio';
+
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const PUBLIC_URL = process.env.PUBLIC_URL;
+
+async function signatureModeFromHealth() {
+    const res = await fetch(`${BASE_URL}/health`);
+    const body = await res.json();
+    return body.twilioSignatures;
+}
+
+describe('HTTP – Twilio webhook signatures', () => {
+    test('GET /health reports the signature mode', async () => {
+        const mode = await signatureModeFromHealth();
+        assert.ok(['off', 'warn', 'enforce'].includes(mode), `Unexpected signature mode ${mode}`);
+    });
+
+    test('an unsigned webhook is rejected under enforce and allowed otherwise', async () => {
+        const mode = await signatureModeFromHealth();
+        const res = await fetch(`${BASE_URL}/incoming-call`, { method: 'POST' });
+
+        if (mode === 'enforce') {
+            assert.equal(res.status, 403, 'Enforcing means an unsigned request must not reach the handler');
+            const text = await res.text();
+            // A forged request should learn nothing about why it failed.
+            assert.equal(text.trim(), '', 'The rejection body must not explain itself');
+        } else {
+            assert.equal(res.status, 200, 'Warn and off must never reject a call — that is the point of the mode');
+        }
+    });
+
+    test('a correctly signed webhook is accepted under every mode', async (t) => {
+        if (!TWILIO_AUTH_TOKEN || !PUBLIC_URL) return t.skip('TWILIO_AUTH_TOKEN or PUBLIC_URL not set');
+
+        // Signed against PUBLIC_URL, which is what Twilio signs — not the
+        // localhost address the request is actually sent to. If this passes,
+        // the server is reconstructing the signed URL the same way Twilio did,
+        // which is the part that breaks behind a proxy.
+        const params = { CallSid: 'CAtestsignature', From: '+15005550006', To: '+15005550006' };
+        const signature = twilio.getExpectedTwilioSignature(
+            TWILIO_AUTH_TOKEN,
+            `${PUBLIC_URL.replace(/\/$/, '')}/call-status`,
+            params
+        );
+
+        const res = await fetch(`${BASE_URL}/call-status`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Twilio-Signature': signature,
+            },
+            body: new URLSearchParams(params),
+        });
+
+        // /call-status answers 204 and updates nothing for a CallSid it has
+        // never seen, so this is safe to run against the live database.
+        assert.equal(res.status, 204, 'A genuinely signed webhook must be accepted');
+    });
+
+    test('a tampered body fails the signature under enforce', async (t) => {
+        if (!TWILIO_AUTH_TOKEN || !PUBLIC_URL) return t.skip('TWILIO_AUTH_TOKEN or PUBLIC_URL not set');
+        const mode = await signatureModeFromHealth();
+        if (mode !== 'enforce') return t.skip(`Mode is "${mode}" — nothing is rejected`);
+
+        const signed = { CallSid: 'CAtestsignature', CallStatus: 'completed' };
+        const signature = twilio.getExpectedTwilioSignature(
+            TWILIO_AUTH_TOKEN,
+            `${PUBLIC_URL.replace(/\/$/, '')}/call-status`,
+            signed
+        );
+
+        const res = await fetch(`${BASE_URL}/call-status`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Twilio-Signature': signature,
+            },
+            // Same signature, different payload.
+            body: new URLSearchParams({ ...signed, CallStatus: 'failed' }),
+        });
+
+        assert.equal(res.status, 403);
     });
 });

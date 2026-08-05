@@ -84,7 +84,8 @@ be updated in Twilio every time.
 | `API_KEY` | For write endpoints | Shared secret for `X-API-Key`. **If unset, `/outbound-call` and `/sms` return 503** rather than running unprotected. |
 | `TWILIO_ACCOUNT_SID` | For outbound | Twilio credentials. |
 | `TWILIO_AUTH_TOKEN` | For outbound | Twilio credentials. |
-| `PUBLIC_URL` | For outbound calls | Public base URL Twilio can reach, used to build the `/outbound-answer` and `/call-status` callbacks. |
+| `PUBLIC_URL` | For outbound calls | Public base URL Twilio can reach, used to build the `/outbound-answer` and `/call-status` callbacks, **and to verify webhook signatures**. |
+| `TWILIO_VALIDATE_SIGNATURES` | No | `off`, `warn` or `enforce`. Defaults to `warn` when `TWILIO_AUTH_TOKEN` is set, `off` otherwise. See [Webhook signatures](#webhook-signatures). |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Endpoint for an `http`-type tool, e.g. `TOOL_CHECK_CALENDAR_URL`. A tool whose URL is unset is never offered to the model. |
 
 ## Twilio configuration
@@ -105,8 +106,36 @@ programmatically and do not depend on this field.
 If the number belongs to a Messaging Service, the service's inbound webhook
 overrides the number's — set it there instead.
 
-> **Security note.** None of the webhook routes validate Twilio's
-> `X-Twilio-Signature` header yet. See [Known gaps](#known-gaps).
+### Webhook signatures
+
+Twilio cannot present an API key, so its webhooks are verified the other way:
+Twilio signs each request with the account auth token and the app checks the
+signature (`auth.js`). Applies to `/incoming-call`, `/outbound-answer`,
+`/call-status` and `/incoming-sms`.
+
+`TWILIO_VALIDATE_SIGNATURES` takes three values, not a boolean:
+
+| Mode | Behaviour |
+|---|---|
+| `off` | No checking. The default when `TWILIO_AUTH_TOKEN` is unset — there is nothing to check against. |
+| `warn` | **Default.** Runs the full check and logs the verdict, but lets every request through. |
+| `enforce` | Rejects a request that does not verify, with a bare `403`. |
+
+The middle mode exists because the failure this guards against is a deploy that
+rejects every real call. Verification depends on `PUBLIC_URL` matching the URL
+Twilio signed byte for byte, and a proxy, a trailing slash or an `http`/`https`
+mismatch each break it silently. `warn` proves the check works against real
+Twilio traffic before it is allowed to reject anything.
+
+**Roll it out by reading the log.** Place a real call and look for
+`Twilio signature would have been rejected`. No such line across a few real
+calls and messages means `enforce` is safe. `/health` reports the active mode.
+
+`enforce` returns `403` with an empty body: a forged request should learn
+nothing about why it failed. The reason goes to the log instead.
+
+> The suite signs its own webhook requests, so it passes under `enforce` as
+> well as `warn` — see [Testing](#testing).
 
 ## HTTP API
 
@@ -537,10 +566,15 @@ export $(grep -E '^(OPENAI_API_KEY|API_KEY)=' .env | xargs)
 PORT=5050 npm test
 ```
 
-33 tests covering server health, TwiML shape, WebSocket resilience (malformed
+37 tests covering server health, TwiML shape, WebSocket resilience (malformed
 JSON, unknown events, missing config), `/outbound-call` authorisation, the
-management API, and direct OpenAI Realtime connectivity. The last group consumes
-a small amount of OpenAI credit.
+management API, webhook signatures, and direct OpenAI Realtime connectivity. The
+last group consumes a small amount of OpenAI credit.
+
+Webhook requests are signed by the suite the way Twilio signs them, so it passes
+under `TWILIO_VALIDATE_SIGNATURES=enforce` as well as `warn` — export
+`TWILIO_AUTH_TOKEN` and `PUBLIC_URL` for that, otherwise the signature tests
+skip.
 
 The management API tests are read-only and safe against the live database. They
 assert on envelope shape, paging, status codes and the tool registry rather than
@@ -554,11 +588,12 @@ suite and point it elsewhere — do not commit that copy.
 
 ## Known gaps
 
-**No Twilio signature validation.** None of the webhook routes check
-`X-Twilio-Signature`, so anyone who knows the URL can POST a fake inbound SMS or
-call status and have it recorded. This is a logging nuisance today. It becomes
-serious the moment SMS auto-reply exists, because a forged inbound message would
-make the app send a real one. This should land before that does.
+**Twilio signature validation defaults to warning, not rejecting.** The check
+exists and runs (see [Webhook signatures](#webhook-signatures)), but until
+`TWILIO_VALIDATE_SIGNATURES=enforce` is set, a forged inbound SMS or call status
+is still accepted and recorded. That is a logging nuisance today and becomes
+serious the moment a webhook makes the app *do* something — reply to an SMS,
+fetch a recording. Switch to `enforce` before either exists.
 
 **`tool_calls` has RLS disabled.** Every other table in the `public` schema has
 row-level security enabled; `tool_calls` does not. That table holds the
@@ -590,7 +625,8 @@ In dependency order:
 1. **Management API writes** — the read paths are done; the
    [pending endpoints](#pending-api) are the writes, each of which must
    invalidate the config cache.
-2. **Twilio signature validation** — prerequisite for anything that replies.
+2. **Twilio signature validation** — built; flip it to `enforce` once the logs
+   are clean. Prerequisite for anything that replies or fetches.
 3. **Generic conversation context** — a provider interface returning normalised
    `{ role, content, at, channel }` turns, so history can span SMS, calls and
    later email without the caller knowing which channel it came from.
