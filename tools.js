@@ -124,6 +124,31 @@ export function buildToolDefinitions(names) {
     return definitions;
 }
 
+// Every tool the registry knows about, for GET /api/tools. `available` is the
+// same test the call path uses, so a tool that would be silently dropped at
+// call time reports false here instead — which is the whole point of exposing
+// this: the alternative is reading tools.js by hand and guessing at the
+// environment. Includes the parameter schema so a caller can see what the model
+// will be asked for without a second source of truth.
+export function listTools() {
+    return Object.entries(TOOLS).map(([name, tool]) => ({
+        name,
+        type: tool.type,
+        description: tool.description,
+        parameters: tool.parameters,
+        timeoutMs: tool.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        available: isAvailable(name),
+        // Named rather than valued: this says which variable to set, and never
+        // leaks the endpoint itself.
+        urlEnv: tool.type === 'http' ? urlEnvName(name) : null,
+    }));
+}
+
+// Just the names, for validating a configured list against the registry.
+export function toolNames() {
+    return Object.keys(TOOLS);
+}
+
 function withTimeout(promise, timeoutMs, label) {
     let timer;
     const timeout = new Promise((_, reject) => {

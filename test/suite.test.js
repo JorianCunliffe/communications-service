@@ -434,3 +434,169 @@ describe('OpenAI Realtime API – connectivity', () => {
         );
     });
 });
+
+// ---------------------------------------------------------------------------
+// 7. HTTP: management API (read paths)
+// ---------------------------------------------------------------------------
+//
+// Everything here is read-only, so these run against the live database without
+// changing it. The database-backed routes assert on shape rather than content:
+// which contacts exist is not something the app guarantees, but the envelope,
+// the paging fields and the status codes are.
+//
+// API_KEY is required. Without it the routes correctly return 503, which is not
+// worth asserting on every run, so those tests skip instead.
+const API_KEY = process.env.API_KEY;
+const keyed = { headers: { 'X-API-Key': API_KEY || '' } };
+
+describe('HTTP – management API auth', () => {
+    test('rejects a request with no API key', async () => {
+        const res = await fetch(`${BASE_URL}/api/tools`);
+        assert.equal(res.status, 401, 'Unauthenticated reads must be rejected');
+    });
+
+    test('rejects an incorrect API key', async () => {
+        const res = await fetch(`${BASE_URL}/api/tools`, { headers: { 'X-API-Key': 'nope' } });
+        assert.equal(res.status, 401);
+    });
+
+    test('a key of the wrong length is rejected, not compared', async () => {
+        // timingSafeEqual throws on mismatched lengths, so if the length check
+        // is ever dropped this becomes a 500 rather than a 401.
+        const res = await fetch(`${BASE_URL}/api/tools`, { headers: { 'X-API-Key': 'x' } });
+        assert.equal(res.status, 401);
+    });
+});
+
+describe('HTTP – management API tool registry', () => {
+    test('GET /api/tools lists every tool with its availability', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/tools`, keyed);
+        assert.equal(res.status, 200);
+        const { data } = await res.json();
+
+        assert.ok(Array.isArray(data) && data.length > 0, 'Expected at least one tool');
+        for (const tool of data) {
+            assert.ok(tool.name, 'Every tool needs a name');
+            assert.ok(['builtin', 'http'].includes(tool.type), `Unexpected tool type ${tool.type}`);
+            assert.equal(typeof tool.available, 'boolean');
+            assert.ok(tool.parameters, 'Parameter schema must be exposed - it is what the model is asked for');
+        }
+
+        // An http tool must say which variable configures it, so an operator
+        // seeing available:false knows what to set.
+        for (const tool of data.filter((entry) => entry.type === 'http')) {
+            assert.ok(tool.urlEnv, `${tool.name} must name its URL variable`);
+        }
+    });
+
+    test('GET /api/tools/:name 404s on an unknown tool and says what is valid', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/tools/definitely_not_a_tool`, keyed);
+        assert.equal(res.status, 404);
+        const body = await res.json();
+        assert.ok(Array.isArray(body.valid) && body.valid.length > 0, 'A 404 must list the valid names');
+    });
+
+    test('GET /api/tools/names is not shadowed by the :name route', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/tools/names`, keyed);
+        assert.equal(res.status, 200, 'The static route must win over the parametric one');
+        const { data } = await res.json();
+        assert.ok(Array.isArray(data));
+    });
+});
+
+describe('HTTP – management API reads', () => {
+    test('GET /api/contacts returns a paged envelope', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/contacts?limit=2`, keyed);
+        // 503 means Supabase is off in this environment - a valid state for the
+        // app, but nothing to assert a shape against.
+        if (res.status === 503) return t.skip('Supabase not configured');
+
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.ok(Array.isArray(body.data));
+        assert.ok(body.data.length <= 2, 'limit must be honoured');
+        assert.equal(body.limit, 2);
+        assert.equal(body.offset, 0);
+    });
+
+    test('an over-large limit is clamped rather than refused', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/contacts?limit=99999`, keyed);
+        if (res.status === 503) return t.skip('Supabase not configured');
+
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.ok(body.limit <= 200, `Expected the limit to be clamped, got ${body.limit}`);
+    });
+
+    test('a non-E.164 path is a 400, not a 404', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        // A 404 would send someone hunting for a missing row instead of a typo.
+        const res = await fetch(`${BASE_URL}/api/contacts/notaphonenumber`, keyed);
+        assert.equal(res.status, 400);
+    });
+
+    test('an unknown but valid number is a 404', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/contacts/+19999999999`, keyed);
+        if (res.status === 503) return t.skip('Supabase not configured');
+        assert.equal(res.status, 404);
+    });
+
+    test('GET /api/calls accepts only known sort columns', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/calls?limit=1&sort=drop_table`, keyed);
+        if (res.status === 503) return t.skip('Supabase not configured');
+
+        assert.equal(res.status, 200, 'An unknown sort must fall back, not error');
+        const body = await res.json();
+        assert.equal(body.sort, 'started_at');
+    });
+});
+
+describe('HTTP – management API config preview', () => {
+    test('GET /api/config/resolve rejects a bad direction', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/config/resolve?from=%2B19999999999&direction=sideways`, keyed);
+        assert.equal(res.status, 400);
+    });
+
+    test('GET /api/config/resolve requires at least one number', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/config/resolve`, keyed);
+        assert.equal(res.status, 400);
+    });
+
+    test('GET /api/config/resolve returns a complete config and a tool audit', async (t) => {
+        if (!API_KEY) return t.skip('API_KEY not set');
+
+        const res = await fetch(`${BASE_URL}/api/config/resolve?from=%2B19999999999&to=%2B19999999998&direction=inbound`, keyed);
+        assert.equal(res.status, 200);
+        const body = await res.json();
+
+        // Unknown numbers resolve to the app defaults rather than failing - the
+        // same fallback the call path depends on.
+        for (const field of ['model', 'voice', 'systemMessage', 'tools']) {
+            assert.ok(field in body.config, `Resolved config is missing ${field}`);
+        }
+        assert.ok(Array.isArray(body.toolAudit));
+
+        // Placeholders must already be substituted: returning {{name}} here
+        // would misrepresent what the caller would actually hear.
+        assert.ok(!/\{\{\w+\}\}/.test(body.config.systemMessage), 'Placeholders must be resolved');
+    });
+});

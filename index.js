@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 import twilio from 'twilio';
-import { timingSafeEqual, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
@@ -12,6 +12,8 @@ import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp,
 import { recordCall, updateCallStatus, recordToolCall } from './callLog.js';
 import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
+import { E164, isAuthorized } from './auth.js';
+import apiRoutes from './api.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -28,6 +30,10 @@ if (!OPENAI_API_KEY) {
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
+
+// The management API. Every route under /api requires the shared key and reads
+// only — see api.js.
+fastify.register(apiRoutes, { prefix: '/api' });
 
 // Constants (per-call tunables live in config.js)
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
@@ -56,7 +62,7 @@ const VERSION = (() => {
 const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
-        'tools.js', 'console.html', 'home.html', 'package.json',
+        'tools.js', 'auth.js', 'api.js', 'console.html', 'home.html', 'package.json',
     ];
 
     try {
@@ -172,21 +178,8 @@ const OVERRIDABLE_FIELDS = [
     'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst',
 ];
 
-const E164 = /^\+[1-9]\d{1,14}$/;
-
-// Fails closed: without API_KEY set, the endpoint stays disabled rather than
-// letting anyone place calls on this Twilio account.
-function isAuthorized(request) {
-    const expected = process.env.API_KEY;
-    if (!expected) return false;
-
-    const provided = request.headers['x-api-key'];
-    if (typeof provided !== 'string') return false;
-
-    const a = Buffer.from(provided);
-    const b = Buffer.from(expected);
-    return a.length === b.length && timingSafeEqual(a, b);
-}
+// E164 and isAuthorized now live in auth.js, so the management API enforces
+// the same key with the same constant-time comparison.
 
 fastify.post('/outbound-call', async (request, reply) => {
     if (!process.env.API_KEY) {

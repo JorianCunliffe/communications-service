@@ -22,7 +22,8 @@ this grew from is
 | Call recording to `public.calls` (both directions) | Working |
 | Tool calling on voice calls, per contact and direction | Working |
 | Auto-reply to inbound SMS | **Not built** — see [Roadmap](#roadmap) |
-| Management API for contacts, config and tools | **Not built** — see [Pending API](#pending-api) |
+| Management API — reading contacts, config, tools, calls and messages | Working — see [Management API](#management-api-api) |
+| Management API — *writing* any of the above | **Not built** — see [Pending API](#pending-api) |
 | Outbound webhooks on call/SMS events | **Not built** — see [Roadmap](#roadmap) |
 
 > **Everything is intended to be driven by the API.** Configuration that today
@@ -111,8 +112,9 @@ overrides the number's — set it there instead.
 
 ### Authentication
 
-Write endpoints require the shared secret in an `X-API-Key` header, compared in
-constant time. Webhook endpoints called by Twilio are unauthenticated, because
+Every operator endpoint — the send and dial routes and all of `/api` — requires
+the shared secret in an `X-API-Key` header, compared in constant time
+(`auth.js`). Webhook endpoints called by Twilio are unauthenticated, because
 Twilio cannot present a custom header.
 
 | Response | Meaning |
@@ -203,40 +205,97 @@ curl -X POST https://your-host/sms \
 | `/incoming-sms` | GET, POST | Records the inbound message. Returns empty TwiML — **nothing replies automatically yet.** |
 | `/media-stream` | WebSocket | The audio bridge. Twilio connects here from the TwiML above. |
 
+### Management API (`/api`)
+
+Read-only so far. Every route requires `X-API-Key` — this reads the whole
+contact database, so it is not a lighter class of endpoint than placing a call.
+A missing `API_KEY` disables it rather than opening it.
+
+Unlike the call path, Supabase being unavailable here is a `503`, never a
+fallback to defaults. Answering a call with default config beats not answering;
+showing an operator defaults dressed up as their settings would be worse than
+an error, because they would act on it.
+
+| Route | Returns |
+|---|---|
+| `GET /api/tools` | The registry from `tools.js`: name, type, description, parameter schema, timeout, and `available` — the same test the call path uses. An HTTP tool with no `TOOL_*_URL` set reports `available: false` and names the variable to set. |
+| `GET /api/tools/names` | Just the names, for validating a list before writing it. |
+| `GET /api/tools/:name` | One tool. `404` lists the valid names. |
+| `GET /api/contacts` | Paged. `?search=` matches name or number, `?tag=` filters on `tags`. |
+| `GET /api/contacts/:phone` | The contact, its `contact_config` row, and what that row alone derives for each direction. |
+| `GET /api/contacts/:phone/config` | The config row. A contact with no config is `200` with `config: null`, not a `404` — that is the normal state for anyone never given settings. |
+| `GET /api/contacts/:phone/tools` | Configured lists, the effective list per direction, and an audit of each name. |
+| `GET /api/contacts/:phone/messages` | Paged SMS, joined through `sms_threads` — a message carries no phone number of its own. |
+| `GET /api/lines` | `phone_configs`, paged. |
+| `GET /api/lines/:phone` | One line, its derived config, and `appliesToCalls` — the resolver ignores a line without `call_enabled`, so a row that exists but is switched off otherwise looks identical to a missing one. |
+| `GET /api/lines/:phone/tools` | As per contact. |
+| `GET /api/calls` | Paged. `?phone=`, `?direction=`, `?status=`, `?sort=` (allow-listed; anything else falls back to `started_at`). |
+| `GET /api/calls/:callSid` | The call with its `tool_calls`. A failed tool-audit read is reported alongside rather than instead. |
+| `GET /api/calls/:callSid/tools` | Just the tool calls. |
+| `GET /api/config/resolve` | **What a call would actually be configured with.** `?from=&to=&direction=`, run through the real resolver rather than a second implementation of the cascade. |
+
+Paging is `?limit=` (default 50, max 200 — clamped, not refused) and `?offset=`,
+returned alongside an exact `count`.
+
+A path number must be E.164. Anything else is a `400`, not a `404`: reporting a
+typo as "not found" sends someone hunting for a missing row.
+
+**The tool audit** is the point of `/tools` and `/config/resolve`. Today an
+unknown tool name is dropped at call time with a `console.warn` nobody reads, so
+a typo silently costs a tool until someone notices the assistant cannot do
+something. Each configured name comes back as `ok`, `unknown` (no such tool) or
+`unavailable` (defined, but its URL variable is unset).
+
+```bash
+curl -sG https://your-host/api/config/resolve \
+  -H "X-API-Key: $API_KEY" \
+  --data-urlencode "from=+61415828522" \
+  --data-urlencode "to=+61468271148" \
+  --data-urlencode "direction=inbound"
+```
+
+`/api/config/resolve` reads only: it passes `createContact: false`, so asking
+what would happen on a call is not the thing that creates a contact record. It
+is subject to the same 60-second row cache as the call path, which its response
+says so nobody concludes a change was lost.
+
 ## Pending API
 
-Everything below is currently only possible with direct SQL against Supabase or
-by editing source. These are the endpoints that will replace that, and the shape
+Everything below is still only possible with direct SQL against Supabase or by
+editing source. These are the endpoints that will replace that, and the shape
 they are expected to take. **None of them exist yet.**
 
 ### Contacts and configuration
 
 | Method | Path | Replaces |
 |---|---|---|
-| `GET` | `/api/contacts` | `select * from contacts` |
 | `POST` | `/api/contacts` | Manual insert; today a contact is only auto-created on first interaction |
-| `GET` | `/api/contacts/:phone` | Contact plus its resolved config |
 | `PATCH` | `/api/contacts/:phone` | Name, email, company, tags, `do_not_contact` |
 | `DELETE` | `/api/contacts/:phone` | Manual delete |
-| `GET` | `/api/contacts/:phone/config` | `select * from contact_config` |
 | `PUT` / `PATCH` | `/api/contacts/:phone/config` | Prompts, voice, model, effort, greetings, per-direction overrides |
-| `GET` | `/api/lines` | `select * from phone_configs` |
+| `POST` | `/api/lines` | Registering one of our numbers |
 | `PUT` / `PATCH` | `/api/lines/:phone` | Per-line defaults |
+
+Every write must invalidate the row cache in `configResolver.js`. It caches per
+phone number for 60 seconds, so a `PATCH` that only writes the database appears
+to do nothing for up to a minute — long enough for an operator to change a
+prompt, place a test call, hear the old one, and conclude the endpoint is
+broken.
 
 ### Tools
 
 | Method | Path | Replaces |
 |---|---|---|
-| `GET` | `/api/tools` | Reading `tools.js` by hand — should return name, description, parameter schema, type, and whether it is available (HTTP tools need their `TOOL_*_URL` set) |
-| `GET` | `/api/contacts/:phone/tools` | `select inbound_enabled_tools, outbound_enabled_tools, enabled_tools` |
 | `PUT` | `/api/contacts/:phone/tools` | Replace the lists wholesale |
 | `PATCH` | `/api/contacts/:phone/tools` | `{ "add": [...], "remove": [...] }` against a direction |
 | `DELETE` | `/api/contacts/:phone/tools/:name` | Remove one tool |
-| `GET` / `PUT` / `PATCH` | `/api/lines/:phone/tools` | The same, per line |
+| `PUT` / `PATCH` | `/api/lines/:phone/tools` | The same, per line |
 
 Tool names must be validated against the registry on write and rejected with
-`422` plus the list of valid names. Today an unknown name is dropped at call
-time with a `console.warn` nobody sees, so a typo silently costs a tool.
+`422` plus the list of valid names — `GET /api/tools/names` is there for
+exactly that. The read side already reports a bad name as `unknown`; a write
+should refuse it outright rather than store something that will be dropped at
+call time.
 
 Registering a *new* tool still means editing `tools.js` — defining tools over
 the API (name, description, JSON-Schema parameters, endpoint) is a later step,
@@ -246,11 +305,7 @@ since it means executing operator-supplied definitions.
 
 | Method | Path | Replaces |
 |---|---|---|
-| `GET` | `/api/calls` | `select * from calls` |
-| `GET` | `/api/calls/:callSid` | One call with its tool calls |
-| `GET` | `/api/calls/:callSid/tools` | `select * from tool_calls` |
-| `GET` | `/api/contacts/:phone/messages` | `select * from sms_messages` |
-| `GET` | `/api/contacts/:phone/history` | Unified cross-channel history — does not exist in any form yet |
+| `GET` | `/api/contacts/:phone/history` | Unified cross-channel history — does not exist in any form yet, and needs the generic context provider first |
 
 ### Not yet designed
 
@@ -473,23 +528,29 @@ in `index.js` controls which OpenAI events are echoed; it includes `error`,
 
 ## Testing
 
-The suite runs against a **live server**:
+The suite runs against a **live server**, and reads its own environment — it
+does not load `.env` itself, so both variables must be exported:
 
 ```bash
-node index.js &                                       # or in another terminal
-export $(grep -E '^OPENAI_API_KEY=' .env | xargs)     # the suite reads its own env
+node index.js &                                              # or in another terminal
+export $(grep -E '^(OPENAI_API_KEY|API_KEY)=' .env | xargs)
 PORT=5050 npm test
 ```
 
-19 tests covering server health, TwiML shape, WebSocket resilience (malformed
-JSON, unknown events, missing config), `/outbound-call` authorisation, and
-direct OpenAI Realtime connectivity. The last two consume a small amount of
-OpenAI credit.
+33 tests covering server health, TwiML shape, WebSocket resilience (malformed
+JSON, unknown events, missing config), `/outbound-call` authorisation, the
+management API, and direct OpenAI Realtime connectivity. The last group consumes
+a small amount of OpenAI credit.
+
+The management API tests are read-only and safe against the live database. They
+assert on envelope shape, paging, status codes and the tool registry rather than
+on which contacts exist. Anything needing Supabase skips cleanly when it is not
+configured, so the suite still passes with the database switched off.
 
 `BASE_URL` is hardcoded to localhost. To run against a deployment, copy the
 suite and point it elsewhere — do not commit that copy.
 
-**Not covered:** tools, SMS, config resolution.
+**Not covered:** SMS, tool execution, config resolution below the API surface.
 
 ## Known gaps
 
@@ -526,7 +587,9 @@ per-user integration.
 
 In dependency order:
 
-1. **Management API** — the [pending endpoints](#pending-api), read paths first.
+1. **Management API writes** — the read paths are done; the
+   [pending endpoints](#pending-api) are the writes, each of which must
+   invalidate the config cache.
 2. **Twilio signature validation** — prerequisite for anything that replies.
 3. **Generic conversation context** — a provider interface returning normalised
    `{ role, content, at, channel }` turns, so history can span SMS, calls and

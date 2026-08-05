@@ -40,6 +40,14 @@ function getClient() {
     return supabase;
 }
 
+// The configured client, for read paths outside the call flow — the management
+// API reads the same rows this resolver does, and building a second client for
+// them would mean a second set of credentials to get wrong. Null when Supabase
+// is disabled: callers must handle that rather than assume a client.
+export function getSupabase() {
+    return getClient();
+}
+
 // Maps a settings row onto DEFAULT_CONFIG. Works for contact_config and
 // phone_configs alike — they mirror each other's columns.
 //
@@ -229,7 +237,11 @@ export async function warmUp() {
 // Every exit runs through personaliseConfig, including the failure paths:
 // DEFAULT_CONFIG itself contains a {{name}} placeholder, so returning it raw
 // would send the literal braces to the model or to Twilio's text-to-speech.
-export async function resolveConfig({ from, to, direction }) {
+//
+// `createContact` exists for the management API's preview route: asking what
+// would happen on a call must not be the thing that creates a contact record.
+// The call path leaves it on.
+export async function resolveConfig({ from, to, direction, createContact = true }) {
     const client = getClient();
     if (!client) return personaliseConfig(DEFAULT_CONFIG, null);
 
@@ -277,7 +289,7 @@ export async function resolveConfig({ from, to, direction }) {
 
         // First contact with this number: create the record so history has
         // something to attach to. Not awaited — the call must not wait on it.
-        if (!contact && otherParty) ensureContact(otherParty);
+        if (!contact && otherParty && createContact) ensureContact(otherParty);
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
         return personaliseConfig(DEFAULT_CONFIG, contact);
