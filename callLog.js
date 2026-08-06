@@ -60,6 +60,7 @@ export async function recordCall({ callSid, otherParty, direction, config, statu
             metadata: {
                 model: config?.model, voice: config?.voice, effort: config?.effort,
                 aiSpeaksFirst: config?.aiSpeaksFirst ?? null,
+                summarise: config?.summarise ?? null,
                 ...metadata,
             },
             started_at: new Date().toISOString(),

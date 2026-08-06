@@ -17,6 +17,7 @@ import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.
 import apiRoutes from './api.js';
 import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount } from './realtimeSessions.js';
 import { enqueueRecording, startRecordingSweeper } from './recordings.js';
+import { summariseCall } from './summarise.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -66,7 +67,7 @@ const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
-        'recordings.js', 'recordingSources.js', 'transcribe.js',
+        'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
         'console.html', 'home.html', 'package.json',
     ];
 
@@ -481,7 +482,15 @@ fastify.all('/recording-status', twilioWebhook, async (request, reply) => {
         recordedAt: params.RecordingStartTime ? new Date(params.RecordingStartTime).toISOString() : null,
         // Which speaker the model's "A" is depends on who spoke first, which is
         // a property of the call's config, not of the audio.
-        metadata: { callSid, aiSpeaksFirst: call?.metadata?.aiSpeaksFirst ?? true },
+        // Both carried from the call's config, because by the time the sweeper
+        // runs the config is long gone: aiSpeaksFirst decides which diarised
+        // speaker is the assistant, and summarise decides whether to write a
+        // history line the model will read back later.
+        metadata: {
+            callSid,
+            aiSpeaksFirst: call?.metadata?.aiSpeaksFirst ?? true,
+            summarise: call?.metadata?.summarise ?? false,
+        },
     });
 });
 
@@ -946,7 +955,13 @@ fastify.register(async (fastify) => {
             });
 
             console.log(`Call ${callSid || '(no callSid)'} transcript: ${transcript.segments.length} segments`);
-            saveTranscript({ callSid, transcript });
+
+            // Summarising is chained onto the write rather than fired beside
+            // it, because summariseCall reads the transcript back from the row
+            // and would otherwise race the write that puts it there.
+            saveTranscript({ callSid, transcript })
+                .then(() => (config.summarise ? summariseCall(callSid) : null))
+                .catch((error) => console.warn(`Post-call processing failed for ${callSid}: ${error.message}`));
         };
 
         // Handle WebSocket close and errors

@@ -25,6 +25,9 @@ import { DEFAULT_CONFIG } from './config.js';
 import { getSupabase, resolveConfig, rowToConfig } from './configResolver.js';
 import { listTools, toolNames, isKnownTool } from './tools.js';
 import { E164, rejectUnauthorized } from './auth.js';
+import { enqueueRecording, sweepOnce } from './recordings.js';
+import { assertFetchable, isKnownSource } from './recordingSources.js';
+import { validate as validateTranscript, fromExternal as fromExternalTranscript, toText } from './transcripts.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -319,6 +322,145 @@ export default async function apiRoutes(fastify) {
         return reply.send({ twilioNumber: phone, ...toolsView(data) });
     });
 
+    // --- Recordings -------------------------------------------------------
+    //
+    // The one place in this API that writes, and it writes to a queue rather
+    // than to configuration. That is deliberate: a recording arriving from an
+    // MCP server is an event, not a settings change, and it needs somewhere to
+    // land before the config write endpoints exist.
+
+    fastify.get('/recordings', async (request, reply) => {
+        const db = client(reply);
+        if (!db) return reply;
+
+        const { limit, offset, from, to } = paging(request.query);
+        // transcript is excluded from the list: a page of fifty full
+        // transcripts is megabytes, and nobody listing recordings wants them.
+        let query = db
+            .from('recordings')
+            .select('id, source, external_id, call_id, contact_id, phone_number, status, attempts, error, duration_seconds, channels, provider, model, transcript_text, recorded_at, created_at', { count: 'exact' })
+            .order('created_at', { ascending: false })
+            .range(from, to);
+
+        if (request.query.source) query = query.eq('source', request.query.source);
+        if (request.query.status) query = query.eq('status', request.query.status);
+        if (request.query.phone) {
+            const phone = normalisePhone(request.query.phone);
+            if (!phone) return reply.code(400).send({ error: '"phone" must be an E.164 number' });
+            query = query.eq('phone_number', phone);
+        }
+
+        const { data, error, count } = await query;
+        if (error) return dbError(reply, error, 'list recordings');
+        return reply.send({ data, limit, offset, count });
+    });
+
+    fastify.get('/recordings/:id', async (request, reply) => {
+        const db = client(reply);
+        if (!db) return reply;
+
+        const { data, error } = await db.from('recordings').select('*').eq('id', request.params.id).maybeSingle();
+        if (error) return dbError(reply, error, 'read recording');
+        if (!data) return reply.code(404).send({ error: `No recording ${request.params.id}` });
+        return reply.send(data);
+    });
+
+    fastify.post('/recordings', async (request, reply) => {
+        const db = client(reply);
+        if (!db) return reply;
+
+        const body = request.body || {};
+        if (!isKnownSource(body.source)) {
+            return reply.code(400).send({ error: '"source" is required, e.g. "plaud"' });
+        }
+        // Twilio recordings arrive through the status callback, which resolves
+        // the media URL from our own account. Accepting one here would be a way
+        // to hand this endpoint a URL and have it treated as trusted.
+        if (body.source === 'twilio') {
+            return reply.code(400).send({ error: 'Twilio recordings are ingested through /recording-status, not here' });
+        }
+
+        const hasAudio = typeof body.mediaUrl === 'string' || typeof body.mediaBase64 === 'string';
+        if (!hasAudio && !body.transcript) {
+            return reply.code(400).send({ error: 'Provide "mediaUrl", "mediaBase64", or an already-made "transcript"' });
+        }
+
+        let phone = null;
+        if (body.contactPhone) {
+            phone = normalisePhone(body.contactPhone);
+            if (!phone) return reply.code(400).send({ error: '"contactPhone" must be an E.164 number' });
+        }
+
+        // A transcript from outside is not trusted to be well formed just
+        // because it parsed as JSON.
+        let transcript = null;
+        if (body.transcript) {
+            const reason = validateTranscript(body.transcript);
+            if (reason) return reply.code(422).send({ error: `Invalid transcript: ${reason}` });
+            transcript = fromExternalTranscript(body.transcript, { channel: 'recording', provider: body.source });
+        }
+
+        // Checked before the row is written, so a bad URL is a 422 the caller
+        // can act on rather than a queued job that fails quietly later.
+        if (typeof body.mediaUrl === 'string' && !transcript) {
+            try {
+                await assertFetchable(body.mediaUrl, body.source);
+            } catch (error) {
+                return reply.code(422).send({ error: `"mediaUrl" cannot be fetched: ${error.message}` });
+            }
+        }
+
+        // mediaBase64 is accepted for small clips but not stored as a data URL
+        // — the row would carry the whole file, and Postgres is the wrong place
+        // for audio. Rejected clearly rather than half-supported.
+        if (body.mediaBase64) {
+            return reply.code(501).send({ error: 'Inline audio is not implemented yet — supply "mediaUrl" or "transcript"' });
+        }
+
+        let contactId = null;
+        if (phone) {
+            const { data: contact } = await db.from('contacts').select('id').eq('phone_number', phone).maybeSingle();
+            contactId = contact?.id ?? null;
+        }
+
+        const result = await enqueueRecording({
+            source: body.source,
+            externalId: body.externalId ?? null,
+            contactId,
+            phoneNumber: phone,
+            mediaUrl: body.mediaUrl ?? null,
+            mediaAuth: typeof body.mediaAuth === 'string' && body.mediaAuth.startsWith('bearer_env:') ? body.mediaAuth : null,
+            durationSeconds: Number(body.durationSeconds) || null,
+            recordedAt: body.recordedAt ?? null,
+            transcript,
+            metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
+        });
+
+        if (result?.error) return dbError(reply, { message: result.error }, 'queue the recording');
+        // 200 rather than 201: nothing was created, because this recording was
+        // already known. Re-pushing is expected and is not an error.
+        if (result?.duplicate) return reply.code(200).send({ duplicate: true, source: body.source, externalId: body.externalId });
+        return reply.code(201).send({ id: result.id, status: transcript ? 'done' : 'pending' });
+    });
+
+    fastify.post('/recordings/:id/transcribe', async (request, reply) => {
+        const db = client(reply);
+        if (!db) return reply;
+
+        const { data, error } = await db
+            .from('recordings')
+            .update({ status: 'pending', attempts: 0, error: null, next_attempt_at: new Date().toISOString() })
+            .eq('id', request.params.id)
+            .select('id, source, status')
+            .maybeSingle();
+
+        if (error) return dbError(reply, error, 'requeue the recording');
+        if (!data) return reply.code(404).send({ error: `No recording ${request.params.id}` });
+
+        sweepOnce(); // not awaited: transcription takes far longer than a request
+        return reply.send({ ...data, requeued: true });
+    });
+
     // --- Calls and audit --------------------------------------------------
 
     fastify.get('/calls', async (request, reply) => {
@@ -359,10 +501,24 @@ export default async function apiRoutes(fastify) {
         // over, so its failure is reported alongside rather than instead.
         if (tools.error) console.warn(`API: tool calls for ${callSid} failed: ${tools.error.message}`);
 
+        // Any recording made of this call, minus its transcript — that is
+        // already on the call row, and returning it twice doubles the payload
+        // of the largest response this API produces.
+        const { data: recordings } = await db
+            .from('recordings')
+            .select('id, source, external_id, status, attempts, error, duration_seconds, provider, model, created_at')
+            .eq('call_id', call.data.id)
+            .order('created_at');
+
         return reply.send({
             call: call.data,
+            // Flattened for readability: the transcript is the thing most
+            // people open this endpoint for, and JSON segments are not how
+            // anyone wants to read a conversation.
+            transcriptText: toText(call.data.transcript),
             toolCalls: tools.data ?? [],
             toolCallsError: tools.error ? tools.error.message : null,
+            recordings: recordings ?? [],
         });
     });
 

@@ -15,6 +15,7 @@ import { transcribeAudio } from './transcribe.js';
 import { toText, isEmpty } from './transcripts.js';
 import { sourceFor } from './recordingSources.js';
 import { saveTranscript, saveTranscriptionError } from './callLog.js';
+import { summariseCall } from './summarise.js';
 
 const SWEEP_INTERVAL_MS = 15 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -185,7 +186,12 @@ async function process(db, recording) {
     // refuses an empty transcript, so it cannot blank a live one.
     if (recording.call_id) {
         const { data: call } = await db.from('calls').select('twilio_call_sid').eq('id', recording.call_id).maybeSingle();
-        if (call?.twilio_call_sid) await saveTranscript({ callSid: call.twilio_call_sid, transcript });
+        if (call?.twilio_call_sid) {
+            await saveTranscript({ callSid: call.twilio_call_sid, transcript });
+            // summariseCall is a no-op when a summary already exists, so a call
+            // whose live transcript was summarised is not summarised twice.
+            if (recording.metadata?.summarise) await summariseCall(call.twilio_call_sid);
+        }
     }
 
     console.log(`Transcribed recording ${recording.id}: ${transcript.segments.length} segments in ${Date.now() - started}ms`);

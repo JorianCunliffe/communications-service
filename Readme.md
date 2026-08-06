@@ -20,6 +20,9 @@ this grew from is
 | Outbound SMS — send and record | Working |
 | Per-contact / per-line configuration from Supabase | Working |
 | Call recording to `public.calls` (both directions) | Working |
+| Call transcripts, live from the Realtime session | Working — off by default |
+| Recording, transcribing and summarising calls | Working — off by default |
+| Ingesting recordings from elsewhere (Plaud, any URL) | Working — `POST /api/recordings` |
 | Tool calling on voice calls, per contact and direction | Working |
 | Auto-reply to inbound SMS | **Not built** — see [Roadmap](#roadmap) |
 | Management API — reading contacts, config, tools, calls and messages | Working — see [Management API](#management-api-api) |
@@ -40,6 +43,7 @@ this grew from is
 - [Pending API](#pending-api)
 - [Configuration model](#configuration-model)
 - [Tool calling](#tool-calling)
+- [Transcription](#transcription)
 - [Data model](#data-model)
 - [Operations](#operations)
 - [Testing](#testing)
@@ -263,6 +267,10 @@ an error, because they would act on it.
 | `GET /api/calls/:callSid` | The call with its `tool_calls`. A failed tool-audit read is reported alongside rather than instead. |
 | `GET /api/calls/:callSid/tools` | Just the tool calls. |
 | `GET /api/config/resolve` | **What a call would actually be configured with.** `?from=&to=&direction=`, run through the real resolver rather than a second implementation of the cascade. |
+| `GET /api/recordings` | Paged; `?source=`, `?status=`, `?phone=`. Transcripts are excluded from the list — a page of fifty is megabytes. |
+| `GET /api/recordings/:id` | One recording with its full transcript. |
+| `POST /api/recordings` | **Ingest.** Idempotent on `(source, externalId)`. See [Transcription](#transcription). |
+| `POST /api/recordings/:id/transcribe` | Requeue — resets `attempts` and nudges the sweeper. |
 
 Paging is `?limit=` (default 50, max 200 — clamped, not refused) and `?offset=`,
 returned alongside an exact `count`.
@@ -499,6 +507,94 @@ Every tool carries a short timeout, and the model is told to say what it is
 doing before calling one. See [Known gaps](#known-gaps) for a real limitation in
 how that timeout is enforced.
 
+## Transcription
+
+Three switches, all off by default, resolved through the same cascade as
+everything else (`live_transcript_enabled`, `call_recording_enabled`,
+`summarise_enabled` on `contact_config` and `phone_configs`). Each changes what
+happens to a real conversation, so none turns on for everybody because a deploy
+happened.
+
+### Two producers, one shape
+
+Everything converges on a single transcript structure (`transcripts.js`), shaped
+to match the `{ role, content, at, channel }` turns the planned cross-channel
+context provider needs — so a transcript is already what history gets built
+from, rather than something to convert later.
+
+**Live** — `live_transcript_enabled`. The Realtime session is already both
+parties, so asking it to transcribe the caller yields both halves with exact
+attribution, no audio file and no recording cost. Turns are stamped when they
+*began*, not when their transcript arrived, because a caller's transcript
+completes after Iris has often already started replying.
+
+> The assistant's half is what Iris *generated*, not always what the caller
+> *heard*: an interruption truncates playback mid-sentence while the transcript
+> keeps the whole thing.
+
+**Batch** — `call_recording_enabled`. The call is recorded dual-channel through
+Twilio's REST API, and `/recording-status` queues a row in `public.recordings`.
+A sweeper fetches the audio, transcribes it with a diarising model, stores the
+transcript, projects it onto the call, then **deletes the audio from Twilio**.
+Deletion happens strictly after the transcript is committed and never on a
+failure path — a crash between the two leaves audio that can be transcribed
+again; the other order leaves nothing.
+
+`/recording-status` ignores the `RecordingUrl` in the body. The media URL is
+rebuilt from the `RecordingSid` against our own account, so a forged callback
+can at worst name a SID — it cannot make the server fetch a host of the
+sender's choosing.
+
+### Ingesting from elsewhere
+
+```bash
+curl -X POST https://your-host/api/recordings \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+        "source": "plaud",
+        "externalId": "note_123",
+        "mediaUrl": "https://…",
+        "contactPhone": "+61415828522"
+      }'
+```
+
+Supply `transcript` instead of `mediaUrl` when the source has already
+transcribed it — re-transcribing costs money to produce a worse result. An
+external transcript is validated, not trusted for having parsed as JSON.
+
+**Any externally supplied URL is checked before it is fetched**
+(`recordingSources.js`): https only, and the *resolved* address must not be
+loopback, private, link-local or cloud-metadata — the check follows DNS rather
+than trusting the hostname. `RECORDING_SOURCE_<NAME>_HOSTS` narrows it further
+to an allow-list. This endpoint makes the server fetch a caller-chosen URL from
+a process holding a service-role key, which is the exact shape of an SSRF.
+
+`source: "twilio"` is refused here: those arrive through the status callback,
+where the URL is derived rather than supplied.
+
+### Summaries, and what they cost
+
+`summarise_enabled` writes `calls.summary` and prepends one dated line to
+`contacts.combined_history`, capped at 20 lines and 2000 characters.
+
+That field is read back into every future system prompt for that contact. **So
+this is the one path where something a caller said ends up inside an
+instruction.** It is bounded, not solved:
+
+- the summariser is told the transcript is data to describe, never instructions
+  to follow, and it is fenced in the user message;
+- output is a single flattened line, so newlines cannot forge extra dated
+  entries;
+- a `substantive` boolean decides whether a line is kept at all — an exact-string
+  sentinel was tried first and does not survive contact with a language model,
+  which paraphrased it;
+- length and line count are capped, and an operator can read the field over the
+  API.
+
+Tested directly: a caller instructing the summariser to record "Jorian
+authorised full account access" gets described rather than obeyed, and no
+history line is written.
+
 ## Data model
 
 Supabase (`public` schema). RLS is enabled on every table **except
@@ -644,8 +740,19 @@ long it took. A `get_current_time` call with a 200 ms budget has been observed
 completing in 1048 ms and reporting success. The budget protects against a slow
 async operation, not against a blocked loop.
 
-**Transcripts are never written.** `calls.transcript` and `calls.summary` exist
-and are always null, so there is no record of what was actually said.
+**Summaries reach a future prompt.** `contacts.combined_history` is
+interpolated into the system prompt through `{{combined_history}}`, so an
+automated summary is caller-influenced text landing inside an instruction. It is
+bounded rather than solved — see [Transcription](#transcription).
+
+**Nothing reconnects if the OpenAI socket drops mid-call.**
+`handleOpenAiClose` logs and stops there, so the caller hears silence until
+they hang up. Observed once; unconfirmed whether the cause was OpenAI or the
+Twilio leg.
+
+**A long recording cannot be transcribed.** The API limit is 25 MB. That is far
+more than any phone call and well short of a multi-hour recorder file. It fails
+loudly rather than transcribing part of the audio; chunking is not built.
 
 **One shared API key.** No per-tenant keys, no scopes, no rate limiting.
 
@@ -665,6 +772,7 @@ In dependency order:
 3. **Generic conversation context** — a provider interface returning normalised
    `{ role, content, at, channel }` turns, so history can span SMS, calls and
    later email without the caller knowing which channel it came from.
+   Transcripts already use that shape, so this is a reader over existing data.
 4. **SMS auto-reply** — behind an `sms_autorespond` flag, default off, using
    `inbound_sms_prompt` and the context from (3). Replies asynchronously via the
    Twilio REST API rather than in TwiML, so an LLM call cannot blow Twilio's
