@@ -68,6 +68,7 @@ const BUILD = (() => {
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
+        'context.js',
         'console.html', 'home.html', 'package.json',
     ];
 

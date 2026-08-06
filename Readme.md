@@ -23,6 +23,7 @@ this grew from is
 | Call transcripts, live from the Realtime session | Working — off by default |
 | Recording, transcribing and summarising calls | Working — off by default |
 | Ingesting recordings from elsewhere (Plaud, any URL) | Working — `POST /api/recordings` |
+| Cross-channel conversation history (calls + SMS + recordings) | Working — see [Conversation context](#conversation-context) |
 | Tool calling on voice calls, per contact and direction | Working |
 | Auto-reply to inbound SMS | **Not built** — see [Roadmap](#roadmap) |
 | Management API — reading contacts, config, tools, calls and messages | Working — see [Management API](#management-api-api) |
@@ -44,6 +45,7 @@ this grew from is
 - [Configuration model](#configuration-model)
 - [Tool calling](#tool-calling)
 - [Transcription](#transcription)
+- [Conversation context](#conversation-context)
 - [Data model](#data-model)
 - [Operations](#operations)
 - [Testing](#testing)
@@ -267,6 +269,7 @@ an error, because they would act on it.
 | `GET /api/calls/:callSid` | The call with its `tool_calls`. A failed tool-audit read is reported alongside rather than instead. |
 | `GET /api/calls/:callSid/tools` | Just the tool calls. |
 | `GET /api/config/resolve` | **What a call would actually be configured with.** `?from=&to=&direction=`, run through the real resolver rather than a second implementation of the cascade. |
+| `GET /api/contacts/:phone/history` | **Everything said to this person, across every channel.** `?channels=`, `?since=`, `?maxChars=`. See [Conversation context](#conversation-context). |
 | `GET /api/recordings` | Paged; `?source=`, `?status=`, `?phone=`. Transcripts are excluded from the list — a page of fifty is megabytes. |
 | `GET /api/recordings/:id` | One recording with its full transcript. |
 | `POST /api/recordings` | **Ingest.** Idempotent on `(source, externalId)`. See [Transcription](#transcription). |
@@ -338,12 +341,6 @@ call time.
 Registering a *new* tool still means editing `tools.js` — defining tools over
 the API (name, description, JSON-Schema parameters, endpoint) is a later step,
 since it means executing operator-supplied definitions.
-
-### History and audit
-
-| Method | Path | Replaces |
-|---|---|---|
-| `GET` | `/api/contacts/:phone/history` | Unified cross-channel history — does not exist in any form yet, and needs the generic context provider first |
 
 ### Not yet designed
 
@@ -594,6 +591,54 @@ instruction.** It is bounded, not solved:
 Tested directly: a caller instructing the summariser to record "Jorian
 authorised full account access" gets described rather than obeyed, and no
 history line is written.
+
+## Conversation context
+
+`context.js` answers one question: **what has been said to this person, across
+every channel we have?** Nothing that consumes history should need to know that
+four tables were involved.
+
+A channel is a *provider* — a small object that finds its own rows for a person
+and returns normalised turns:
+
+```json
+{ "role": "user", "content": "Can we move Thursday?", "at": "2026-08-01T09:00:00.000Z",
+  "channel": "sms", "speaker": null, "source": { "type": "sms_message", "id": "…" } }
+```
+
+| Channel | Reads | Notes |
+|---|---|---|
+| `call` | `calls.transcript` | Segment offsets plus `started_at` give an absolute time. |
+| `sms` | `sms_messages` via `sms_threads` | A message carries no phone number of its own. |
+| `recording` | `recordings` where `call_id is null` | A recording attached to a call was already projected onto that call, so reading both would say everything twice. |
+
+**Adding email, WhatsApp or Slack is one provider and one registry line.** Those
+three are listed as `PLANNED_CHANNELS` and reported in every response, because
+"nothing was said on email" and "email is not wired up" look identical in an
+empty array, and only one is a reason to stop looking. `contacts` already
+carries `email`, `whatsapp_number` and `slack_id`; `resolveSubject` loads them
+so a provider keys on the identifier its own channel uses rather than assuming
+a phone number.
+
+Three decisions worth knowing:
+
+- **Absolute time is what makes channels comparable.** A call transcript stores
+  offsets from the start of the call; SMS stores a timestamp. Neither can merge
+  with the other until both are wall-clock.
+- **Budgets trim from the front.** The end of a conversation is what matters, so
+  `?limit=` and `?maxChars=` keep the newest turns — a budget that kept the
+  oldest would hand a model the opening of a chat from six months ago.
+- **One failing channel does not fail the lookup.** History is a nicety on the
+  call path; a caller should not meet silence because the SMS table blinked.
+  Failures come back in `errors` alongside the turns that did arrive.
+
+Days are grouped in `CONTEXT_TIMEZONE` (default `Australia/Brisbane`), not the
+server's UTC — a UTC boundary falls at 10am Brisbane and cuts a working day in
+half.
+
+This is a **reader**. It writes nothing, and it is not yet wired into prompts —
+`{{combined_history}}` still comes from the hand-maintained field. Replacing
+that is a deliberate next step, not a side effect of this landing.
 
 ## Data model
 

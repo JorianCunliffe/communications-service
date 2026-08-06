@@ -28,6 +28,7 @@ import { E164, rejectUnauthorized } from './auth.js';
 import { enqueueRecording, sweepOnce } from './recordings.js';
 import { assertFetchable, isKnownSource } from './recordingSources.js';
 import { validate as validateTranscript, fromExternal as fromExternalTranscript, toText } from './transcripts.js';
+import { getContext, renderContext, CHANNELS, PLANNED_CHANNELS } from './context.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -263,6 +264,58 @@ export default async function apiRoutes(fastify) {
 
         if (error) return dbError(reply, error, 'list messages');
         return reply.send({ phoneNumber: phone, data, limit, offset, count });
+    });
+
+    fastify.get('/contacts/:phone/history', async (request, reply) => {
+        const phone = normalisePhone(request.params.phone);
+        if (!phone) return reply.code(400).send({ error: 'Path must be an E.164 number' });
+
+        const db = client(reply);
+        if (!db) return reply;
+
+        // Comma-separated, validated against what actually has a provider. An
+        // unknown channel is a 400 rather than being quietly ignored: asking
+        // for email and getting calls back would be read as "no email history".
+        let channels = CHANNELS;
+        if (request.query.channels) {
+            const asked = String(request.query.channels).split(',').map((c) => c.trim()).filter(Boolean);
+            const unreadable = asked.filter((c) => !CHANNELS.includes(c));
+            if (unreadable.length) {
+                return reply.code(400).send({
+                    error: `No provider for: ${unreadable.join(', ')}`,
+                    readable: CHANNELS,
+                    planned: PLANNED_CHANNELS,
+                });
+            }
+            channels = asked;
+        }
+
+        const { limit } = paging(request.query);
+
+        try {
+            const context = await getContext({
+                phoneNumber: phone,
+                channels,
+                limit,
+                since: request.query.since || null,
+                maxChars: Number(request.query.maxChars) || null,
+            });
+
+            return reply.send({
+                subject: context.subject,
+                channels,
+                turns: context.turns,
+                dropped: context.dropped,
+                // The rendered block, so a caller building a prompt does not
+                // reimplement the formatting and drift from what the app uses.
+                text: renderContext(context.turns),
+                // A channel that failed is reported rather than looking empty.
+                errors: context.errors,
+                planned: PLANNED_CHANNELS,
+            });
+        } catch (error) {
+            return dbError(reply, error, 'read history');
+        }
     });
 
     // --- Lines ------------------------------------------------------------
