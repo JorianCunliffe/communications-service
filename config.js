@@ -68,6 +68,24 @@ export const DEFAULT_CONFIG = {
     // Summarise a finished transcript into calls.summary and prepend a line to
     // the contact's combined_history, which is injected into future prompts.
     summarise: false,
+
+    // --- History -------------------------------------------------------------
+    // Budget for {{history}}, the real cross-channel record of what was said.
+    // These only matter when a prompt actually contains that placeholder; a
+    // prompt without it never triggers the lookup and never pays for it.
+
+    // Turns kept, newest first. Enough for the last few exchanges without
+    // handing the model a novel to read before it can say hello.
+    historyLimit: 30,
+
+    // Hard ceiling on the rendered block. A limit in turns alone is not a limit:
+    // thirty turns of a long meeting transcript is a different size from thirty
+    // text messages.
+    historyMaxChars: 3000,
+
+    // How far back to look. Something said two years ago is rarely the context
+    // for this call, and fetching it costs the caller time on every one.
+    historyDays: 90,
 };
 
 // The transcription model asked of the Realtime session when liveTranscript is
@@ -79,7 +97,7 @@ export const LIVE_TRANSCRIPT_MODEL = 'gpt-transcribe';
 const TEMPLATED_FIELDS = ['systemMessage', 'introMessage', 'introMessage2', 'greetingText'];
 
 // {{token}} or {{token|fallback when empty}}
-const PLACEHOLDER = /\{\{\s*(name|assistant|combined_history)\s*(?:\|([^}]*))?\}\}/gi;
+const PLACEHOLDER = /\{\{\s*(name|assistant|combined_history|history)\s*(?:\|([^}]*))?\}\}/gi;
 
 // Default when a value is missing and no explicit fallback is given. A single
 // default cannot suit every sentence: "Hi {{name}}" wants "there", but
@@ -89,7 +107,27 @@ const IMPLICIT_FALLBACK = {
     name: 'there',
     assistant: 'the assistant',
     combined_history: 'No previous contact on record.',
+    history: 'No previous contact on record.',
 };
+
+// Does this config ask for the real conversation history?
+//
+// The placeholder is the switch. There is no separate enable flag because there
+// is nothing a flag could mean on its own: history that is fetched but not
+// interpolated is a database query nobody reads, and a prompt asking for
+// {{history}} with the flag off would silently say "no previous contact" about
+// someone we have spoken to ten times. One thing to set, one place to look.
+//
+// Checked before the lookup runs, so a prompt without it makes no extra query
+// and the call is byte-for-byte the call it was before this existed.
+export function needsHistory(config) {
+    return TEMPLATED_FIELDS.some((field) => {
+        HISTORY_PLACEHOLDER.lastIndex = 0;
+        return HISTORY_PLACEHOLDER.test(config?.[field] ?? '');
+    });
+}
+
+const HISTORY_PLACEHOLDER = /\{\{\s*history\s*(?:\|[^}]*)?\}\}/gi;
 
 // Fills placeholders from the caller's record and the active config.
 export function renderTemplate(text, values = {}) {
@@ -106,7 +144,11 @@ export function renderTemplate(text, values = {}) {
 //
 // `contact` is the row from public.contacts, or null for an unknown caller;
 // every placeholder degrades to a readable fallback rather than leaking braces.
-export function personaliseConfig(config, contact) {
+//
+// `history` is the rendered cross-channel record, already delimited, or null.
+// The caller fetches it — this module stays free of I/O so it can be tested
+// without a database, and so nothing here can block a call by accident.
+export function personaliseConfig(config, contact, history = null) {
     const needsRender = TEMPLATED_FIELDS.some((field) => {
         PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
         return PLACEHOLDER.test(config[field] ?? '');
@@ -117,6 +159,7 @@ export function personaliseConfig(config, contact) {
         name: contact?.name ?? null,
         assistant: config.assistantName ?? DEFAULT_CONFIG.assistantName,
         combined_history: contact?.combined_history ?? null,
+        history,
     };
 
     const personalised = { ...config };

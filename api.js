@@ -28,7 +28,7 @@ import { E164, rejectUnauthorized } from './auth.js';
 import { enqueueRecording, sweepOnce } from './recordings.js';
 import { assertFetchable, isKnownSource } from './recordingSources.js';
 import { validate as validateTranscript, fromExternal as fromExternalTranscript, toText } from './transcripts.js';
-import { getContext, renderContext, CHANNELS, PLANNED_CHANNELS } from './context.js';
+import { getContext, renderContext, renderForPrompt, CHANNELS, PLANNED_CHANNELS } from './context.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -309,6 +309,11 @@ export default async function apiRoutes(fastify) {
                 // The rendered block, so a caller building a prompt does not
                 // reimplement the formatting and drift from what the app uses.
                 text: renderContext(context.turns),
+                // Exactly what {{history}} would put in a system prompt, fence
+                // and all. Being able to read that without placing a call is
+                // the difference between knowing what the assistant sees and
+                // assuming it.
+                prompt: renderForPrompt(context.turns),
                 // A channel that failed is reported rather than looking empty.
                 errors: context.errors,
                 planned: PLANNED_CHANNELS,

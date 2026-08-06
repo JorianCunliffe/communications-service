@@ -10,7 +10,8 @@
 // path here returns DEFAULT_CONFIG.
 
 import { createClient } from '@supabase/supabase-js';
-import { DEFAULT_CONFIG, personaliseConfig } from './config.js';
+import { DEFAULT_CONFIG, personaliseConfig, needsHistory } from './config.js';
+import { historyForPrompt } from './context.js';
 
 const LOOKUP_TIMEOUT_MS = 2500;
 const WARM_UP_TIMEOUT_MS = 10000;
@@ -93,6 +94,14 @@ export function rowToConfig(row, direction = 'inbound') {
         liveTranscript: pick(row.live_transcript_enabled, DEFAULT_CONFIG.liveTranscript),
         recordCalls: pick(row.call_recording_enabled, DEFAULT_CONFIG.recordCalls),
         summarise: pick(row.summarise_enabled, DEFAULT_CONFIG.summarise),
+
+        // How much history {{history}} pulls in. No column exists for these
+        // yet; an absent column reads as undefined, which pick() already treats
+        // as unset, so they fall through to the defaults until the migration
+        // adds them. Mapped now so adding the columns needs no code change.
+        historyLimit: pick(row.history_limit, DEFAULT_CONFIG.historyLimit),
+        historyMaxChars: pick(row.history_max_chars, DEFAULT_CONFIG.historyMaxChars),
+        historyDays: pick(row.history_days, DEFAULT_CONFIG.historyDays),
     };
 }
 
@@ -302,7 +311,38 @@ export async function resolveConfig({ from, to, direction, createContact = true 
         return personaliseConfig(DEFAULT_CONFIG, contact);
     }
 
-    return personaliseConfig(config, contact);
+    return personaliseConfig(config, contact, await historyFor(config, contact, otherParty));
+}
+
+// The rendered history block for a config that asks for one, or null.
+//
+// Deliberately serial, and deliberately after the config is chosen. Which
+// prompt this call uses is what decides whether history is wanted at all, and
+// that is not known until the cascade has run — so speculatively fetching it in
+// the earlier round trip would put a query on every call in the system to save
+// time on the few that use it.
+//
+// The cost is one extra round trip before TwiML, and only for a call whose
+// prompt contains {{history}}. It is capped by the timeout in context.js, and
+// it is the honest price of the assistant knowing what was said last time.
+async function historyFor(config, contact, otherParty) {
+    if (!needsHistory(config)) return null;
+    if (!contact?.id && !otherParty) return null;
+
+    const started = Date.now();
+    const history = await historyForPrompt({
+        contactId: contact?.id ?? null,
+        phoneNumber: otherParty,
+        limit: config.historyLimit,
+        maxChars: config.historyMaxChars,
+        days: config.historyDays,
+    });
+
+    // Logged every time, because this is time a caller spends listening to
+    // silence. If it starts creeping up, it should be visible without anyone
+    // having to go looking for it.
+    console.log(`History for ${contact?.name || otherParty}: ${history ? `${history.length} chars` : 'none'} in ${Date.now() - started}ms`);
+    return history;
 }
 
 // --- CallSid → config handoff ----------------------------------------------
