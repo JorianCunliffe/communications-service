@@ -54,7 +54,14 @@ export async function recordCall({ callSid, otherParty, direction, config, statu
             direction,
             status,
             system_prompt: config?.systemMessage ?? null,
-            metadata: { model: config?.model, voice: config?.voice, effort: config?.effort, ...metadata },
+            // aiSpeaksFirst is carried because the recording pipeline needs it
+            // later: it decides which diarised speaker is the assistant, and by
+            // then the call's config is long gone.
+            metadata: {
+                model: config?.model, voice: config?.voice, effort: config?.effort,
+                aiSpeaksFirst: config?.aiSpeaksFirst ?? null,
+                ...metadata,
+            },
             started_at: new Date().toISOString(),
         };
 

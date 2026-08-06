@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
-import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact } from './configResolver.js';
+import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact, getSupabase } from './configResolver.js';
 import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
 import { recordMessage } from './smsLog.js';
@@ -16,6 +16,7 @@ import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
 import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount } from './realtimeSessions.js';
+import { enqueueRecording, startRecordingSweeper } from './recordings.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -65,6 +66,7 @@ const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
+        'recordings.js', 'recordingSources.js', 'transcribe.js',
         'console.html', 'home.html', 'package.json',
     ];
 
@@ -204,6 +206,7 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     // opening the media stream instead of following it. Fire-and-forget: the
     // stream connects for itself if this has not finished, or never started.
     preconnect(params.CallSid, config);
+    startRecording(params.CallSid, config);
     console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'} (config in ${Date.now() - webhookStarted}ms)`);
 
     // Same record an outbound call gets, so both directions are inspectable.
@@ -393,9 +396,93 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     // minute, and an open session waiting through that is worse than no
     // session at all.
     preconnect(params.CallSid, config);
+    startRecording(params.CallSid, config);
 
     // No "please wait" intro: the callee picked up expecting us to speak.
     reply.type('text/xml').send(buildTwiml(config, request.headers.host, { includeIntro: false }));
+});
+
+// Starts recording a call that is already in progress, when its config asks for
+// it. Fire-and-forget and deliberately after TwiML has been returned: nothing
+// about recording may delay answering, and a call that records nothing is far
+// better than a call that does not connect.
+//
+// Dual channel keeps the caller and the assistant on separate tracks, which is
+// what lets the transcription model tell them apart afterwards.
+function startRecording(callSid, config) {
+    if (!config?.recordCalls || !callSid) return;
+
+    const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, PUBLIC_URL } = process.env;
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !PUBLIC_URL) {
+        return console.warn(`Cannot record ${callSid}: Twilio credentials or PUBLIC_URL are missing`);
+    }
+
+    const base = PUBLIC_URL.replace(/\/$/, '');
+    twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        .calls(callSid)
+        .recordings.create({
+            recordingChannels: 'dual',
+            recordingTrack: 'both',
+            recordingStatusCallback: `${base}/recording-status`,
+            recordingStatusCallbackEvent: ['completed', 'absent'],
+            recordingStatusCallbackMethod: 'POST',
+        })
+        .then((recording) => console.log(`Recording ${recording.sid} started for call ${callSid}`))
+        .catch((error) => console.warn(`Could not start recording for ${callSid}: ${error.message}`));
+}
+
+// Twilio tells us a recording is ready. Answers immediately and queues the work
+// — fetching and transcribing takes tens of seconds, far past any webhook
+// budget.
+//
+// The RecordingUrl in the body is deliberately ignored. The media URL is rebuilt
+// from the RecordingSid against our own account, so a forged callback can at
+// worst name a recording SID; it cannot make this process fetch a host of the
+// sender's choosing.
+fastify.all('/recording-status', twilioWebhook, async (request, reply) => {
+    const params = { ...request.query, ...request.body };
+    const { CallSid: callSid, RecordingSid: recordingSid, RecordingStatus: status } = params;
+
+    console.log(`Recording ${recordingSid || '(no sid)'} for call ${callSid || '(no sid)'} is ${status || 'unknown'}`);
+    reply.code(204).send();
+
+    if (!recordingSid) return;
+
+    const db = getSupabase();
+    if (!db) return;
+
+    // 'absent' means Twilio produced no recording — silence, or a call that
+    // ended too early. Recorded as a skipped row rather than as nothing, so
+    // "why is there no transcript" has an answer.
+    if (status === 'absent') {
+        await enqueueRecording({ source: 'twilio', externalId: recordingSid, status: 'skipped', phoneNumber: params.From ?? null });
+        return;
+    }
+    if (status !== 'completed') return; // 'in-progress' is not ours to act on
+
+    const { data: call } = await db
+        .from('calls')
+        .select('id, contact_id, phone_number, metadata')
+        .eq('twilio_call_sid', callSid)
+        .maybeSingle();
+
+    await db.from('calls')
+        .update({ recording_sid: recordingSid, recording_status: 'completed', transcription_status: 'pending' })
+        .eq('twilio_call_sid', callSid);
+
+    await enqueueRecording({
+        source: 'twilio',
+        externalId: recordingSid,
+        callId: call?.id ?? null,
+        contactId: call?.contact_id ?? null,
+        phoneNumber: call?.phone_number ?? null,
+        durationSeconds: Number(params.RecordingDuration) || null,
+        channels: Number(params.RecordingChannels) || null,
+        recordedAt: params.RecordingStartTime ? new Date(params.RecordingStartTime).toISOString() : null,
+        // Which speaker the model's "A" is depends on who spoke first, which is
+        // a property of the call's config, not of the audio.
+        metadata: { callSid, aiSpeaksFirst: call?.metadata?.aiSpeaksFirst ?? true },
+    });
 });
 
 // Twilio reports call progress here. Always answer 200 — a non-2xx makes Twilio
@@ -949,4 +1036,7 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
 
     // Closes Realtime sessions opened for calls that never connected a stream.
     startSessionSweeper();
+
+    // Drains the recordings queue: fetch, transcribe, store, delete the audio.
+    startRecordingSweeper();
 });
