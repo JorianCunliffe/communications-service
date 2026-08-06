@@ -150,6 +150,33 @@ fastify.get('/health', async (request, reply) => {
     });
 });
 
+// --- First-word latency instrumentation ------------------------------------
+//
+// The caller hears nothing until Iris's first audio frame, and everything
+// between answering and that frame is sequential: TwiML, the Twilio WebSocket,
+// the OpenAI WebSocket, session.update, the greeting, then generation. Any of
+// them could be the expensive one, and guessing which would mean changing the
+// audio path on a hunch.
+//
+// So this measures instead. Purely observational — it records timestamps and
+// prints one line per call, and removing every mark would leave behaviour
+// identical.
+
+// CallSid -> when the TwiML webhook answered, so the gap before Twilio opens
+// the media stream is visible. Swept on insert; a call that never connects a
+// stream would otherwise leave its entry behind forever.
+const answeredAt = new Map();
+const ANSWERED_TTL_MS = 10 * 60 * 1000;
+
+function markAnswered(callSid) {
+    if (!callSid) return;
+    const cutoff = Date.now() - ANSWERED_TTL_MS;
+    for (const [sid, at] of answeredAt) {
+        if (at < cutoff) answeredAt.delete(sid);
+    }
+    answeredAt.set(callSid, Date.now());
+}
+
 // Route options for the webhooks Twilio calls. They cannot present an API key,
 // so they are verified by Twilio's own signature instead — see auth.js for why
 // this defaults to logging rather than rejecting.
@@ -164,9 +191,11 @@ const twilioWebhook = {
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
+    const webhookStarted = Date.now();
     const config = await resolveConfig({ from: params.From, to: params.To, direction: 'inbound' });
     storeCallConfig(params.CallSid, config);
-    console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'}`);
+    markAnswered(params.CallSid);
+    console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'} (config in ${Date.now() - webhookStarted}ms)`);
 
     // Same record an outbound call gets, so both directions are inspectable.
     // Not awaited: a slow database write must not delay answering the call.
@@ -336,6 +365,7 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
 // Twilio fetches this once the callee answers.
 fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
+    markAnswered(params.CallSid); // outbound calls get the same latency line
 
     // Peek, don't consume: the media stream still needs this config when its
     // 'start' event arrives for the same CallSid.
@@ -419,6 +449,34 @@ fastify.register(async (fastify) => {
         // chance.
         const MAX_SEGMENTS = 500;
 
+        // --- Latency marks ---------------------------------------------------
+        // Wall-clock, one per stage, printed once when the first audio frame
+        // goes out. Nothing reads these except the log line.
+        const mark = {};
+        const at = (stage) => { if (!mark[stage]) mark[stage] = Date.now(); };
+
+        const reportLatency = () => {
+            const answered = answeredAt.get(callSid);
+            if (callSid) answeredAt.delete(callSid);
+
+            // Each number is the cost of that stage alone, so the expensive one
+            // is obvious without arithmetic. Totals are from the moment the
+            // TwiML webhook answered, which is the closest thing we have to
+            // when the caller stopped hearing ringing.
+            const gap = (from, to) => (mark[from] && mark[to] ? `${mark[to] - mark[from]}ms` : '?');
+
+            console.log(
+                `First word latency ${callSid || '(no callSid)'}: ` +
+                `twiml->stream ${answered && mark.streamStart ? `${mark.streamStart - answered}ms` : '?'}, ` +
+                `openai connect ${gap('streamStart', 'openAiOpen')}, ` +
+                `settle delay ${gap('openAiOpen', 'sessionUpdateSent')}, ` +
+                `session ack ${gap('sessionUpdateSent', 'sessionUpdated')}, ` +
+                `greeting sent ${gap('sessionUpdateSent', 'greetingSent')}, ` +
+                `generation ${gap('greetingSent', 'firstAudio')}` +
+                (answered ? ` | total ${mark.firstAudio - answered}ms` : '')
+            );
+        };
+
         // Twilio sends media.timestamp as a JSON *string*. The interruption
         // maths downstream coerces it silently ("4820" - 100 works), so nothing
         // ever noticed; buildSegment is strict about types and turned every
@@ -453,6 +511,7 @@ fastify.register(async (fastify) => {
 
             console.log('Sending session update:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
+            at('sessionUpdateSent');
 
             if (config.aiSpeaksFirst) sendInitialConversationItem();
         };
@@ -476,6 +535,7 @@ fastify.register(async (fastify) => {
             if (SHOW_TIMING_MATH) console.log('Sending initial conversation item:', JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
+            at('greetingSent');
         };
 
         // Handle interruption when the caller's speech starts
@@ -579,7 +639,12 @@ fastify.register(async (fastify) => {
 
         // Open event for OpenAI WebSocket
         const handleOpenAiOpen = () => {
+            at('openAiOpen');
             console.log('Connected to the OpenAI Realtime API');
+            // The 100ms is inherited from the original sample and nothing here
+            // documents what race it was guarding. The instrumentation reports
+            // it as "settle delay" so its cost is at least visible while that
+            // question is open.
             setTimeout(initializeSession, 100);
         };
 
@@ -592,6 +657,8 @@ fastify.register(async (fastify) => {
                     console.log(`Received event: ${response.type}`, response);
                 }
 
+                if (response.type === 'session.updated') at('sessionUpdated');
+
                 if (response.type === 'response.output_audio.delta' && response.delta) {
                     const audioDelta = {
                         event: 'media',
@@ -599,6 +666,12 @@ fastify.register(async (fastify) => {
                         media: { payload: response.delta }
                     };
                     connection.send(JSON.stringify(audioDelta));
+
+                    // The caller hears something for the first time here.
+                    if (!mark.firstAudio) {
+                        at('firstAudio');
+                        reportLatency();
+                    }
 
                     // First delta from a new response starts the elapsed time counter
                     if (!responseStartTimestampTwilio) {
@@ -693,6 +766,7 @@ fastify.register(async (fastify) => {
                         }
                         break;
                     case 'start':
+                        at('streamStart');
                         streamSid = data.start.streamSid;
                         callSid = data.start.callSid || null;
                         console.log('Incoming stream has started', streamSid, data.start.callSid || '(no callSid)');
