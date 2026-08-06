@@ -103,23 +103,40 @@ const PLACEHOLDER = /\{\{\s*(name|assistant|combined_history|history)\s*(?:\|([^
 // default cannot suit every sentence: "Hi {{name}}" wants "there", but
 // "speaking with {{name}}" would read as "speaking with there" — write
 // {{name|the caller}} to choose per placeholder.
+// What {{history}} puts in the prompt. Not the history itself — the record is
+// delivered into the conversation after the greeting, so fetching it never
+// stands between the caller dialling and the assistant speaking. This is the
+// forward reference that tells the model it is coming.
+//
+// Worded around "any", because whether there is a record to send is not known
+// when this text is written: it is fixed before the call is answered, and the
+// lookup has not run yet.
+//
+// The last sentence is not decoration. Told only that a record was coming, a
+// model that received none invented one — "we spoke earlier today about setting
+// up your smart home devices", to a caller it had never spoken to. A promise of
+// context with nothing to fill it is an invitation to make something up, so the
+// absence of a record is given an explicit meaning here, and an explicit empty
+// record is sent as well (see NO_HISTORY_BLOCK).
+export const HISTORY_NOTICE = 'Any previous conversations with this person are provided separately in this session as a labelled record. Use them for reference only. If that record says there is no previous contact, then you have never spoken to this person before — say so plainly and never invent a past conversation.';
+
 const IMPLICIT_FALLBACK = {
     name: 'there',
     assistant: 'the assistant',
     combined_history: 'No previous contact on record.',
-    history: 'No previous contact on record.',
+    history: HISTORY_NOTICE,
 };
 
-// Does this config ask for the real conversation history?
+// Does this call want the conversation record?
 //
 // The placeholder is the switch. There is no separate enable flag because there
-// is nothing a flag could mean on its own: history that is fetched but not
-// interpolated is a database query nobody reads, and a prompt asking for
-// {{history}} with the flag off would silently say "no previous contact" about
-// someone we have spoken to ten times. One thing to set, one place to look.
+// is nothing a flag could mean on its own: history fetched but never mentioned
+// to the model is a database query nobody reads, and a prompt asking for
+// {{history}} with the flag off would tell the model a record is coming and
+// then never send one. One thing to set, one place to look.
 //
-// Checked before the lookup runs, so a prompt without it makes no extra query
-// and the call is byte-for-byte the call it was before this existed.
+// Checked before the lookup starts, so a prompt without it makes no query at
+// all and the call is byte-for-byte the call it was before this existed.
 export function needsHistory(config) {
     return TEMPLATED_FIELDS.some((field) => {
         HISTORY_PLACEHOLDER.lastIndex = 0;
@@ -145,10 +162,7 @@ export function renderTemplate(text, values = {}) {
 // `contact` is the row from public.contacts, or null for an unknown caller;
 // every placeholder degrades to a readable fallback rather than leaking braces.
 //
-// `history` is the rendered cross-channel record, already delimited, or null.
-// The caller fetches it — this module stays free of I/O so it can be tested
-// without a database, and so nothing here can block a call by accident.
-export function personaliseConfig(config, contact, history = null) {
+export function personaliseConfig(config, contact) {
     const needsRender = TEMPLATED_FIELDS.some((field) => {
         PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
         return PLACEHOLDER.test(config[field] ?? '');
@@ -159,13 +173,22 @@ export function personaliseConfig(config, contact, history = null) {
         name: contact?.name ?? null,
         assistant: config.assistantName ?? DEFAULT_CONFIG.assistantName,
         combined_history: contact?.combined_history ?? null,
-        history,
+        // Deliberately never a value: {{history}} always renders to the notice
+        // (or to whatever fallback the prompt supplies), because the record
+        // itself does not travel in the prompt.
+        history: null,
     };
 
     const personalised = { ...config };
     for (const field of TEMPLATED_FIELDS) {
         personalised[field] = renderTemplate(config[field], values);
     }
+
+    // Recorded here because this is the last moment the placeholder is visible:
+    // rendering replaces {{history}} with the notice, so anything downstream
+    // asking "did this prompt want history?" would find no trace of it and
+    // silently never start the lookup.
+    personalised.wantsHistory = needsHistory(config);
     return personalised;
 }
 

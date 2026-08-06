@@ -9,8 +9,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, CHANNELS, PLANNED_CHANNELS } from '../context.js';
-import { needsHistory, personaliseConfig, DEFAULT_CONFIG } from '../config.js';
+import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, NO_HISTORY_BLOCK, CHANNELS, PLANNED_CHANNELS } from '../context.js';
+import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE } from '../config.js';
+import { startHistory, claimHistory } from '../realtimeSessions.js';
 
 const turn = (channel, role, content, at) => buildTurn({ channel, role, content, at });
 
@@ -220,10 +221,17 @@ describe('context – for a prompt', () => {
         assert.equal(block.indexOf('developer mode') < block.indexOf('END HISTORY'), true);
     });
 
-    test('no history renders as null, not an empty fence', () => {
-        // An empty BEGIN/END block asserts "we have spoken and nothing was
-        // said", which is a different and wrong claim.
+    test('no turns renders as null, so the caller chooses what to say', () => {
+        // An empty BEGIN/END block would assert "we have spoken and nothing was
+        // said". historyForPrompt substitutes the explicit empty record.
         assert.equal(renderForPrompt([]), null);
+    });
+
+    test('the empty record says nothing happened, rather than saying nothing', () => {
+        // Silence is what let the model invent a past conversation.
+        assert.match(NO_HISTORY_BLOCK, /No previous contact on record/);
+        assert.match(NO_HISTORY_BLOCK, /BEGIN HISTORY/);
+        assert.match(NO_HISTORY_BLOCK, /do not describe any past conversation/i);
     });
 });
 
@@ -243,24 +251,87 @@ describe('history – the placeholder is the switch', () => {
         assert.equal(needsHistory({ systemMessage: '{{combined_history}}' }), false);
     });
 
-    test('the lookup failing leaves readable text, not braces', () => {
-        const config = personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: 'Before: {{history}}' }, null, null);
-        assert.equal(config.systemMessage, 'Before: No previous contact on record.');
+    test('the placeholder becomes a forward reference, never the record', () => {
+        // The record does not travel in the prompt — it is delivered into the
+        // session after the greeting, so the caller never waits for the query.
+        // What goes here is only the notice that it is coming.
+        const config = personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: 'Before: {{history}}' }, null);
+        assert.equal(config.systemMessage, `Before: ${HISTORY_NOTICE}`);
+        assert.equal(config.systemMessage.includes('BEGIN HISTORY'), false);
     });
 
-    test('an explicit fallback beats the implicit one', () => {
-        const config = personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: 'X {{history|first time}}' }, null, null);
-        assert.equal(config.systemMessage, 'X first time');
+    test('the notice hedges, because the record may be empty', () => {
+        // Whether there is anything to send is not known when this text is
+        // fixed: the prompt is built before the call is answered and the lookup
+        // has not run.
+        assert.match(HISTORY_NOTICE, /\bAny\b/);
     });
 
-    test('history and combined_history can both appear', () => {
+    test('the notice forbids inventing a past conversation', () => {
+        // Observed: told a record was coming and given none, the model
+        // described a conversation about smart home devices with a caller it
+        // had never spoken to. A promise with nothing behind it gets filled in.
+        assert.match(HISTORY_NOTICE, /never invent/i);
+    });
+
+    test('wantsHistory survives rendering, which erases the placeholder', () => {
+        // The bug this pins: {{history}} is replaced by the notice during
+        // personalisation, so anything downstream checking the prompt text for
+        // the placeholder finds nothing and skips the lookup for every call.
+        const asked = personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: 'Hi {{name}}. {{history}}' }, null);
+        assert.equal(asked.systemMessage.includes('{{history}}'), false);
+        assert.equal(asked.wantsHistory, true);
+
+        const notAsked = personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: 'Hi {{name}}.' }, null);
+        assert.equal(notAsked.wantsHistory, false);
+    });
+
+    test('a fallback lets the prompt word the notice itself', () => {
+        const config = personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: 'X {{history|Past calls follow.}}' }, null);
+        assert.equal(config.systemMessage, 'X Past calls follow.');
+    });
+
+    test('history and combined_history are independent', () => {
         const config = personaliseConfig(
-            { ...DEFAULT_CONFIG, systemMessage: 'digest: {{combined_history}} | full: {{history}}' },
-            { name: 'Jorian', combined_history: '2026-08-01  call   asked about invoices' },
-            'BEGIN HISTORY\n[sms] them: hi\nEND HISTORY'
+            { ...DEFAULT_CONFIG, systemMessage: 'digest: {{combined_history}} | record: {{history}}' },
+            { name: 'Jorian', combined_history: '2026-08-01  call   asked about invoices' }
         );
         assert.match(config.systemMessage, /asked about invoices/);
-        assert.match(config.systemMessage, /BEGIN HISTORY/);
+        assert.match(config.systemMessage, /provided separately/);
+    });
+});
+
+describe('history – off the critical path', () => {
+    test('no placeholder, no lookup at all', () => {
+        // The point of the whole arrangement: a call whose prompt never asks
+        // for history must not cost a query, so there is nothing to claim.
+        startHistory('CA-no-placeholder', DEFAULT_CONFIG, '+61400000000');
+        assert.equal(claimHistory('CA-no-placeholder'), null);
+    });
+
+    test('nothing to claim for a call that never started one', () => {
+        assert.equal(claimHistory('CA-never-seen'), null);
+    });
+
+    // Through personaliseConfig, because that is what sets wantsHistory and
+    // what every real caller of startHistory has already been through.
+    const wantsHistory = () => personaliseConfig({ ...DEFAULT_CONFIG, systemMessage: '{{history}}' }, null);
+
+    test('a lookup without a phone number is not started', () => {
+        startHistory('CA-no-number', wantsHistory(), null);
+        assert.equal(claimHistory('CA-no-number'), null);
+    });
+
+    test('claiming consumes, so a second stream cannot re-send the record', () => {
+        startHistory('CA-claim-once', wantsHistory(), '+61400000000');
+
+        const first = claimHistory('CA-claim-once');
+        assert.ok(first && typeof first.then === 'function', 'should hand back a promise');
+        assert.equal(claimHistory('CA-claim-once'), null);
+
+        // Whatever it resolves to, it must not reject — a failed lookup costs
+        // context, never the call.
+        return first;
     });
 });
 

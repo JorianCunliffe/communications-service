@@ -426,12 +426,28 @@ export function renderForPrompt(turns, options = {}) {
     ].join('\n');
 }
 
-// The history block for a call's system prompt, or null.
+// Sent when there is nothing to send.
+//
+// Silence is not a safe way to say "no previous contact". The prompt has
+// already told the model a record is provided, and a model told to expect
+// context and given none will fill the gap: asked whether we had spoken before,
+// one confidently described a conversation about smart home devices that never
+// happened. An explicit empty record removes the ambiguity that invited it.
+export const NO_HISTORY_BLOCK = [
+    'Conversation record for this person:',
+    'BEGIN HISTORY',
+    'No previous contact on record. You have not spoken to this person before.',
+    'END HISTORY — do not describe any past conversation with them.',
+].join('\n');
+
+// The history block for a call, always a string.
 //
 // Never throws and never hangs: every failure — Supabase down, a slow query, a
-// provider erroring — degrades to null, and {{history}} falls back to its
-// placeholder text. A call that would have happened without this feature must
-// still happen exactly the same way when this feature is having a bad day.
+// provider erroring — degrades to the empty record rather than to nothing. A
+// call that would have happened without this feature must still happen exactly
+// the same way when this feature is having a bad day, and "we have not spoken"
+// is a better thing to tell the model on a bad day than silence, which it will
+// fill in for itself.
 export async function historyForPrompt({
     phoneNumber,
     contactId,
@@ -440,7 +456,7 @@ export async function historyForPrompt({
     days = null,
     timeoutMs = PROMPT_TIMEOUT_MS,
 } = {}) {
-    if (!phoneNumber && !contactId) return null;
+    if (!phoneNumber && !contactId) return NO_HISTORY_BLOCK;
 
     const since = Number.isFinite(days) && days > 0
         ? new Date(Date.now() - days * 86400000).toISOString()
@@ -456,10 +472,10 @@ export async function historyForPrompt({
             getContext({ phoneNumber, contactId, limit, maxChars, since }),
             timeout,
         ]);
-        return renderForPrompt(turns);
+        return renderForPrompt(turns) ?? NO_HISTORY_BLOCK;
     } catch (error) {
-        console.warn(`History for prompt unavailable (${error.message}) — continuing without it`);
-        return null;
+        console.warn(`History for prompt unavailable (${error.message}) — sending the empty record instead`);
+        return NO_HISTORY_BLOCK;
     } finally {
         clearTimeout(timer);
     }

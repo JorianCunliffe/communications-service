@@ -15,7 +15,7 @@ import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
-import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount } from './realtimeSessions.js';
+import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory } from './realtimeSessions.js';
 import { enqueueRecording, startRecordingSweeper } from './recordings.js';
 import { summariseCall } from './summarise.js';
 
@@ -208,6 +208,14 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     // opening the media stream instead of following it. Fire-and-forget: the
     // stream connects for itself if this has not finished, or never started.
     preconnect(params.CallSid, config);
+
+    // Same idea, different slow thing. Reading what was said to this person
+    // before is a database round trip; started here it overlaps with the
+    // handshake and the greeting instead of delaying them, and the record is
+    // handed to the model once it is already speaking. No-op unless the prompt
+    // contains {{history}}.
+    startHistory(params.CallSid, config, params.From);
+
     startRecording(params.CallSid, config);
     console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'} (config in ${Date.now() - webhookStarted}ms)`);
 
@@ -398,6 +406,9 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     // minute, and an open session waiting through that is worse than no
     // session at all.
     preconnect(params.CallSid, config);
+    // Keyed on the person we called, which is params.To on an outbound leg.
+    // Keying it on From would look up the history of our own Twilio number.
+    startHistory(params.CallSid, config, params.To);
     startRecording(params.CallSid, config);
 
     // No "please wait" intro: the callee picked up expecting us to speak.
@@ -638,7 +649,7 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify(sessionUpdate));
             at('sessionUpdateSent');
 
-            if (config.aiSpeaksFirst) sendInitialConversationItem();
+            openingSequence();
         };
 
         // Send initial conversation item if AI talks first
@@ -661,6 +672,58 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify(initialConversationItem));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
             at('greetingSent');
+        };
+
+        // Hands the conversation record to the model, once it exists.
+        //
+        // Deliberately after the greeting has been requested, and deliberately
+        // not awaited by anything: the lookup started at the TwiML webhook and
+        // usually lands while the assistant is still saying its first sentence.
+        // Verified against the Realtime API — an item added mid-response leaves
+        // that response alone (status=completed, no truncation) and does not
+        // start another, so this is heard on the caller's first real question
+        // and never as an interruption.
+        //
+        // A system item rather than instructions, which is where this used to
+        // go. The content is caller text, and a conversation item carries less
+        // authority than the session prompt does.
+        const deliverHistory = () => {
+            const pending = claimHistory(callSid);
+            if (!pending) return;
+
+            pending.then((block) => {
+                if (!block) return;
+                // The call may already be over — a lookup that lost a race
+                // against a hangup must not throw on a closed socket.
+                if (!openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
+
+                openAiWs.send(JSON.stringify({
+                    type: 'conversation.item.create',
+                    item: {
+                        type: 'message',
+                        role: 'system',
+                        content: [{ type: 'input_text', text: block }],
+                    },
+                }));
+                at('historySent');
+
+                // Whether it beat the first audio frame is the number that
+                // matters: land before it and the record is there for anything
+                // the caller might say, land after and there is a window where
+                // the assistant is talking without it.
+                const into = mark.streamStart ? `${Date.now() - mark.streamStart}ms into the stream` : 'timing unknown';
+                console.log(`History delivered: ${block.length} chars, ${into}, ${mark.firstAudio ? 'after' : 'before'} first audio`);
+            }).catch((error) => {
+                console.warn(`Could not deliver history: ${error.message}`);
+            });
+        };
+
+        // Everything that happens the moment the session is ready. Greeting
+        // first so nothing delays the first word, then the record, which the
+        // caller never waits on.
+        const openingSequence = () => {
+            if (config.aiSpeaksFirst) sendInitialConversationItem();
+            deliverHistory();
         };
 
         // Handle interruption when the caller's speech starts
@@ -1019,7 +1082,7 @@ fastify.register(async (fastify) => {
                 at('sessionUpdateSent');
                 mark.preconnectedForMs = session.readyForMs;
                 console.log(`Adopted Realtime session for ${callSid}, ready ${session.readyForMs}ms before the stream`);
-                if (config.aiSpeaksFirst) sendInitialConversationItem();
+                openingSequence();
                 return;
             }
 
@@ -1034,7 +1097,7 @@ fastify.register(async (fastify) => {
             openAiWs.on('open', () => {
                 at('openAiOpen');
                 at('sessionUpdateSent');
-                if (config.aiSpeaksFirst) sendInitialConversationItem();
+                openingSequence();
             });
         };
     });

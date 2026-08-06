@@ -10,8 +10,7 @@
 // path here returns DEFAULT_CONFIG.
 
 import { createClient } from '@supabase/supabase-js';
-import { DEFAULT_CONFIG, personaliseConfig, needsHistory } from './config.js';
-import { historyForPrompt } from './context.js';
+import { DEFAULT_CONFIG, personaliseConfig } from './config.js';
 
 const LOOKUP_TIMEOUT_MS = 2500;
 const WARM_UP_TIMEOUT_MS = 10000;
@@ -311,38 +310,12 @@ export async function resolveConfig({ from, to, direction, createContact = true 
         return personaliseConfig(DEFAULT_CONFIG, contact);
     }
 
-    return personaliseConfig(config, contact, await historyFor(config, contact, otherParty));
-}
-
-// The rendered history block for a config that asks for one, or null.
-//
-// Deliberately serial, and deliberately after the config is chosen. Which
-// prompt this call uses is what decides whether history is wanted at all, and
-// that is not known until the cascade has run — so speculatively fetching it in
-// the earlier round trip would put a query on every call in the system to save
-// time on the few that use it.
-//
-// The cost is one extra round trip before TwiML, and only for a call whose
-// prompt contains {{history}}. It is capped by the timeout in context.js, and
-// it is the honest price of the assistant knowing what was said last time.
-async function historyFor(config, contact, otherParty) {
-    if (!needsHistory(config)) return null;
-    if (!contact?.id && !otherParty) return null;
-
-    const started = Date.now();
-    const history = await historyForPrompt({
-        contactId: contact?.id ?? null,
-        phoneNumber: otherParty,
-        limit: config.historyLimit,
-        maxChars: config.historyMaxChars,
-        days: config.historyDays,
-    });
-
-    // Logged every time, because this is time a caller spends listening to
-    // silence. If it starts creeping up, it should be visible without anyone
-    // having to go looking for it.
-    console.log(`History for ${contact?.name || otherParty}: ${history ? `${history.length} chars` : 'none'} in ${Date.now() - started}ms`);
-    return history;
+    // Note what this deliberately does not do: fetch conversation history.
+    // Nothing on the path to answering a call should wait on it. The lookup is
+    // started separately by startHistory() in realtimeSessions.js, runs while
+    // the call is still being set up, and reaches the model after it has
+    // already begun speaking.
+    return personaliseConfig(config, contact);
 }
 
 // --- CallSid → config handoff ----------------------------------------------

@@ -29,6 +29,7 @@
 
 import WebSocket from 'ws';
 import { buildRealtimeUrl, buildSessionUpdate } from './config.js';
+import { historyForPrompt, NO_HISTORY_BLOCK } from './context.js';
 
 // How long an unclaimed socket is kept before it is closed. Twilio opens the
 // media stream within tens of milliseconds of fetching TwiML, so anything still
@@ -78,6 +79,7 @@ export function startSessionSweeper() {
         for (const [callSid, entry] of pending) {
             if (entry.openedAt < cutoff) discard(callSid, entry, 'never claimed by a media stream');
         }
+        sweepHistory();
     }, SWEEP_INTERVAL_MS);
     sweeper.unref?.(); // never hold the process open on its own account
 }
@@ -189,4 +191,78 @@ export function claim(callSid) {
 // For /health, so "is pre-connection working" is answerable without the logs.
 export function pendingCount() {
     return pending.size;
+}
+
+// --- Conversation history ---------------------------------------------------
+//
+// The same trick as the socket above, for the same reason. Reading what was
+// said to this person before takes 330-590ms against the live database, and
+// there is no version of that which is worth putting between a caller dialling
+// and the assistant speaking — first-word latency is about 1.5s, and this would
+// be a third of it again.
+//
+// So the lookup starts at the TwiML webhook, runs while Twilio sets up the
+// media stream and the assistant delivers its greeting, and the record is
+// handed to the model afterwards. Verified against the Realtime API: adding a
+// conversation item mid-response does not disturb the response in flight
+// (status=completed, no truncation) and does not start a new one, and the
+// record is in context for the next turn.
+//
+// The prompt already says a record is coming, via {{history}}. That wording is
+// hedged with "any" precisely because this can arrive empty or not at all.
+
+const historyPending = new Map(); // callSid -> { promise, startedAt }
+
+// Begins the lookup for a call that is about to connect. Fire-and-forget, and
+// never rejects: losing history costs context, not the call.
+export function startHistory(callSid, config, phoneNumber) {
+    if (!callSid || !phoneNumber || historyPending.has(callSid)) return;
+
+    // Set by personaliseConfig, because by now the prompt holds the rendered
+    // notice and the {{history}} placeholder that asked for it is gone.
+    // Checking the text here found nothing and quietly skipped every lookup.
+    if (!config.wantsHistory) return;
+
+    const startedAt = Date.now();
+    const promise = historyForPrompt({
+        phoneNumber,
+        limit: config.historyLimit,
+        maxChars: config.historyMaxChars,
+        days: config.historyDays,
+    })
+        .then((block) => {
+            const what = block === NO_HISTORY_BLOCK ? 'no previous contact' : `${block.length} chars`;
+            console.log(`History for ${phoneNumber}: ${what} in ${Date.now() - startedAt}ms`);
+            return block;
+        })
+        // historyForPrompt already swallows its own failures; this is the belt
+        // to that braces, so an unhandled rejection can never reach the call.
+        // Still the empty record rather than null — the prompt has promised the
+        // model a record, and giving it none is what makes it invent one.
+        .catch((error) => {
+            console.warn(`History lookup failed for ${phoneNumber}: ${error.message}`);
+            return NO_HISTORY_BLOCK;
+        });
+
+    historyPending.set(callSid, { promise, startedAt });
+}
+
+// The pending lookup for this call, or null if none was started. Returns the
+// promise rather than a value: the media stream reaches this point in a few
+// hundred milliseconds and the query may still be in flight, and waiting for it
+// there costs nothing because the assistant is already talking.
+export function claimHistory(callSid) {
+    const entry = callSid ? historyPending.get(callSid) : undefined;
+    if (!entry) return null;
+    historyPending.delete(callSid);
+    return entry.promise;
+}
+
+// A call that never connected a stream leaves its lookup behind. Same sweep as
+// the sockets above, for the same reason.
+function sweepHistory() {
+    const cutoff = Date.now() - UNCLAIMED_TTL_MS;
+    for (const [callSid, entry] of historyPending) {
+        if (entry.startedAt < cutoff) historyPending.delete(callSid);
+    }
 }
