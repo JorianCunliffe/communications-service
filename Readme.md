@@ -86,6 +86,7 @@ be updated in Twilio every time.
 | `TWILIO_AUTH_TOKEN` | For outbound | Twilio credentials. |
 | `PUBLIC_URL` | For outbound calls | Public base URL Twilio can reach, used to build the `/outbound-answer` and `/call-status` callbacks, **and to verify webhook signatures**. |
 | `TWILIO_VALIDATE_SIGNATURES` | No | `off`, `warn` or `enforce`. Defaults to `warn` when `TWILIO_AUTH_TOKEN` is set, `off` otherwise. See [Webhook signatures](#webhook-signatures). |
+| `PRECONNECT_REALTIME` | No | `false` restores opening the OpenAI socket at media-stream start rather than at the TwiML webhook. Default on. See [First-word latency](#first-word-latency). |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Endpoint for an `http`-type tool, e.g. `TOOL_CHECK_CALENDAR_URL`. A tool whose URL is unset is never offered to the model. |
 
 ## Twilio configuration
@@ -547,6 +548,40 @@ If a file is not in the `SOURCES` list in `index.js`, changes to it are
 invisible to the fingerprint. Add new modules there.
 
 Both identifiers also render as chips on `/` and `/console`.
+
+### First-word latency
+
+Everything between answering and the caller hearing Iris is sequential, and the
+process log prints one line per call breaking it down:
+
+```
+First word latency CAxxx: twiml->stream 14ms, openai ready 380ms before the stream,
+  session ack 260ms, greeting sent 2ms, generation 527ms | total 795ms
+```
+
+`session ack` runs in parallel — the greeting is sent immediately after
+`session.update` rather than waiting for the acknowledgement — so it is
+reported for information and is not part of the total.
+
+Two things were done about it:
+
+- **The OpenAI socket is opened at the TwiML webhook**, not at media-stream
+  start, so its handshake overlaps with Twilio setting up the stream. The
+  webhook already knows the `CallSid` and has resolved the config, which is
+  everything the connection URL and `session.update` need. The gain is bounded
+  by how long Twilio takes to open the stream, because that is the whole window
+  available to overlap into.
+- **A 100 ms `setTimeout` before `session.update` was removed.** It came from
+  the original sample with nothing documenting what race it guarded, and
+  measured at 103–110 ms of every caller's wait.
+
+A socket is usually claimed *mid-handshake* — Twilio opens its stream in tens of
+milliseconds and OpenAI takes hundreds — so it is adopted rather than abandoned.
+Partway through one handshake beats starting a second.
+
+`/health` reports `preconnect.pending`. Anything other than zero for more than a
+few seconds means streams are not claiming sessions. Unclaimed sockets are
+closed after 60 s so an abandoned call cannot leak an OpenAI session.
 
 ### Logging
 

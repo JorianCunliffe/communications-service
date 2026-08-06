@@ -15,6 +15,7 @@ import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
+import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount } from './realtimeSessions.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -63,7 +64,7 @@ const VERSION = (() => {
 const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
-        'tools.js', 'auth.js', 'api.js', 'transcripts.js',
+        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
         'console.html', 'home.html', 'package.json',
     ];
 
@@ -147,6 +148,9 @@ fastify.get('/health', async (request, reply) => {
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
         twilioSignatures: signatureMode(),
+        // Sessions opened ahead of the media stream. `pending` above zero for
+        // any length of time means streams are not claiming them.
+        preconnect: preconnectEnabled() ? { enabled: true, pending: pendingCount() } : { enabled: false },
     });
 });
 
@@ -195,6 +199,11 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     const config = await resolveConfig({ from: params.From, to: params.To, direction: 'inbound' });
     storeCallConfig(params.CallSid, config);
     markAnswered(params.CallSid);
+
+    // Start the OpenAI socket now, so its handshake overlaps with Twilio
+    // opening the media stream instead of following it. Fire-and-forget: the
+    // stream connects for itself if this has not finished, or never started.
+    preconnect(params.CallSid, config);
     console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'} (config in ${Date.now() - webhookStarted}ms)`);
 
     // Same record an outbound call gets, so both directions are inspectable.
@@ -379,6 +388,12 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
 
     console.log(`Outbound call ${params.CallSid || '(no CallSid)'} answered by ${params.To || 'unknown'}`);
 
+    // The callee is on the line from this moment, so the same head start
+    // applies. Not done at /outbound-call time — the phone may ring for half a
+    // minute, and an open session waiting through that is worse than no
+    // session at all.
+    preconnect(params.CallSid, config);
+
     // No "please wait" intro: the callee picked up expecting us to speak.
     reply.type('text/xml').send(buildTwiml(config, request.headers.host, { includeIntro: false }));
 });
@@ -465,13 +480,26 @@ fastify.register(async (fastify) => {
             // when the caller stopped hearing ringing.
             const gap = (from, to) => (mark[from] && mark[to] ? `${mark[to] - mark[from]}ms` : '?');
 
+            // An adopted session did its connecting before the stream existed,
+            // so those stages have no duration here — what matters instead is
+            // how long it had been sitting ready, which is the head start.
+            let openai;
+            if (mark.preconnectedForMs != null) {
+                openai = `openai ready ${mark.preconnectedForMs}ms before the stream`;
+            } else if (mark.preconnectStartedMsAgo != null) {
+                // Adopted mid-handshake: the remaining wait is what was left of
+                // a handshake that started before the stream existed.
+                openai = `openai finished handshake ${gap('streamStart', 'openAiOpen')} after the stream (started ${mark.preconnectStartedMsAgo}ms earlier)`;
+            } else {
+                openai = `openai connect ${gap('streamStart', 'openAiOpen')}`;
+            }
+
             console.log(
                 `First word latency ${callSid || '(no callSid)'}: ` +
                 `twiml->stream ${answered && mark.streamStart ? `${mark.streamStart - answered}ms` : '?'}, ` +
-                `openai connect ${gap('streamStart', 'openAiOpen')}, ` +
-                `settle delay ${gap('openAiOpen', 'sessionUpdateSent')}, ` +
+                `${openai}, ` +
                 `session ack ${gap('sessionUpdateSent', 'sessionUpdated')}, ` +
-                `greeting sent ${gap('sessionUpdateSent', 'greetingSent')}, ` +
+                `greeting sent ${gap('streamStart', 'greetingSent')}, ` +
                 `generation ${gap('greetingSent', 'firstAudio')}` +
                 (answered ? ` | total ${mark.firstAudio - answered}ms` : '')
             );
@@ -641,11 +669,15 @@ fastify.register(async (fastify) => {
         const handleOpenAiOpen = () => {
             at('openAiOpen');
             console.log('Connected to the OpenAI Realtime API');
-            // The 100ms is inherited from the original sample and nothing here
-            // documents what race it was guarding. The instrumentation reports
-            // it as "settle delay" so its cost is at least visible while that
-            // question is open.
-            setTimeout(initializeSession, 100);
+
+            // This used to be setTimeout(initializeSession, 100), inherited
+            // from the original sample with nothing documenting which race it
+            // guarded. Measurement put it at 103-110ms of the caller's wait for
+            // no observable purpose: 'open' means the handshake is complete, so
+            // there is nothing left to settle. Sent directly now. If some race
+            // does turn out to exist it will show as an error on session.update,
+            // which is logged — not as silence, which is what the delay cost.
+            initializeSession();
         };
 
         // Listen for messages from the OpenAI WebSocket (and send to Twilio if necessary)
@@ -779,7 +811,7 @@ fastify.register(async (fastify) => {
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
 
-                        if (!openAiWs) connectToOpenAi();
+                        if (!openAiWs) startOrAdoptSession();
                         break;
                     case 'mark':
                         if (markQueue.length > 0) {
@@ -839,8 +871,10 @@ fastify.register(async (fastify) => {
             console.error('Error in the OpenAI WebSocket:', error);
         };
 
-        // Create the OpenAI WebSocket for this call. Deferred until the Twilio
-        // 'start' event so the per-call config (looked up by CallSid) is known.
+        // Create the OpenAI WebSocket for this call. The fallback path: used
+        // when there is no pre-connected session to adopt, which is any call
+        // that arrived without a CallSid (the test suite), one whose handshake
+        // had not finished, and every call at all if PRECONNECT_REALTIME=false.
         const connectToOpenAi = () => {
             openAiWs = new WebSocket(buildRealtimeUrl(config), {
                 headers: {
@@ -852,6 +886,53 @@ fastify.register(async (fastify) => {
             openAiWs.on('message', handleOpenAiMessage);
             openAiWs.on('close', handleOpenAiClose);
             openAiWs.on('error', handleOpenAiError);
+        };
+
+        // Take the session the TwiML webhook started, or open one now.
+        //
+        // An adopted socket is already open and already configured, so the two
+        // things the caller used to wait through — the handshake and
+        // session.update — have both happened during the window Twilio spent
+        // setting up the media stream. All that is left is to greet.
+        const startOrAdoptSession = () => {
+            const session = claimSession(callSid);
+            if (!session) return connectToOpenAi();
+
+            openAiWs = session.ws;
+            openAiWs.on('message', handleOpenAiMessage);
+            openAiWs.on('close', handleOpenAiClose);
+            openAiWs.on('error', handleOpenAiError);
+
+            // Anything OpenAI said while nobody was listening. Replayed before
+            // the greeting so the handler sees events in order — session.created
+            // and session.updated both land in this window.
+            for (const buffered of session.buffered) handleOpenAiMessage(buffered);
+
+            if (session.open) {
+                // Open and already configured: both of the things the caller
+                // used to wait through happened while Twilio was setting up the
+                // media stream. Nothing left but to greet.
+                at('openAiOpen');
+                at('sessionUpdateSent');
+                mark.preconnectedForMs = session.readyForMs;
+                console.log(`Adopted Realtime session for ${callSid}, ready ${session.readyForMs}ms before the stream`);
+                if (config.aiSpeaksFirst) sendInitialConversationItem();
+                return;
+            }
+
+            // Still handshaking — the usual case, because Twilio opens its
+            // stream in tens of milliseconds and OpenAI takes hundreds. Adopted
+            // rather than abandoned: partway through one handshake beats
+            // starting a second. The pre-connect's own open handler runs first
+            // and sends session.update, because listeners fire in the order
+            // they were added.
+            console.log(`Adopted Realtime session for ${callSid} mid-handshake, ${session.startedMsAgo}ms in`);
+            mark.preconnectStartedMsAgo = session.startedMsAgo;
+            openAiWs.on('open', () => {
+                at('openAiOpen');
+                at('sessionUpdateSent');
+                if (config.aiSpeaksFirst) sendInitialConversationItem();
+            });
         };
     });
 });
@@ -865,4 +946,7 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
 
     // Don't make the first caller pay for the cold connection.
     warmUp();
+
+    // Closes Realtime sessions opened for calls that never connected a stream.
+    startSessionSweeper();
 });
