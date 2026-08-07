@@ -68,7 +68,11 @@ const TOOLS = {
             properties: {
                 timezone: {
                     type: 'string',
-                    description: 'IANA timezone name, e.g. Australia/Brisbane. Defaults to Australia/Brisbane.',
+                    description:
+                        'IANA timezone name, e.g. Europe/Paris. OMIT THIS unless the caller has ' +
+                        'explicitly named a place they want the time for. Omitting it gives the ' +
+                        'caller\'s own local time, which is almost always what they meant. Never ' +
+                        'pass UTC: it is not where anyone is, and answering in it is wrong.',
                 },
             },
             required: [],

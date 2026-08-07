@@ -136,6 +136,35 @@ describe('transcripts – assembly', () => {
         assert.equal(transcript.segments[0].text, 'kept');
     });
 
+    test('counts turns that happened but produced no text', () => {
+        // Observed live: the caller spoke for 908ms, transcription returned an
+        // empty string, the turn was dropped, and the stored transcript showed
+        // the assistant replying to nobody. The turn still must not appear in
+        // segments — inventing text would put words nobody said into something
+        // that later feeds prompts — but the fact that it happened is the only
+        // thing that explains the reply.
+        const transcript = buildTranscript({
+            channel: 'call',
+            segments: [
+                { role: 'assistant', text: 'Iris here.', startMs: 1200 },
+                { role: 'user', text: '', startMs: 4906 },
+                { role: 'assistant', text: 'I can’t do that.', startMs: 5672 },
+            ],
+        });
+
+        assert.equal(transcript.segments.length, 2, 'the empty turn stays out of the transcript');
+        assert.equal(transcript.unintelligible, 1);
+        assert.equal(transcript.segments.some((s) => s.text === ''), false);
+    });
+
+    test('a clean transcript reports nothing lost', () => {
+        const transcript = buildTranscript({
+            channel: 'call',
+            segments: [{ role: 'user', text: 'hello', startMs: 0 }],
+        });
+        assert.equal(transcript.unintelligible, 0);
+    });
+
     test('isEmpty distinguishes a silent call from a real one', () => {
         // A call where nobody spoke produces a valid transcript with no
         // segments. Saving that over a real one would lose data.

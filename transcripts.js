@@ -85,6 +85,16 @@ export function buildTranscript({ channel = 'call', provider = null, model = nul
         provider,
         model,
         segments: orderSegments(usable),
+        // Turns that happened but produced no text.
+        //
+        // Empty turns stay out of `segments` — they are noise, and inventing a
+        // placeholder would put words that were never said into a transcript
+        // that later feeds prompts. But dropping them silently made a real call
+        // unreadable: the caller spoke for 908ms, transcription came back with
+        // nothing, and the stored transcript showed the assistant replying to
+        // no one. "They said something we could not make out" and "they said
+        // nothing" are different facts, and only one of them explains a reply.
+        unintelligible: segments.length - usable.length,
     };
 }
 

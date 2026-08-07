@@ -140,7 +140,10 @@ export async function saveTranscript({ callSid, transcript, status = 'completed'
                 .eq('twilio_call_sid', callSid),
             'Transcript update'
         );
-        console.log(`Stored ${transcript.segments.length}-segment transcript for ${callSid}`);
+        const lost = transcript.unintelligible
+            ? `, ${transcript.unintelligible} turn(s) unintelligible`
+            : '';
+        console.log(`Stored ${transcript.segments.length}-segment transcript for ${callSid}${lost}`);
     } catch (error) {
         console.warn(`Could not store transcript for ${callSid}: ${error.message}`);
     }
