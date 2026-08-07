@@ -84,7 +84,7 @@ function turnsFromTranscript(transcript, { channel, at, source }) {
 const callProvider = {
     channel: 'call',
     supports: (subject) => Boolean(subject.contactId || subject.phoneNumber),
-    async fetch(db, subject, { since, limit }) {
+    async fetch(db, subject, { since, until, limit }) {
         let query = db
             .from('calls')
             .select('id, twilio_call_sid, direction, started_at, summary, transcript')
@@ -96,6 +96,7 @@ const callProvider = {
         if (subject.contactId) query = query.eq('contact_id', subject.contactId);
         else query = query.eq('phone_number', subject.phoneNumber);
         if (since) query = query.gte('started_at', since);
+        if (until) query = query.lt('started_at', until);
 
         const { data, error } = await query;
         if (error) throw new Error(`calls: ${error.message}`);
@@ -111,7 +112,7 @@ const callProvider = {
 const smsProvider = {
     channel: 'sms',
     supports: (subject) => Boolean(subject.phoneNumber),
-    async fetch(db, subject, { since, limit }) {
+    async fetch(db, subject, { since, until, limit }) {
         // Joined through the thread, which is the only place a message's other
         // party is recorded.
         let query = db
@@ -121,6 +122,7 @@ const smsProvider = {
             .order('created_at', { ascending: false })
             .limit(limit);
         if (since) query = query.gte('created_at', since);
+        if (until) query = query.lt('created_at', until);
 
         const { data, error } = await query;
         if (error) throw new Error(`sms: ${error.message}`);
@@ -140,7 +142,7 @@ const smsProvider = {
 const recordingProvider = {
     channel: 'recording',
     supports: (subject) => Boolean(subject.contactId || subject.phoneNumber),
-    async fetch(db, subject, { since, limit }) {
+    async fetch(db, subject, { since, until, limit }) {
         let query = db
             .from('recordings')
             .select('id, source, external_id, recorded_at, transcript')
@@ -154,6 +156,7 @@ const recordingProvider = {
         if (subject.contactId) query = query.eq('contact_id', subject.contactId);
         else query = query.eq('phone_number', subject.phoneNumber);
         if (since) query = query.gte('recorded_at', since);
+        if (until) query = query.lt('recorded_at', until);
 
         const { data, error } = await query;
         if (error) throw new Error(`recordings: ${error.message}`);
@@ -341,6 +344,7 @@ export async function getContext({
     limit = DEFAULT_LIMIT,
     maxChars = null,
     since = null,
+    until = null,
 } = {}) {
     const db = getSupabase();
     if (!db) return { subject: null, turns: [], dropped: 0, errors: [], unavailable: PLANNED_CHANNELS };
@@ -356,7 +360,7 @@ export async function getContext({
             // it: which channel a conversation happened on is not knowable in
             // advance, and splitting the budget evenly would drop the tail of a
             // long call to make room for texts that do not exist.
-            .map((provider) => provider.fetch(db, subject, { since, limit }).then(
+            .map((provider) => provider.fetch(db, subject, { since, until, limit }).then(
                 (turns) => ({ channel: provider.channel, turns })
             ))
     );

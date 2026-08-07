@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, NO_HISTORY_BLOCK, CHANNELS, PLANNED_CHANNELS } from '../context.js';
 import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE, buildGreetingResponse, greetingMode } from '../config.js';
 import { startHistory, claimHistory } from '../realtimeSessions.js';
+import { filterTurns, normaliseSince, buildToolDefinitions, executeTool } from '../tools.js';
 
 const turn = (channel, role, content, at) => buildTurn({ channel, role, content, at });
 
@@ -332,6 +333,57 @@ describe('history – off the critical path', () => {
         // Whatever it resolves to, it must not reject — a failed lookup costs
         // context, never the call.
         return first;
+    });
+});
+
+describe('recall – the long-term half of memory', () => {
+    const turns = [
+        turn('call', 'user', 'The invoice never arrived.', '2026-08-01T10:00:00.000Z'),
+        turn('call', 'assistant', 'I will chase the invoice.', '2026-08-01T10:01:00.000Z'),
+        turn('sms', 'user', 'Moving the meeting to Friday.', '2026-08-02T09:00:00.000Z'),
+    ];
+
+    test('no filter returns everything in the period', () => {
+        assert.equal(filterTurns(turns, null).length, 3);
+        assert.equal(filterTurns(turns, '   ').length, 3);
+    });
+
+    test('filters case-insensitively on every word given', () => {
+        assert.equal(filterTurns(turns, 'INVOICE').length, 2);
+        assert.equal(filterTurns(turns, 'invoice chase').length, 1);
+        assert.equal(filterTurns(turns, 'invoice meeting').length, 0);
+    });
+
+    test('an unusable date becomes no filter, not a wrong one', () => {
+        // A silently wrong date returns the wrong conversation, which reads
+        // exactly like nothing having been said.
+        assert.equal(normaliseSince('next tuesday'), null);
+        assert.equal(normaliseSince(''), null);
+        assert.equal(normaliseSince(null), null);
+        assert.equal(normaliseSince('2026-13-45'), null);
+    });
+
+    test('a plain date is read as the start of that day, in UTC', () => {
+        assert.equal(normaliseSince('2026-08-06'), '2026-08-06T00:00:00.000Z');
+    });
+
+    test('the tool is read-only and declares no required arguments', () => {
+        const [definition] = buildToolDefinitions(['recall_conversations']);
+        assert.equal(definition.name, 'recall_conversations');
+        assert.deepEqual(definition.parameters.required, []);
+    });
+
+    test('without a caller it errors rather than claiming no history', async () => {
+        // "We have never spoken" is the most plausible-sounding wrong answer
+        // this tool could give, so the one case that could produce it is an
+        // explicit failure instead.
+        //
+        // The failure rides in `output`, which is where a builtin handler's
+        // return value lands and what the model actually reads — same shape the
+        // calendar tool uses for an unreachable calendar.
+        const { output } = await executeTool('recall_conversations', {}, {});
+        assert.match(output.error, /No caller identity/);
+        assert.equal(output.conversations, undefined, 'must not also look like an empty history');
     });
 });
 

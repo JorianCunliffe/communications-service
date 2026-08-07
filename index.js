@@ -15,7 +15,7 @@ import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
-import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory } from './realtimeSessions.js';
+import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory, noteParty, partyFor } from './realtimeSessions.js';
 import { enqueueRecording, startRecordingSweeper } from './recordings.js';
 import { summariseCall } from './summarise.js';
 
@@ -216,6 +216,10 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     // contains {{history}}.
     startHistory(params.CallSid, config, params.From);
 
+    // Who the media stream is talking to, so a tool running mid-call can look
+    // this person up. Only the webhook ever sees the number.
+    noteParty(params.CallSid, params.From);
+
     startRecording(params.CallSid, config);
     console.log(`Incoming call ${params.CallSid || '(no CallSid)'} from ${params.From || 'unknown'} to ${params.To || 'unknown'} (config in ${Date.now() - webhookStarted}ms)`);
 
@@ -409,6 +413,7 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     // Keyed on the person we called, which is params.To on an outbound leg.
     // Keying it on From would look up the history of our own Twilio number.
     startHistory(params.CallSid, config, params.To);
+    noteParty(params.CallSid, params.To);
     startRecording(params.CallSid, config);
 
     // No "please wait" intro: the callee picked up expecting us to speak.
@@ -790,7 +795,13 @@ fastify.register(async (fastify) => {
             }
 
             const generation = toolGeneration;
-            const { output, error, durationMs } = await executeTool(name, args, { callSid });
+            // The caller's number, so a tool can answer "what did we say last
+            // time" about the right person. The media stream only ever sees a
+            // CallSid; the webhook recorded who that is.
+            const { output, error, durationMs } = await executeTool(name, args, {
+                callSid,
+                phoneNumber: partyFor(callSid),
+            });
             console.log(`Tool ${name} ${error ? `failed: ${error}` : 'ok'} (${durationMs}ms)`);
 
             // Not awaited: the model is waiting on the result, not the audit row.

@@ -29,6 +29,33 @@ function urlEnvName(name) {
     return `TOOL_${name.toUpperCase()}_URL`;
 }
 
+// A model asked for "the 6th" will send all sorts of things. Anything that is
+// not a usable date becomes no filter at all, because a silently wrong date
+// returns the wrong conversation and reads as though nothing was said.
+export function normaliseSince(value) {
+    const text = String(value ?? '').trim();
+    if (text === '') return null;
+
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(text)
+        ? new Date(`${text}T00:00:00.000Z`)
+        : new Date(text);
+
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+// Keeps turns containing every word asked for, case-insensitively. Deliberately
+// dumb: this narrows a period the model already chose, and a clever matcher
+// that quietly dropped the one relevant line would be worse than none.
+export function filterTurns(turns, query) {
+    const words = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return turns;
+
+    return turns.filter((turn) => {
+        const content = String(turn.content ?? '').toLowerCase();
+        return words.every((word) => content.includes(word));
+    });
+}
+
 const TOOLS = {
     check_calendar: {
         type: 'http',
@@ -54,6 +81,113 @@ const TOOLS = {
                 },
             },
             required: ['start_date'],
+        },
+    },
+
+    // The long-term half of the assistant's memory.
+    //
+    // The prompt carries an overview — a dated line per past conversation, from
+    // the summariser. That is deliberately thin: it fits in every call, says
+    // what exists, and costs nothing to carry. This is how the assistant gets
+    // from "we spoke on the 6th about the time" to what was actually said.
+    //
+    // Injecting the whole record into every prompt instead was tried and was
+    // wrong: 3000 characters on every call, growing without bound, most of it
+    // never referred to. An overview plus a lookup is the same information at a
+    // fraction of the cost, and it scales when email and Slack arrive.
+    recall_conversations: {
+        type: 'builtin',
+        // Measured at 330-590ms against the live database. The ceiling is
+        // generous because this one is allowed to be slower than the others:
+        // it only runs when the model has already said it is looking something
+        // up, so the caller is expecting a pause.
+        timeoutMs: 4000,
+        description:
+            'Look up what was actually said in earlier conversations with this caller, across calls, ' +
+            'texts and recordings. The summary in your instructions tells you which conversations exist; ' +
+            'use this when you need what was said in one of them, when the caller refers to something ' +
+            'you only have a one-line summary of, or when they ask what you discussed. ' +
+            'Say that you are checking before you call it, so the caller is not left in silence. ' +
+            'If the result contains an error, say plainly that you could not reach the record — never ' +
+            'guess at what was said, and never present a summary line as if it were the conversation. ' +
+            'If it returns no turns, you have nothing on record for that period: say so rather than ' +
+            'inventing a past conversation. Check the "covers" dates in the result against what you ' +
+            'asked for — if they do not include the day you wanted, older turns were trimmed to fit, ' +
+            'so narrow the range with since and until and look again before telling the caller there ' +
+            'is nothing there.',
+        parameters: {
+            type: 'object',
+            properties: {
+                since: {
+                    type: 'string',
+                    description:
+                        'Only conversations on or after this date, as YYYY-MM-DD. Omit for the most ' +
+                        'recent conversations.',
+                },
+                until: {
+                    type: 'string',
+                    description:
+                        'Only conversations before this date, as YYYY-MM-DD. Pair it with since to ask ' +
+                        'about one particular day — for yesterday, set since to yesterday and until to ' +
+                        'today. Without it a busy day today can crowd out the day you asked for.',
+                },
+                query: {
+                    type: 'string',
+                    description:
+                        'Optional words to filter on, e.g. "invoice". Only turns containing them come ' +
+                        'back. Omit to get everything in the period — a filter that matches nothing ' +
+                        'looks identical to no history, so prefer omitting it when unsure.',
+                },
+                limit: {
+                    type: 'integer',
+                    description: 'How many turns to return, newest kept. Defaults to 40.',
+                },
+            },
+            required: [],
+        },
+        handler: async ({ since = null, until = null, query = null, limit = null } = {}, context = {}) => {
+            const phoneNumber = context.phoneNumber ?? null;
+            if (!phoneNumber) {
+                // Better an explicit failure than a confident "we have never
+                // spoken": the description tells the model not to guess, and
+                // this is the case where guessing would be most plausible.
+                return { error: 'No caller identity available for this call, so history cannot be looked up.' };
+            }
+
+            // Imported here rather than at module scope. config.js imports this
+            // file, and context.js reaches config.js through configResolver, so
+            // a static import would close a cycle through the module that every
+            // call depends on. Resolved once and cached thereafter.
+            const { getContext, renderContext } = await import('./context.js');
+
+            const asked = Number(limit);
+            const { turns, dropped, errors } = await getContext({
+                phoneNumber,
+                limit: Number.isFinite(asked) && asked > 0 ? Math.min(asked, 100) : 40,
+                maxChars: 4000,
+                since: normaliseSince(since),
+                until: normaliseSince(until),
+            });
+
+            const wanted = filterTurns(turns, query);
+            const dated = wanted.map((t) => t.at).filter(Boolean).sort();
+
+            return {
+                conversations: renderContext(wanted) || null,
+                turns: wanted.length,
+                // The range actually returned, which is not always the range
+                // asked for: the budget keeps the newest turns, so a busy today
+                // can push the requested day out entirely. Reported so a wrong
+                // answer becomes a visible mismatch instead of a confident
+                // "nothing on record".
+                covers: dated.length ? { from: dated[0].slice(0, 10), to: dated[dated.length - 1].slice(0, 10) } : null,
+                // So the model can tell "nothing was said" from "the filter
+                // removed everything", which read identically before.
+                filtered: query ? turns.length - wanted.length : 0,
+                older_turns_not_shown: dropped,
+                // A channel that failed is reported rather than looking empty.
+                partial: errors.length ? errors : undefined,
+            };
         },
     },
 

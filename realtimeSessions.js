@@ -265,4 +265,31 @@ function sweepHistory() {
     for (const [callSid, entry] of historyPending) {
         if (entry.startedAt < cutoff) historyPending.delete(callSid);
     }
+    const partyCutoff = Date.now() - PARTY_TTL_MS;
+    for (const [callSid, entry] of callParties) {
+        if (entry.notedAt < partyCutoff) callParties.delete(callSid);
+    }
+}
+
+// --- Who is on the other end -----------------------------------------------
+//
+// A CallSid is not a person, and a tool that looks up "what have we said to
+// this caller before" needs the person. The TwiML webhook knows the number; the
+// media stream, where tools actually run, only ever sees the CallSid.
+//
+// Kept longer than the pre-connect entries because this outlives the setup
+// window: it has to still be here on the last turn of an hour-long call.
+const PARTY_TTL_MS = 4 * 60 * 60 * 1000;
+
+const callParties = new Map(); // callSid -> { phoneNumber, notedAt }
+
+export function noteParty(callSid, phoneNumber) {
+    if (!callSid || !phoneNumber) return;
+    callParties.set(callSid, { phoneNumber, notedAt: Date.now() });
+}
+
+// Read without consuming. A tool can be called many times in one call, and the
+// second lookup must not come back with nobody on the other end.
+export function partyFor(callSid) {
+    return callSid ? (callParties.get(callSid)?.phoneNumber ?? null) : null;
 }
