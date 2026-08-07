@@ -97,55 +97,54 @@ const TOOLS = {
     // fraction of the cost, and it scales when email and Slack arrive.
     recall_conversations: {
         type: 'builtin',
-        // Measured at 330-590ms against the live database. The ceiling is
-        // generous because this one is allowed to be slower than the others:
-        // it only runs when the model has already said it is looking something
-        // up, so the caller is expecting a pause.
-        timeoutMs: 4000,
+        // A search across everything on record, not a page of recent turns.
+        // Allowed to be slower than the other tools because it only runs after
+        // the model has said it is looking something up.
+        timeoutMs: 5000,
         description:
-            'Look up what was actually said in earlier conversations with this caller, across calls, ' +
-            'texts and recordings. The summary in your instructions tells you which conversations exist; ' +
-            'use this when you need what was said in one of them, when the caller refers to something ' +
-            'you only have a one-line summary of, or when they ask what you discussed. ' +
+            'Search everything on record with this person - calls, texts and recordings - and get back ' +
+            'the conversations that answer your question, with what was actually said in them. ' +
+            'The summary in your instructions says roughly what has happened; use this whenever you need ' +
+            'detail, a date, a quote, or anything it does not cover. ' +
+            'Put the subject in `about` and let the search do the work: it looks across all of history, ' +
+            'not just recent conversations, and returns the relevant ones. Prefer one good `about` query ' +
+            'over several narrow ones - you are on a phone call and have no time to page through results. ' +
             'Say that you are checking before you call it, so the caller is not left in silence. ' +
-            'If the result contains an error, say plainly that you could not reach the record — never ' +
-            'guess at what was said, and never present a summary line as if it were the conversation. ' +
-            'If it returns no turns, you have nothing on record for that period: say so rather than ' +
-            'inventing a past conversation. Check the "covers" dates in the result against what you ' +
-            'asked for — if they do not include the day you wanted, older turns were trimmed to fit, ' +
-            'so narrow the range with since and until and look again before telling the caller there ' +
-            'is nothing there.',
+            'If the result contains an error, say plainly that you could not reach the record. Never guess ' +
+            'at what was said, and never present the summary in your instructions as if it were the ' +
+            'conversation itself. If no conversations come back, there is nothing on record matching that: ' +
+            'say so rather than inventing one.',
         parameters: {
             type: 'object',
             properties: {
+                about: {
+                    type: 'string',
+                    description:
+                        'What you are looking for, as words that would appear in the conversation or its ' +
+                        'summary - "invoice", "Brisbane time", "the roadtrip". Omit to get the most recent ' +
+                        'conversations regardless of subject, which is what to do when asked an open ' +
+                        'question like "what have we talked about".',
+                },
                 since: {
                     type: 'string',
                     description:
-                        'Only conversations on or after this date, as YYYY-MM-DD. Omit for the most ' +
-                        'recent conversations.',
+                        'Only conversations on or after this date, YYYY-MM-DD. Only needed when the caller ' +
+                        'names a time period. Leave it off to search all of history.',
                 },
                 until: {
                     type: 'string',
                     description:
-                        'Only conversations before this date, as YYYY-MM-DD. Pair it with since to ask ' +
-                        'about one particular day — for yesterday, set since to yesterday and until to ' +
-                        'today. Without it a busy day today can crowd out the day you asked for.',
-                },
-                query: {
-                    type: 'string',
-                    description:
-                        'Optional words to filter on, e.g. "invoice". Only turns containing them come ' +
-                        'back. Omit to get everything in the period — a filter that matches nothing ' +
-                        'looks identical to no history, so prefer omitting it when unsure.',
+                        'Only conversations before this date, YYYY-MM-DD. Pair with since to ask about one ' +
+                        'day - for yesterday, since is yesterday and until is today.',
                 },
                 limit: {
                     type: 'integer',
-                    description: 'How many turns to return, newest kept. Defaults to 40.',
+                    description: 'How many conversations to return. Defaults to 5, which suits a spoken answer.',
                 },
             },
             required: [],
         },
-        handler: async ({ since = null, until = null, query = null, limit = null } = {}, context = {}) => {
+        handler: async ({ about = null, since = null, until = null, limit = null } = {}, context = {}) => {
             const phoneNumber = context.phoneNumber ?? null;
             if (!phoneNumber) {
                 // Better an explicit failure than a confident "we have never
@@ -158,35 +157,32 @@ const TOOLS = {
             // file, and context.js reaches config.js through configResolver, so
             // a static import would close a cycle through the module that every
             // call depends on. Resolved once and cached thereafter.
-            const { getContext, renderContext } = await import('./context.js');
+            const { searchHistory, renderContext } = await import('./context.js');
 
             const asked = Number(limit);
-            const { turns, dropped, errors } = await getContext({
+            const result = await searchHistory({
                 phoneNumber,
-                limit: Number.isFinite(asked) && asked > 0 ? Math.min(asked, 100) : 40,
-                maxChars: 4000,
+                query: about,
                 since: normaliseSince(since),
                 until: normaliseSince(until),
+                limit: Number.isFinite(asked) && asked > 0 ? asked : 5,
             });
 
-            const wanted = filterTurns(turns, query);
-            const dated = wanted.map((t) => t.at).filter(Boolean).sort();
-
             return {
-                conversations: renderContext(wanted) || null,
-                turns: wanted.length,
-                // The range actually returned, which is not always the range
-                // asked for: the budget keeps the newest turns, so a busy today
-                // can push the requested day out entirely. Reported so a wrong
-                // answer becomes a visible mismatch instead of a confident
-                // "nothing on record".
-                covers: dated.length ? { from: dated[0].slice(0, 10), to: dated[dated.length - 1].slice(0, 10) } : null,
-                // So the model can tell "nothing was said" from "the filter
-                // removed everything", which read identically before.
-                filtered: query ? turns.length - wanted.length : 0,
-                older_turns_not_shown: dropped,
-                // A channel that failed is reported rather than looking empty.
-                partial: errors.length ? errors : undefined,
+                // One entry per conversation, already condensed. The model gets
+                // an answer to read out, not a transcript to search.
+                conversations: result.conversations.map((c) => ({
+                    when: c.when,
+                    channel: c.channel,
+                    summary: c.summary ?? undefined,
+                    turns_in_conversation: c.turnCount,
+                    said: renderContext(c.excerpt) || undefined,
+                })),
+                // What was actually looked at, so "nothing on record" can be
+                // told apart from "nothing in the part I looked at".
+                searched: result.searched,
+                matched: result.totalMatched,
+                partial: result.errors.length ? result.errors : undefined,
             };
         },
     },

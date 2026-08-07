@@ -718,6 +718,48 @@ in which the assistant said goodbye and then introduced itself twice more. Texts
 get no marker — an SMS thread runs for months, and a boundary per message would
 turn a conversation into a list.
 
+### Recall
+
+`recall_conversations` is the long-term half of the assistant's memory. The
+prompt carries an overview — a dated line per conversation, from the summariser.
+The tool is how it gets from *"we spoke on the 6th about the time"* to what was
+actually said.
+
+**The query does the work, because the voice model cannot.** It has no time to
+page through results and no room to try three searches, so one call searches
+everything on record, picks the conversations that bear on the question, and
+returns those with enough text to quote. `about` takes a subject; `since`/`until`
+narrow to a period. Measured at 320–740 ms.
+
+Two things this reverses from the first attempt:
+
+- **Search runs before the budget.** `getContext` fetches the newest N turns and
+  a caller filters those, so a mention of an invoice three months back could not
+  be found at all — it was trimmed before the search saw it. Fine with four
+  calls in the database; useless once history is every email between two
+  parties. Searching now spans conversations first, and the budget applies to
+  what matched.
+- **The unit is a conversation, not a turn.** It is what a person remembers and
+  what a question is usually about, and it means one talkative day cannot hide a
+  year.
+
+A conversation carries a single `when`, computed in `CONTEXT_TIMEZONE` like
+everything else. Slicing the ISO string gives the UTC date, which for a Brisbane
+evening is the next day — so a result labelled `2026-08-06` came back with its
+own excerpt headed `2026-08-07`. One conversation disagreeing with itself about
+when it happened is exactly what makes a model report the wrong day.
+
+Calls where the caller never spoke are counted in `searched.abandoned` but not
+returned: a greeting nobody answered is not a conversation, and it pushes real
+ones out of an answer with room for three.
+
+**Known limit.** Matching runs in process over the scanned conversations, capped
+at `SCAN_LIMIT` (200). `searched.capped` says when that ceiling was hit, so
+"nothing found" can be told from "nothing in what I looked at". Before this
+spans thousands of documents it needs a generated `transcript_text` column and a
+full-text index — the shape stays the same, only where the matching runs
+changes.
+
 This is a **reader**. It writes nothing. Calls consume it through
 [`{{history}}`](#history--what-was-actually-said), which is opt-in per prompt and
 delivered into the session after the greeting rather than inside the prompt;
