@@ -7,7 +7,7 @@ import twilio from 'twilio';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml } from './config.js';
+import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact, getSupabase } from './configResolver.js';
 import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
@@ -652,25 +652,31 @@ fastify.register(async (fastify) => {
             openingSequence();
         };
 
-        // Send initial conversation item if AI talks first
+        // Ask the assistant to open the call.
+        //
+        // Two ways, because this is the first thing every caller hears. The
+        // default directs a single response; GREETING_MODE=item restores the
+        // original, where the direction is a user message that stays in the
+        // conversation — and, as a real call showed, keeps being obeyed on
+        // every turn after the first.
         const sendInitialConversationItem = () => {
-            const initialConversationItem = {
-                type: 'conversation.item.create',
-                item: {
-                    type: 'message',
-                    role: 'user',
-                    content: [
-                        {
-                            type: 'input_text',
-                            text: config.greetingText
-                        }
-                    ]
-                }
-            };
+            if (greetingMode() === 'item') {
+                const initialConversationItem = {
+                    type: 'conversation.item.create',
+                    item: {
+                        type: 'message',
+                        role: 'user',
+                        content: [{ type: 'input_text', text: config.greetingText }],
+                    },
+                };
 
-            if (SHOW_TIMING_MATH) console.log('Sending initial conversation item:', JSON.stringify(initialConversationItem));
-            openAiWs.send(JSON.stringify(initialConversationItem));
-            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                if (SHOW_TIMING_MATH) console.log('Sending initial conversation item:', JSON.stringify(initialConversationItem));
+                openAiWs.send(JSON.stringify(initialConversationItem));
+                openAiWs.send(JSON.stringify({ type: 'response.create' }));
+            } else {
+                openAiWs.send(JSON.stringify(buildGreetingResponse(config)));
+            }
+
             at('greetingSent');
         };
 

@@ -10,7 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, NO_HISTORY_BLOCK, CHANNELS, PLANNED_CHANNELS } from '../context.js';
-import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE } from '../config.js';
+import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE, buildGreetingResponse, greetingMode } from '../config.js';
 import { startHistory, claimHistory } from '../realtimeSessions.js';
 
 const turn = (channel, role, content, at) => buildTurn({ channel, role, content, at });
@@ -332,6 +332,57 @@ describe('history – off the critical path', () => {
         // Whatever it resolves to, it must not reject — a failed lookup costs
         // context, never the call.
         return first;
+    });
+});
+
+describe('greeting – a one-off direction, not a standing one', () => {
+    const config = {
+        systemMessage: 'You are Iris, brisk and dry-witted. Never tell jokes.',
+        greetingText: 'Open by saying "Iris here." then greet Jorian by name.',
+    };
+
+    test('asks for one response instead of leaving a message in the conversation', () => {
+        // The bug: sent as a user-role item, the direction stayed in the
+        // conversation and the model kept opening every reply with "Iris here"
+        // for the whole call.
+        const payload = buildGreetingResponse(config);
+        assert.equal(payload.type, 'response.create');
+        assert.equal(payload.item, undefined, 'nothing should be added to the conversation');
+        assert.match(payload.response.instructions, /Iris here/);
+    });
+
+    test('carries the system prompt, because response instructions replace it', () => {
+        // Verified against the API: a response supplying its own instructions
+        // does NOT also get the session's. Sending the greeting direction alone
+        // strips the persona off the first sentence of the call, silently.
+        const payload = buildGreetingResponse(config);
+        assert.match(payload.response.instructions, /brisk and dry-witted/);
+        assert.match(payload.response.instructions, /Never tell jokes/);
+    });
+
+    test('persona comes before the direction', () => {
+        const { instructions } = buildGreetingResponse(config).response;
+        assert.ok(instructions.indexOf('brisk') < instructions.indexOf('Open by saying'));
+    });
+
+    test('a missing greeting or prompt does not produce stray blank lines', () => {
+        assert.equal(buildGreetingResponse({ systemMessage: 'Only this.' }).response.instructions, 'Only this.');
+        assert.equal(buildGreetingResponse({ greetingText: 'Only this.' }).response.instructions, 'Only this.');
+    });
+
+    test('the escape hatch is off by default and opt-in by name', () => {
+        const previous = process.env.GREETING_MODE;
+        try {
+            delete process.env.GREETING_MODE;
+            assert.equal(greetingMode(), 'instructions');
+            process.env.GREETING_MODE = 'item';
+            assert.equal(greetingMode(), 'item');
+            process.env.GREETING_MODE = 'nonsense';
+            assert.equal(greetingMode(), 'instructions', 'an unknown value must not disable the fix');
+        } finally {
+            if (previous === undefined) delete process.env.GREETING_MODE;
+            else process.env.GREETING_MODE = previous;
+        }
     });
 });
 

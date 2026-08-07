@@ -241,6 +241,43 @@ export function buildRealtimeUrl(config) {
     return config.effort ? url : `${url}&temperature=${config.temperature}`;
 }
 
+// How the opening line is asked for.
+//
+// 'instructions' (default) directs one response and leaves nothing behind.
+// 'item' is the original: the direction goes in as a user message and stays in
+// the conversation for the whole call. Kept as an escape hatch, because this
+// changes the first thing every caller hears and putting it back should not
+// need a deploy — set GREETING_MODE=item.
+export function greetingMode() {
+    return (process.env.GREETING_MODE || '').trim().toLowerCase() === 'item' ? 'item' : 'instructions';
+}
+
+// Asks for the opening line as a one-off response.
+//
+// The direction used to be sent as a user-role conversation item, which meant
+// it sat in the conversation for the rest of the call. A caller noticed before
+// we did: told to "open by saying Iris here", the model opened *every* reply
+// that way, and when asked why, said it was "the set opening you asked for
+// earlier". A one-time instruction had become a standing one.
+//
+// The system prompt is repeated here deliberately. response.instructions
+// REPLACES session.instructions for that response rather than adding to it —
+// verified against the API, where a session persona was silently absent from a
+// response that supplied its own instructions. Sending only the greeting
+// direction would strip the persona from the single most important sentence of
+// the call, and would do it invisibly.
+export function buildGreetingResponse(config) {
+    const direction = String(config.greetingText ?? '').trim();
+    const persona = String(config.systemMessage ?? '').trim();
+
+    return {
+        type: 'response.create',
+        response: {
+            instructions: [persona, direction].filter(Boolean).join('\n\n'),
+        },
+    };
+}
+
 // The session.update event sent after the OpenAI WebSocket opens.
 export function buildSessionUpdate(config) {
     const session = {

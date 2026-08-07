@@ -93,6 +93,7 @@ be updated in Twilio every time.
 | `PUBLIC_URL` | For outbound calls | Public base URL Twilio can reach, used to build the `/outbound-answer` and `/call-status` callbacks, **and to verify webhook signatures**. |
 | `TWILIO_VALIDATE_SIGNATURES` | No | `off`, `warn` or `enforce`. Defaults to `warn` when `TWILIO_AUTH_TOKEN` is set, `off` otherwise. See [Webhook signatures](#webhook-signatures). |
 | `PRECONNECT_REALTIME` | No | `false` restores opening the OpenAI socket at media-stream start rather than at the TwiML webhook. Default on. See [First-word latency](#first-word-latency). |
+| `GREETING_MODE` | No | `item` restores sending `greetingText` as a user message that stays in the conversation. Default `instructions`, which directs a single response. See [The opening line](#the-opening-line). |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Endpoint for an `http`-type tool, e.g. `TOOL_CHECK_CALENDAR_URL`. A tool whose URL is unset is never offered to the model. |
 
 ## Twilio configuration
@@ -462,6 +463,27 @@ which is less privileged than the session prompt — moving it off the critical
 path improved this as well as the latency. That reduces the risk; it does not
 remove it. Think carefully before putting `{{history}}` in the prompt for a
 number strangers can dial.
+
+### The opening line
+
+When `aiSpeaksFirst` is set, `greetingText` directs the assistant's first
+sentence. It is sent as **per-response `instructions` on `response.create`**, so
+it governs that one response and leaves nothing behind.
+
+It used to be a user-role conversation item, which meant it stayed in the
+conversation for the rest of the call. A caller found that before we did: told
+to *"open by saying Iris here"*, the model opened replies that way well past the
+first, and when asked why, answered that it was *"the set opening you asked for
+earlier"*. A one-time direction had quietly become a standing one.
+
+**`buildGreetingResponse` repeats the system prompt inside those instructions,
+and must.** Verified against the API: `response.instructions` *replaces*
+`session.instructions` for that response rather than adding to it — a session
+persona was measurably absent from a response that supplied its own
+instructions. Sending the greeting direction alone would strip the persona from
+the single most important sentence of the call, and would do it silently.
+
+Set `GREETING_MODE=item` to put the old behaviour back without a deploy.
 
 ### Reliability
 
