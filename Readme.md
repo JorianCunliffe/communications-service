@@ -24,6 +24,10 @@ this grew from is
 | Recording, transcribing and summarising calls | Working — off by default |
 | Ingesting recordings from elsewhere (Plaud, any URL) | Working — `POST /api/recordings` |
 | Cross-channel conversation history (calls + SMS + recordings) | Working — see [Conversation context](#conversation-context) |
+| Recalling past conversations mid-call, by subject or date | Working — `recall_conversations`, see [Recall](#recall) |
+| Search across *other* contacts, and by project | **Schema written, not applied** — see [Search across contacts and projects](#search-across-contacts-and-projects) |
+| Calendar lookup | **Not built** — `check_calendar` exists but needs an endpoint |
+| Actions / task management | **Not built** — see [Roadmap](#roadmap) |
 | Tool calling on voice calls, per contact and direction | Working |
 | Auto-reply to inbound SMS | **Not built** — see [Roadmap](#roadmap) |
 | Management API — reading contacts, config, tools, calls and messages | Working — see [Management API](#management-api-api) |
@@ -33,6 +37,10 @@ this grew from is
 > **Everything is intended to be driven by the API.** Configuration that today
 > requires SQL against Supabase is listed under [Pending API](#pending-api) with
 > the endpoint that will replace it. Treat direct SQL as a temporary measure.
+
+> **API reference:** a browsable version of the HTTP surface, memory model and
+> known gaps lives at
+> <https://claude.ai/code/artifact/a78c590e-6c98-4cfe-94ab-7860d5e127f4>.
 
 ## Contents
 
@@ -46,7 +54,9 @@ this grew from is
 - [Tool calling](#tool-calling)
 - [Transcription](#transcription)
 - [Conversation context](#conversation-context)
+- [Search across contacts and projects](#search-across-contacts-and-projects)
 - [Data model](#data-model)
+- [Migrations](#migrations)
 - [Operations](#operations)
 - [Testing](#testing)
 - [Known gaps](#known-gaps)
@@ -94,7 +104,11 @@ be updated in Twilio every time.
 | `TWILIO_VALIDATE_SIGNATURES` | No | `off`, `warn` or `enforce`. Defaults to `warn` when `TWILIO_AUTH_TOKEN` is set, `off` otherwise. See [Webhook signatures](#webhook-signatures). |
 | `PRECONNECT_REALTIME` | No | `false` restores opening the OpenAI socket at media-stream start rather than at the TwiML webhook. Default on. See [First-word latency](#first-word-latency). |
 | `GREETING_MODE` | No | `item` restores sending `greetingText` as a user message that stays in the conversation. Default `instructions`, which directs a single response. See [The opening line](#the-opening-line). |
+| `CONTEXT_TIMEZONE` | No | IANA zone that conversation history is grouped by. Defaults to `Australia/Brisbane`. The server's UTC puts the day boundary at 10am local and cuts a working day in half. |
+| `SUMMARY_MODEL` | No | Model used to summarise a finished transcript. Defaults to `gpt-5.4-mini`. |
+| `TRANSCRIBE_MODEL` | No | Speech-to-text model for the recordings pipeline. Defaults to `gpt-4o-transcribe-diarize`. |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Endpoint for an `http`-type tool, e.g. `TOOL_CHECK_CALENDAR_URL`. A tool whose URL is unset is never offered to the model. |
+| `RECORDING_SOURCE_<NAME>_HOSTS` | No | Comma-separated host allow-list for an ingest source, e.g. `RECORDING_SOURCE_PLAUD_HOSTS`. Unset means any public host that survives the SSRF checks. |
 
 ## Twilio configuration
 
@@ -532,7 +546,12 @@ Currently registered:
 | Name | Type | Timeout | Requires |
 |---|---|---|---|
 | `get_current_time` | builtin | 200 ms | — |
+| `recall_conversations` | builtin | 5000 ms | Supabase — see [Recall](#recall) |
 | `check_calendar` | http | 3000 ms | `TOOL_CHECK_CALENDAR_URL` |
+
+`recall_conversations` is allowed to be far slower than the others because it
+only runs after the model has said it is looking something up, so the caller is
+expecting a pause. Measured at 320–740 ms.
 
 An `http` tool whose URL is unset is **defined but unavailable**, and is filtered
 out rather than offered and then failing mid-sentence.
@@ -766,6 +785,116 @@ delivered into the session after the greeting rather than inside the prompt;
 `{{combined_history}}` is unchanged and still comes from the summariser or from
 whatever was typed into the field by hand.
 
+## Search across contacts and projects
+
+> **Schema written, not applied.** `migrations/001_communications_search.sql`
+> creates everything below; nothing in it exists in the database yet, and no
+> code reads it. Until it is run, [Recall](#recall) is the whole of search.
+
+Everything above searches **the caller's own history**. These do not:
+
+| Question | What it needs |
+|---|---|
+| "What did I talk to Bruce about last week?" | a name resolved to a contact who is *not* on the line |
+| "Catch me up on Arkendeith subdivision" | a project, across contacts, summarised rather than quoted |
+| "What have I got on tomorrow?" | a calendar — out of scope |
+| "What's outstanding?" | a task system — out of scope |
+
+### Why the current search cannot answer them
+
+Two limits, and only one is about scale.
+
+**Matching runs in process**, over at most `SCAN_LIMIT` (200) conversations.
+`searched.capped` reports when that ceiling is hit, so the tool stops short of
+claiming nothing exists — but it is a ceiling either way.
+
+**Scope is hard-wired to the caller.** `recall_conversations` reads
+`context.phoneNumber` and nothing else. Bruce is not the caller, so no
+arrangement of its arguments reaches him.
+
+### The shape
+
+One searchable row per communication, whatever channel produced it, with a
+weighted `tsvector` and a GIN index — so contact, project, date and text become
+a single query:
+
+```sql
+search tsvector generated always as (
+  setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
+  setweight(to_tsvector('english', coalesce(summary, '')), 'B') ||
+  setweight(to_tsvector('english', coalesce(body,    '')), 'C')
+) stored
+```
+
+The weights are the point: a hit in a summary should outrank a passing mention
+halfway through a transcript, and `ts_rank` uses them.
+
+Rows are projected in **by trigger**, not by application code, so the surface
+cannot go stale when the backfill, the management API or a dashboard edit
+writes. A unique index on `(source_table, source_id)` makes re-projection an
+update rather than a duplicate, which is what makes the backfill safe to run
+twice.
+
+> The call triggers fire on writes to `public.calls` **during a live call**.
+> They are after-row, work on one small array and do no I/O, but they are on the
+> call path and worth knowing about rather than discovering.
+
+### Attaching a communication to a project
+
+Three rules, in priority order, and the row records which one caught it in
+`project_link_reason`:
+
+| Reason | Rule |
+|---|---|
+| `explicit` | `project_id` was set deliberately |
+| `contact` | the other party belongs to **exactly one** project |
+| `alias` | the text names the project — `Arkendeith`, `the subdivision`, `lot 42` |
+
+"Exactly one" is deliberate. A contact on three projects says nothing about
+which one a given call was about, and guessing would file real conversations
+against the wrong job.
+
+### Who may ask
+
+`contacts.is_principal` gates cross-contact search. Everyone else stays scoped
+to their own history exactly as today, so an inbound caller cannot ask what you
+discussed with someone else.
+
+> **Caller ID is spoofable.** This is a convenience boundary, not a
+> secret-keeping one, and it should not be the only thing between a stranger and
+> your correspondence. Revisit it before anything genuinely confidential is
+> reachable this way.
+
+### Resolving a name
+
+"Bruce" is a name, not an identifier. `pg_trgm` over `contacts.name` returns
+*candidates*, so two Bruces come back as a question to ask the caller — never a
+silent pick of the closest match, which would read out the wrong person's
+history with complete confidence.
+
+## Migrations
+
+SQL lives in `migrations/`, numbered, and is applied **by hand** in the Supabase
+dashboard → SQL Editor. Every file is guarded (`if not exists`, `or replace`) and
+safe to run more than once.
+
+There is no migration runner because there is no direct Postgres connection from
+the development environment — PostgREST works, port 5432 times out, and the
+Supabase MCP's SQL tools fail with it. A schema change that exists only in a chat
+log is not a schema change, so the file is committed whether or not it has been
+run.
+
+| File | Status | What it does |
+|---|---|---|
+| `001_communications_search.sql` | **Not applied** | `communications`, `projects`, `project_contacts`, `contacts.is_principal`, `pg_trgm`, projection triggers, backfill |
+
+Check whether one has landed by querying for its table rather than trusting the
+file's presence:
+
+```bash
+curl -s -H "X-API-Key: $API_KEY" "$PUBLIC_URL/api/contacts/+61…/history?limit=1"
+```
+
 ## Data model
 
 Supabase (`public` schema). RLS is enabled on every table **except
@@ -782,6 +911,18 @@ required for everything the app reads and writes.
 | `sms_threads` | One row per `(phone_number, twilio_number)` pair, reused forever. |
 | `sms_messages` | One row per message, `thread_id` → `sms_threads`. `inbound` → role `user`, `outbound` → role `assistant`. |
 | `messages` | **Unused.** Predates `sms_messages`. Nothing reads or writes it. |
+| `recordings` | Ingest queue and transcript store for audio from Twilio, Plaud or any URL. See [Transcription](#transcription). |
+
+Created by `migrations/001_communications_search.sql`, **not yet applied**:
+
+| Table | Holds |
+|---|---|
+| `communications` | One searchable row per communication, any channel, with a weighted `tsvector`. Populated by trigger from `calls`, `sms_messages` and `recordings`. |
+| `projects` | `name`, `aliases[]`, `status`, dates. A project is partly a set of names people say out loud. |
+| `project_contacts` | Which contacts belong to which project. Used to attach a conversation when nothing more explicit does. |
+
+`contacts` also gains `is_principal` there — see
+[Who may ask](#who-may-ask).
 
 All recording is fire-and-forget with a 2500 ms timeout and is never awaited on
 the call path. A database that is slow or unreachable is logged and ignored.
@@ -932,31 +1073,71 @@ loudly rather than transcribing part of the audio; chunking is not built.
 
 **One shared API key.** No per-tenant keys, no scopes, no rate limiting.
 
-**No principal identity.** `executeTool` receives only `{ callSid }`. A tool
-cannot know *whose* calendar or mailbox it should act on, which blocks any
-per-user integration.
+**Principal identity is caller ID only.** `executeTool` now receives
+`{ callSid, phoneNumber }`, so a tool knows who is on the line — enough to
+answer "what did *we* discuss". It is not enough to know *whose* calendar or
+mailbox to act on, and `contacts.is_principal`
+([once applied](#search-across-contacts-and-projects)) authenticates nothing
+stronger than a phone number that can be spoofed.
+
+**Search is capped and caller-scoped.** `recall_conversations` matches in
+process over at most 200 conversations and can only ever see the caller's own
+history. `searched.capped` says when the ceiling was hit, so it stops short of
+claiming nothing exists — but questions about other contacts or about a project
+cannot be answered at all until
+[the search surface](#search-across-contacts-and-projects) is applied.
+
+**Turns that transcribe to nothing are counted, not recovered.** A caller can
+speak and have the transcription return an empty string; the turn is dropped
+from the transcript and `transcript.unintelligible` records how many. The model
+still hears the audio and answers it, so a call log can show a reply to
+apparently nothing. Observed on three separate calls, cause not established.
 
 ## Roadmap
 
+Done since this list was written: the [conversation context
+provider](#conversation-context), [recall](#recall), and Twilio signature
+validation (built, still on `warn`).
+
 In dependency order:
 
-1. **Management API writes** — the read paths are done; the
+1. **Apply `001_communications_search.sql`** — everything below item 3 depends
+   on it, and it is a paste into the SQL editor. See [Migrations](#migrations).
+2. **`search_communications`** — one tool over the new surface: contact,
+   project, date, text, gated on `is_principal`. Replaces the in-process
+   matcher in `recall_conversations` rather than sitting beside it.
+3. **`catch_up`** — retrieve *and summarise*. "Catch me up on Arkendeith" wants
+   a paragraph, not forty turns, so this is a retrieval followed by a
+   summarising model call. Needs a spoken "let me pull that together" to cover
+   the latency, which will be seconds rather than milliseconds.
+4. **Management API writes** — the read paths are done; the
    [pending endpoints](#pending-api) are the writes, each of which must
-   invalidate the config cache.
-2. **Twilio signature validation** — built; flip it to `enforce` once the logs
-   are clean. Prerequisite for anything that replies or fetches.
-3. **Generic conversation context** — a provider interface returning normalised
-   `{ role, content, at, channel }` turns, so history can span SMS, calls and
-   later email without the caller knowing which channel it came from.
-   Transcripts already use that shape, so this is a reader over existing data.
-4. **SMS auto-reply** — behind an `sms_autorespond` flag, default off, using
-   `inbound_sms_prompt` and the context from (3). Replies asynchronously via the
-   Twilio REST API rather than in TwiML, so an LLM call cannot blow Twilio's
+   invalidate the config cache. Projects and `is_principal` need CRUD too, or
+   they join the list of things only SQL can set.
+5. **Twilio signature validation to `enforce`** — built and clean in the logs.
+   Prerequisite for anything that replies or fetches.
+6. **SMS auto-reply** — behind an `sms_autorespond` flag, default off, using
+   `inbound_sms_prompt` and the conversation context. Replies asynchronously via
+   the Twilio REST API rather than in TwiML, so an LLM call cannot blow Twilio's
    webhook timeout. Needs loop protection, per-contact rate limits, and
    STOP/UNSUBSCRIBE handling.
-5. **Tools on SMS** — `tools.js` emits the Realtime flat shape; the text API
+7. **Tools on SMS** — `tools.js` emits the Realtime flat shape; the text API
    needs `{ type, function: { … } }`, so this needs a format argument.
-6. **Outbound webhooks** — best-effort POST of a JSON payload after call and
-   message events.
-7. **Tenant and principal identity** — resolved through the cascade and carried
-   into tool execution.
+8. **Calendar** — `check_calendar` is defined but has no endpoint, so it is
+   filtered out and never offered. "What have I got on tomorrow" may span more
+   than one calendar, which is the part that needs designing rather than wiring.
+9. **Actions** — a project management tool may be integrated later. Deliberately
+   unspecified: the shape should follow whatever system it has to talk to.
+10. **Outbound webhooks** — best-effort POST of a JSON payload after call and
+    message events.
+11. **Tenant and principal identity** — resolved through the cascade and carried
+    into tool execution. `is_principal` is the placeholder, and caller ID is not
+    authentication.
+
+### Deliberately not on the list
+
+**Full-text search beyond ~200 conversations without the migration.** The
+in-process matcher is not being made cleverer; it is being replaced.
+
+**A migration runner.** Nothing here can reach Postgres directly, and one hand
+paste per schema change is cheaper than the tooling to avoid it.
