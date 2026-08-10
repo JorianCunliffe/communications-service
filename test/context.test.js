@@ -9,7 +9,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, NO_HISTORY_BLOCK, CHANNELS, PLANNED_CHANNELS, buildConversation, searchWords, matchConversation } from '../context.js';
+import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, NO_HISTORY_BLOCK, CHANNELS, PLANNED_CHANNELS, queryWords, excerptFrom } from '../context.js';
 import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE, buildGreetingResponse, greetingMode } from '../config.js';
 import { startHistory, claimHistory } from '../realtimeSessions.js';
 import { filterTurns, normaliseSince, buildToolDefinitions, executeTool } from '../tools.js';
@@ -337,63 +337,64 @@ describe('history – off the critical path', () => {
 });
 
 describe('recall – the query does the work', () => {
-    const conv = (id, at, summary, lines) => buildConversation({
-        id, channel: 'call', at, summary,
-        turns: lines.map(([role, content], i) =>
-            buildTurn({ channel: 'call', role, content, at: new Date(Date.parse(at) + i * 1000) })),
+    // The matching itself now lives in Postgres and is covered by
+    // migrations/verify-002.mjs, which replays the four searches from the call
+    // that exposed the old matcher. What is left in this process is deciding
+    // which lines of a matched transcript are worth reading out, and cleaning a
+    // spoken query into words - both of which have to agree with the SQL.
+
+    const transcript = [
+        'assistant: Iris here.',
+        'user: The invoice never arrived.',
+        'assistant: I will chase it up today.',
+        'user: Thanks.',
+    ].join('\n');
+
+    test('a spoken query loses its punctuation, like the SQL does', () => {
+        // "$3,500" and "3500" have to be one question, or the excerpt
+        // highlights nothing in a row Postgres matched.
+        assert.deepEqual(queryWords('$3,500'), ['3500']);
+        assert.deepEqual(queryWords('Arkendeith porous culvert'), ['arkendeith', 'porous', 'culvert']);
     });
 
-    const invoiceCall = conv('CA1', '2026-05-01T10:00:00.000Z', 'Chased a missing invoice.', [
-        ['assistant', 'Iris here.'],
-        ['user', 'The invoice never arrived.'],
-        ['assistant', 'I will chase it up today.'],
-        ['user', 'Thanks.'],
-    ]);
-
-    const timeCall = conv('CA2', '2026-08-06T10:00:00.000Z', 'Checked the time in Brisbane.', [
-        ['assistant', 'Iris here.'],
-        ['user', 'What time is it?'],
-    ]);
-
-    test('finds a conversation older than any turn budget', () => {
-        // The flaw this replaces: getContext kept the newest N turns and the
-        // caller filtered those, so a match from May could not be found once
-        // August was busy. Searching happens across conversations first.
-        assert.ok(matchConversation(invoiceCall, searchWords('invoice')));
-        assert.equal(matchConversation(timeCall, searchWords('invoice')), null);
-    });
-
-    test('all the words must appear, but not in the same turn', () => {
-        // "invoice Friday" should find the conversation where both came up.
-        const both = conv('CA3', '2026-05-02T10:00:00.000Z', null, [
-            ['user', 'About that invoice.'],
-            ['assistant', 'I will send it Friday.'],
-        ]);
-        assert.ok(matchConversation(both, searchWords('invoice friday')));
-        assert.equal(matchConversation(both, searchWords('invoice tuesday')), null);
+    test('single characters are dropped, because a spelled-out name is not a query', () => {
+        // "I was looking for Arkandy, A-R" - the letters are noise.
+        assert.deepEqual(queryWords('Arkandy A R K'), ['arkandy']);
     });
 
     test('a match brings its neighbours, because a hit alone is unreadable', () => {
         // "Thanks." on its own says nothing about what was agreed.
-        const excerpt = matchConversation(invoiceCall, searchWords('chase'));
-        const said = excerpt.map((t) => t.content);
-        assert.ok(said.includes('I will chase it up today.'));
-        assert.ok(said.includes('The invoice never arrived.'), 'the line before should come too');
+        const said = excerptFrom(transcript, 'chase');
+        assert.match(said, /I will chase it up today\./);
+        assert.match(said, /The invoice never arrived\./, 'the line before should come too');
     });
 
-    test('matching the summary alone still returns something quotable', () => {
-        // The summary says "chased", which nobody said aloud.
-        const excerpt = matchConversation(invoiceCall, searchWords('chased'));
-        assert.ok(excerpt.length > 0);
+    test('a fuzzy match still returns something quotable', () => {
+        // Postgres matched this row on trigram similarity, so no line in it
+        // contains the query as spoken. Returning nothing to read out would
+        // waste the match.
+        const said = excerptFrom(transcript, 'invoyce');
+        assert.ok(said.length > 0, 'should fall back to the opening');
     });
 
-    test('no query returns the end of the conversation', () => {
-        const excerpt = matchConversation(timeCall, searchWords(null));
-        assert.equal(excerpt[excerpt.length - 1].content, 'What time is it?');
+    test('no subject returns the end of the conversation', () => {
+        // "What have we talked about" means the latest, not the earliest.
+        assert.match(excerptFrom(transcript, null), /Thanks\./);
     });
 
-    test('search is case-insensitive', () => {
-        assert.ok(matchConversation(invoiceCall, searchWords('INVOICE')));
+    test('excerpts are case-insensitive', () => {
+        assert.match(excerptFrom(transcript, 'INVOICE'), /invoice never arrived/);
+    });
+
+    test('a long transcript is clipped rather than read out whole', () => {
+        const long = Array.from({ length: 200 }, (_, i) => `user: line ${i} about the invoice`).join('\n');
+        const said = excerptFrom(long, 'invoice');
+        assert.ok(said.length <= 901, `expected a clipped excerpt, got ${said.length} chars`);
+    });
+
+    test('an empty body does not become an empty-looking quote', () => {
+        assert.equal(excerptFrom('', 'invoice'), '');
+        assert.equal(excerptFrom(null, 'invoice'), '');
     });
 
     test('the tool asks for a subject, not a page of turns', () => {

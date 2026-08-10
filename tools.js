@@ -113,7 +113,12 @@ const TOOLS = {
             'If the result contains an error, say plainly that you could not reach the record. Never guess ' +
             'at what was said, and never present the summary in your instructions as if it were the ' +
             'conversation itself. If no conversations come back, there is nothing on record matching that: ' +
-            'say so rather than inventing one.',
+            'say so rather than inventing one. ' +
+            'Spelling does not have to be right - the search is fuzzy and forgiving, so pass the name as ' +
+            'you heard it rather than asking the caller to spell it. If the result carries `did_you_mean`, ' +
+            'those are the spellings on record: search again with one of them before saying there is ' +
+            'nothing. A result marked `matched_by: fuzzy` matched approximately, so treat its wording as ' +
+            'close rather than exact.',
         parameters: {
             type: 'object',
             properties: {
@@ -157,10 +162,10 @@ const TOOLS = {
             // file, and context.js reaches config.js through configResolver, so
             // a static import would close a cycle through the module that every
             // call depends on. Resolved once and cached thereafter.
-            const { searchHistory, renderContext } = await import('./context.js');
+            const { searchCommunications } = await import('./context.js');
 
             const asked = Number(limit);
-            const result = await searchHistory({
+            const result = await searchCommunications({
                 phoneNumber,
                 query: about,
                 since: normaliseSince(since),
@@ -171,17 +176,15 @@ const TOOLS = {
             return {
                 // One entry per conversation, already condensed. The model gets
                 // an answer to read out, not a transcript to search.
-                conversations: result.conversations.map((c) => ({
-                    when: c.when,
-                    channel: c.channel,
-                    summary: c.summary ?? undefined,
-                    turns_in_conversation: c.turnCount,
-                    said: renderContext(c.excerpt) || undefined,
-                })),
+                conversations: result.conversations,
                 // What was actually looked at, so "nothing on record" can be
                 // told apart from "nothing in the part I looked at".
                 searched: result.searched,
-                matched: result.totalMatched,
+                matched: result.returned,
+                // Only present on a miss: the spellings the search thinks were
+                // meant. Speech recognition mangles unusual names, and the
+                // alternative is asking the caller to spell one down the phone.
+                did_you_mean: result.suggestions.length ? result.suggestions : undefined,
                 partial: result.errors.length ? result.errors : undefined,
             };
         },

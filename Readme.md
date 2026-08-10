@@ -748,7 +748,25 @@ actually said.
 page through results and no room to try three searches, so one call searches
 everything on record, picks the conversations that bear on the question, and
 returns those with enough text to quote. `about` takes a subject; `since`/`until`
-narrow to a period. Measured at 320–740 ms.
+narrow to a period. Measured at 300–760 ms.
+
+**Matching runs in Postgres**, through `search_communications` (migration 002).
+It used to run in this process and require every word as an exact substring,
+and one real call is the whole argument against that: 66 seconds and four
+searches to find a two-line SMS, because speech recognition heard *Arkendey*
+for *Arkendeith* and one mangled word vetoed two correct ones. What replaced it:
+
+| | |
+|---|---|
+| Terms are OR'd and ranked | a mangled word costs a row rank; it cannot veto it |
+| Trigram fallback | *Arkendey* → *Arkendeith* scores 0.78 with no lexeme in common |
+| Punctuation stripped, separators first | `$3,500` and `3500` are one question |
+| Ranked by density, not volume | a 54-char message about the subject beats a 1049-char transcript mentioning it |
+| `did_you_mean` on a miss | offers the spelling instead of asking the caller to recite letters |
+
+Each result carries `matched_by` — `text`, `fuzzy`, `both` or `filter` — so the
+model knows when a hit matched only approximately and should not be quoted as
+though it were exact.
 
 Two things this reverses from the first attempt:
 
@@ -768,16 +786,12 @@ evening is the next day — so a result labelled `2026-08-06` came back with its
 own excerpt headed `2026-08-07`. One conversation disagreeing with itself about
 when it happened is exactly what makes a model report the wrong day.
 
-Calls where the caller never spoke are counted in `searched.abandoned` but not
-returned: a greeting nobody answered is not a conversation, and it pushes real
-ones out of an answer with room for three.
-
-**Known limit.** Matching runs in process over the scanned conversations, capped
-at `SCAN_LIMIT` (200). `searched.capped` says when that ceiling was hit, so
-"nothing found" can be told from "nothing in what I looked at". Before this
-spans thousands of documents it needs a generated `transcript_text` column and a
-full-text index — the shape stays the same, only where the matching runs
-changes.
+**Known limits.** A single badly mangled word with nothing else to go on still
+misses — *Arcandy* scores 0.25 word similarity against *Arkendeith*, and the
+threshold is not dropped to 0.2 to catch it because that starts matching noise.
+And `suggest_terms` scans the 200 most recent rows for its suggestions; contact
+and project names are trigram-indexed and scale, that body scan does not, and it
+wants a maintained vocabulary table before this database gets large.
 
 This is a **reader**. It writes nothing. Calls consume it through
 [`{{history}}`](#history--what-was-actually-said), which is opt-in per prompt and
@@ -787,9 +801,11 @@ whatever was typed into the field by hand.
 
 ## Search across contacts and projects
 
-> **Schema written, not applied.** `migrations/001_communications_search.sql`
-> creates everything below; nothing in it exists in the database yet, and no
-> code reads it. Until it is run, [Recall](#recall) is the whole of search.
+> **Applied.** `migrations/001_communications_search.sql` and
+> `002_search_communications.sql` are both live, verified by
+> `node migrations/verify-001.mjs` and `verify-002.mjs`. `recall_conversations`
+> reads the surface they create. The cross-contact and project tools below are
+> not built yet.
 
 Everything above searches **the caller's own history**. These do not:
 
@@ -802,15 +818,14 @@ Everything above searches **the caller's own history**. These do not:
 
 ### Why the current search cannot answer them
 
-Two limits, and only one is about scale.
+One limit, and it is not about scale — that one is fixed.
 
-**Matching runs in process**, over at most `SCAN_LIMIT` (200) conversations.
-`searched.capped` reports when that ceiling is hit, so the tool stops short of
-claiming nothing exists — but it is a ceiling either way.
-
-**Scope is hard-wired to the caller.** `recall_conversations` reads
-`context.phoneNumber` and nothing else. Bruce is not the caller, so no
-arrangement of its arguments reaches him.
+**Scope is hard-wired to the caller.** `recall_conversations` resolves
+`context.phoneNumber` to a contact and passes that id to
+`search_communications`. Bruce is not the caller, so no arrangement of its
+arguments reaches him. Deliberately: an unresolved caller searches nothing
+rather than everything, because an unscoped search would answer one person's
+question out of somebody else's correspondence.
 
 ### The shape
 
@@ -820,14 +835,25 @@ a single query:
 
 ```sql
 search tsvector generated always as (
-  setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
-  setweight(to_tsvector('english', coalesce(summary, '')), 'B') ||
-  setweight(to_tsvector('english', coalesce(body,    '')), 'C')
+  setweight(to_tsvector('english', coalesce(subject,   '')), 'A') ||
+  setweight(to_tsvector('english', coalesce(summary,   '')), 'B') ||
+  setweight(to_tsvector('english', coalesce(body_them, '')), 'C') ||
+  setweight(to_tsvector('english', coalesce(body,      '')), 'D')
 ) stored
 ```
 
 The weights are the point: a hit in a summary should outrank a passing mention
 halfway through a transcript, and `ts_rank` uses them.
+
+`body_them` holds the other party's turns alone, at twice the weight of the
+transcript as a whole. The assistant repeats the caller's words back constantly
+— *"I'm checking the record for Arkendey"* — so a transcript is evidence of the
+search as much as of the conversation.
+
+It is worth knowing what that does **not** fix. On the call that prompted this,
+the caller said every search term aloud too, so those terms sit in `body_them`
+at full weight and legitimately so: that call really was about the culvert
+quote. What separated the two was length normalisation, not authorship.
 
 Rows are projected in **by trigger**, not by application code, so the surface
 cannot go stale when the backfill, the management API or a dashboard edit
@@ -1080,12 +1106,11 @@ mailbox to act on, and `contacts.is_principal`
 ([once applied](#search-across-contacts-and-projects)) authenticates nothing
 stronger than a phone number that can be spoofed.
 
-**Search is capped and caller-scoped.** `recall_conversations` matches in
-process over at most 200 conversations and can only ever see the caller's own
-history. `searched.capped` says when the ceiling was hit, so it stops short of
-claiming nothing exists — but questions about other contacts or about a project
-cannot be answered at all until
-[the search surface](#search-across-contacts-and-projects) is applied.
+**Search is caller-scoped.** `recall_conversations` can only ever see the
+caller's own history. Questions about another contact, or about a project across
+contacts, cannot be answered at all until the tools described in
+[Search across contacts and projects](#search-across-contacts-and-projects) are
+built. The surface they need is applied; the tools are not written.
 
 **Turns that transcribe to nothing are counted, not recovered.** A caller can
 speak and have the transcription return an empty string; the turn is dropped
@@ -1101,12 +1126,10 @@ validation (built, still on `warn`).
 
 In dependency order:
 
-1. **Apply `001_communications_search.sql`** — everything below item 3 depends
-   on it, and it is a paste into the SQL editor. See [Migrations](#migrations).
-2. **`search_communications`** — one tool over the new surface: contact,
-   project, date, text, gated on `is_principal`. Replaces the in-process
-   matcher in `recall_conversations` rather than sitting beside it.
-3. **`catch_up`** — retrieve *and summarise*. "Catch me up on Arkendeith" wants
+1. **Cross-contact and project search** — `search_communications` already takes
+   `contact` and `project`; nothing yet resolves a spoken name to either, and
+   nothing gates it on `is_principal`. That gate is the work, not the query.
+2. **`catch_up`** — retrieve *and summarise*. "Catch me up on Arkendeith" wants
    a paragraph, not forty turns, so this is a retrieval followed by a
    summarising model call. Needs a spoken "let me pull that together" to cover
    the latency, which will be seconds rather than milliseconds.
@@ -1136,8 +1159,8 @@ In dependency order:
 
 ### Deliberately not on the list
 
-**Full-text search beyond ~200 conversations without the migration.** The
-in-process matcher is not being made cleverer; it is being replaced.
+**A cleverer in-process matcher.** It is gone, not being improved. Matching
+belongs where the index is.
 
 **A migration runner.** Nothing here can reach Postgres directly, and one hand
 paste per schema change is cheaper than the tooling to avoid it.

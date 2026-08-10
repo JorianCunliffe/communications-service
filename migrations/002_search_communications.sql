@@ -223,8 +223,14 @@ declare
 begin
   -- Punctuation out, so "$3,500" and "3500" are the same question. Speech
   -- recognition inserts commas and currency symbols the caller never said.
+  -- Thousands separators are removed before the rest of the punctuation
+  -- becomes whitespace. Otherwise "$3,500" splits into "3" and "500", the "3"
+  -- is dropped as too short, and the search hunts for "500" in a message that
+  -- says "$3500".
+  cleaned := lower(coalesce(q, ''));
+  cleaned := regexp_replace(cleaned, '([0-9]),([0-9])', '\1\2', 'g');
   cleaned := btrim(regexp_replace(
-               lower(regexp_replace(coalesce(q, ''), '[^a-z0-9 ]', ' ', 'gi')),
+               regexp_replace(cleaned, '[^a-z0-9 ]', ' ', 'g'),
                '\s+', ' ', 'g'));
 
   if cleaned <> '' then

@@ -411,217 +411,177 @@ export async function getContextText(options) {
 // answer the question, and returns those with just enough of their text to be
 // useful. One call, one answer.
 
-// How many conversations a single search will examine. A ceiling rather than a
-// budget: metadata is small, and the point is to look further back than a turn
-// budget ever could.
-const SCAN_LIMIT = 200;
-
-// Turns returned per matching conversation, and how many either side of a hit
-// come with it. A match on its own is usually unreadable — "yes, that's fine"
-// means nothing without the line before it.
-const EXCERPT_TURNS = 8;
-const EXCERPT_CONTEXT = 1;
-
-// One conversation: a call, a recording, or a day of texts. The unit a person
-// actually remembers, and the unit a question is usually about.
-export function buildConversation({ id, channel, at, summary = null, turns = [], timeZone = CONTEXT_TIMEZONE }) {
-    return {
-        id,
-        channel,
-        at,
-        // The day this happened, in the zone everything else is grouped by.
-        // Slicing the ISO string instead gives the UTC date, which for a
-        // Brisbane evening is the next day - so a result could label itself
-        // 2026-08-06 while its own rendered excerpt was headed 2026-08-07.
-        // One conversation contradicting itself about when it happened is
-        // exactly what makes a model report the wrong day.
-        when: at ? dayKey(new Date(at), timeZone) : null,
-        summary,
-        turns,
-        turnCount: turns.length,
-        // A call the caller abandoned before speaking. Not a conversation, and
-        // returning it as one pushes real ones out of a short answer.
-        spoken: turns.some((turn) => turn.role === 'user'),
-    };
-}
-
-// Splits words the way a search should treat them: all of them must appear
-// somewhere in the conversation, but not necessarily in the same turn. Asking
-// about "invoice Friday" should find the conversation where both came up, not
-// only a single sentence containing both.
-export function searchWords(query) {
-    return String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
-}
-
-// Does this conversation answer the question, and if so, which part of it?
+// The matching runs in Postgres now, not in this process.
 //
-// Returns the turns worth showing, or null when it does not match. Searching
-// the summary as well as the turns matters: a summary says what a conversation
-// was about in words that were never spoken in it.
-export function matchConversation(conversation, words) {
-    if (words.length === 0) return conversation.turns.slice(-EXCERPT_TURNS);
+// It used to scan the newest 200 conversations here and require every word of
+// the query as an exact substring. A real call showed the cost: sixty-six
+// seconds and four searches to find a two-line message, because speech
+// recognition heard "Arkendey" for "Arkendeith" and one mangled word vetoed
+// two correct ones.
+//
+// search_communications (migration 002) ORs the terms and ranks them, falls
+// back to trigram similarity for mangled proper nouns, strips punctuation so
+// "$3,500" and "3500" are one question, and normalises by length so a short
+// message about the subject beats a long transcript that merely mentions it.
+// The migration carries the measurements.
 
-    const haystack = [
-        String(conversation.summary ?? ''),
-        ...conversation.turns.map((turn) => turn.content),
-    ].join('\n').toLowerCase();
+// Lines returned per result, and how many either side of a hit come with it. A
+// match on its own is often unreadable — "yes, that's fine" means nothing
+// without the line before it.
+const EXCERPT_LINES = 8;
+const EXCERPT_CONTEXT = 1;
+const EXCERPT_CHARS = 900;
 
-    if (!words.every((word) => haystack.includes(word))) return null;
+// The words a search is really made of, cleaned the way the SQL cleans them so
+// the excerpt agrees with what Postgres matched on.
+export function queryWords(query) {
+    return String(query ?? '')
+        .toLowerCase()
+        // Thousands separators go before anything else, or "$3,500" splits into
+        // "3" and "500", the "3" is dropped as too short, and the search looks
+        // for "500" in a message that says "$3500".
+        .replace(/([0-9]),([0-9])/g, '$1$2')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .split(' ')
+        .filter((word) => word.length > 1);
+}
 
-    // Which turns actually mention any of it, plus their neighbours.
+// The part of a transcript worth reading out.
+//
+// Postgres decided this row answers the question; this decides which of its
+// lines to show. A whole call transcript is a thousand characters for a model
+// to wade through mid-sentence on a phone call.
+export function excerptFrom(body, query, { lines = EXCERPT_LINES, chars = EXCERPT_CHARS } = {}) {
+    const all = String(body ?? '').split('\n').map((line) => line.trim()).filter(Boolean);
+    if (all.length === 0) return '';
+
+    const words = queryWords(query);
+    // No subject asked for, so the end of the conversation is what "what did we
+    // talk about" means.
+    if (words.length === 0) return clip(all.slice(-lines), chars);
+
     const keep = new Set();
-    conversation.turns.forEach((turn, index) => {
-        const text = String(turn.content ?? '').toLowerCase();
+    all.forEach((line, index) => {
+        const text = line.toLowerCase();
         if (!words.some((word) => text.includes(word))) return;
         for (let i = index - EXCERPT_CONTEXT; i <= index + EXCERPT_CONTEXT; i += 1) {
-            if (i >= 0 && i < conversation.turns.length) keep.add(i);
+            if (i >= 0 && i < all.length) keep.add(i);
         }
     });
 
-    // Matched on the summary alone — show the opening rather than nothing, so
-    // the model has something concrete to quote.
-    if (keep.size === 0) return conversation.turns.slice(0, EXCERPT_TURNS);
+    // Matched on the summary, or fuzzily on a word nobody spelled the same way
+    // twice. The opening is better than nothing to quote.
+    if (keep.size === 0) return clip(all.slice(0, lines), chars);
 
-    return [...keep].sort((a, b) => a - b).slice(0, EXCERPT_TURNS).map((i) => conversation.turns[i]);
+    return clip([...keep].sort((a, b) => a - b).slice(0, lines).map((i) => all[i]), chars);
 }
 
-// Every conversation with this person, as conversations rather than turns.
-//
-// Bounded by count of conversations, not turns, so one talkative day cannot
-// hide a year. Fetching transcripts along with the metadata is deliberate at
-// this scale — 36 calls is 20KB — but it is the thing that will need a
-// generated transcript_text column and a full-text index before it is asked to
-// span thousands. The shape here does not change when that happens; only where
-// the matching runs does.
-async function loadConversations(db, subject, { since, until }) {
-    const groups = await Promise.allSettled([
-        (async () => {
-            let query = db.from('calls')
-                .select('id, twilio_call_sid, direction, started_at, summary, transcript')
-                .order('started_at', { ascending: false })
-                .limit(SCAN_LIMIT);
-            if (subject.contactId) query = query.eq('contact_id', subject.contactId);
-            else query = query.eq('phone_number', subject.phoneNumber);
-            if (since) query = query.gte('started_at', since);
-            if (until) query = query.lt('started_at', until);
-
-            const { data, error } = await query;
-            if (error) throw new Error(`calls: ${error.message}`);
-
-            return (data ?? []).map((call) => buildConversation({
-                id: call.twilio_call_sid,
-                channel: 'call',
-                at: call.started_at,
-                summary: call.summary,
-                turns: turnsFromTranscript(call.transcript, {
-                    channel: 'call',
-                    at: call.started_at,
-                    source: { type: 'call', id: call.twilio_call_sid, direction: call.direction },
-                }),
-            }));
-        })(),
-        (async () => {
-            if (!subject.phoneNumber) return [];
-            let query = db.from('sms_messages')
-                .select('id, direction, content, created_at, sms_threads!inner(phone_number)')
-                .eq('sms_threads.phone_number', subject.phoneNumber)
-                .order('created_at', { ascending: false })
-                .limit(SCAN_LIMIT * 4); // messages, not conversations
-            if (since) query = query.gte('created_at', since);
-            if (until) query = query.lt('created_at', until);
-
-            const { data, error } = await query;
-            if (error) throw new Error(`sms: ${error.message}`);
-
-            // A thread runs for months, so a day of texts is the conversation.
-            const byDay = new Map();
-            for (const message of data ?? []) {
-                const day = String(message.created_at).slice(0, 10);
-                if (!byDay.has(day)) byDay.set(day, []);
-                const turn = buildTurn({
-                    role: message.direction === 'inbound' ? 'user' : 'assistant',
-                    content: message.content,
-                    at: message.created_at,
-                    channel: 'sms',
-                    source: { type: 'sms_message', id: message.id },
-                });
-                if (turn) byDay.get(day).push(turn);
-            }
-
-            return [...byDay.entries()].map(([day, turns]) => buildConversation({
-                id: `sms:${day}`,
-                channel: 'sms',
-                at: turns[turns.length - 1]?.at ?? `${day}T00:00:00.000Z`,
-                turns: turns.slice().reverse(),
-            }));
-        })(),
-    ]);
-
-    const conversations = [];
-    const errors = [];
-    for (const result of groups) {
-        if (result.status === 'fulfilled') conversations.push(...result.value);
-        else errors.push(result.reason.message);
-    }
-
-    conversations.sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
-    return { conversations, errors };
+function clip(lines, chars) {
+    const text = lines.join('\n');
+    return text.length <= chars ? text : `${text.slice(0, chars)}…`;
 }
 
-// Answer a question from history.
+// Ask history a question.
 //
-// The whole point: one call does the retrieval. It looks across every
-// conversation on record — not a window of recent turns — decides which ones
-// bear on the question, and returns those with enough text to quote. A voice
-// model cannot page through results and has no time to try three queries, so
-// none of that is left to it.
-export async function searchHistory({
+// One call does the retrieval: Postgres looks across every call, text and
+// recording on record with this person - not a window of recent turns - ranks
+// them against the question, and returns the ones that bear on it with enough
+// text to quote. A voice model cannot page through results and has no time to
+// try three queries, so none of that is left to it.
+export async function searchCommunications({
     phoneNumber,
-    contactId,
+    contactId = null,
     query = null,
     since = null,
     until = null,
+    channels = null,
     limit = 5,
+    timeZone = CONTEXT_TIMEZONE,
 } = {}) {
     const db = getSupabase();
-    if (!db) return { conversations: [], searched: null, errors: ['history is not configured'] };
-    if (!phoneNumber && !contactId) throw new Error('searchHistory needs a phoneNumber or a contactId');
+    if (!db) {
+        return { conversations: [], returned: 0, searched: null, suggestions: [], errors: ['history is not configured'] };
+    }
+    if (!phoneNumber && !contactId) throw new Error('searchCommunications needs a phoneNumber or a contactId');
 
     const subject = await resolveSubject(db, { phoneNumber, contactId });
-    const { conversations, errors } = await loadConversations(db, subject, { since, until });
-    for (const message of errors) console.warn(`History search partial failure: ${message}`);
 
-    const words = searchWords(query);
-    const matched = [];
-    for (const conversation of conversations) {
-        // Nothing the caller said, so nothing it can answer about what was
-        // discussed. Still counted in `searched` - "we tried to call and you
-        // did not speak" is a fact, just not one worth a slot in a spoken
-        // answer alongside real conversations.
-        if (!conversation.spoken) continue;
-        const excerpt = matchConversation(conversation, words);
-        if (excerpt) matched.push({ ...conversation, excerpt });
+    // What was actually looked at, so "nothing on record" can be told apart
+    // from "nothing in the part I looked at".
+    const searched = {
+        contact: subject.name ?? subject.phoneNumber ?? null,
+        scope: 'every call, text and recording on record with this person',
+        from: since ? String(since).slice(0, 10) : null,
+        to: until ? String(until).slice(0, 10) : null,
+        channels: channels ?? 'all',
+    };
+
+    // Without a contact row there is nothing to scope the search to, and an
+    // unscoped search would answer this caller's question out of somebody
+    // else's correspondence. Caller ID is spoofable enough already.
+    if (!subject.contactId) {
+        return { subject, conversations: [], returned: 0, searched, suggestions: [], errors: [] };
     }
 
-    const dates = conversations.map((c) => String(c.at ?? '').slice(0, 10)).filter(Boolean).sort();
+    const asked = Math.max(1, Math.min(Number(limit) > 0 ? Number(limit) : 5, 20));
 
-    return {
-        subject,
-        // Newest first: "what did we say about X" almost always means the last
-        // time, and a voice answer only has room for one or two.
-        conversations: matched.slice(0, Math.max(1, Math.min(limit, 20))),
-        totalMatched: matched.length,
-        searched: {
-            conversations: conversations.length,
-            abandoned: conversations.filter((c) => !c.spoken).length,
-            from: dates[0] ?? null,
-            to: dates[dates.length - 1] ?? null,
-            // True when the scan itself hit its ceiling, so "nothing found"
-            // can be told apart from "nothing found in what I looked at".
-            capped: conversations.length >= SCAN_LIMIT,
-        },
-        errors,
-    };
+    const { data, error } = await db.rpc('search_communications', {
+        q: query ?? null,
+        contact: subject.contactId,
+        since: since ?? null,
+        until: until ?? null,
+        channels: channels ?? null,
+        max_results: asked,
+    });
+
+    if (error) {
+        // Reported, never thrown. A search that fails mid-call must leave the
+        // model able to say it could not reach the record.
+        console.warn(`Search failed: ${error.message}`);
+        return { subject, conversations: [], returned: 0, searched, suggestions: [], errors: [error.message] };
+    }
+
+    const conversations = (data ?? []).map((row) => ({
+        when: row.occurred_at ? dayKey(new Date(row.occurred_at), timeZone) : null,
+        channel: row.channel,
+        // 'fuzzy' means nothing in it matched the words as spoken - worth the
+        // model knowing before it quotes the result back with confidence.
+        matched_by: row.matched_by,
+        summary: row.summary ?? undefined,
+        said: excerptFrom(row.body, query) || undefined,
+    }));
+
+    const suggestions = conversations.length === 0 && query ? await suggestSpellings(db, query) : [];
+
+    return { subject, conversations, returned: conversations.length, searched, suggestions, errors: [] };
+}
+
+// On a miss, the spelling that probably was meant.
+//
+// Per word rather than per phrase: trigram similarity between "3500 arcandy
+// quote" and "arkendeith" is noise, between "arcandy" and "arkendeith" it is a
+// signal. Only runs when nothing was found, so the extra round trips cost
+// nothing on the path that worked.
+async function suggestSpellings(db, query) {
+    const words = queryWords(query).filter((word) => word.length >= 4).slice(0, 3);
+    if (words.length === 0) return [];
+
+    const results = await Promise.allSettled(
+        words.map((word) => db.rpc('suggest_terms', { q: word, max_results: 2 })),
+    );
+
+    const seen = new Set(words);
+    const out = [];
+    for (const result of results) {
+        if (result.status !== 'fulfilled' || result.value.error) continue;
+        for (const row of result.value.data ?? []) {
+            const term = String(row.term ?? '').trim();
+            if (!term || seen.has(term.toLowerCase())) continue;
+            seen.add(term.toLowerCase());
+            out.push(term);
+        }
+    }
+    return out.slice(0, 3);
 }
 
 // --- For a prompt -----------------------------------------------------------

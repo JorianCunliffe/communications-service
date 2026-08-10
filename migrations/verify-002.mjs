@@ -131,10 +131,16 @@ if (!answer) {
     });
 
     await check('"$3,500" reaches the answer', async () => {
-        const { at, rows } = await finds('$3,500');
-        return at >= 0
-            ? ok(`position ${at + 1} of ${rows.length}`)
-            : bad(`not in ${rows.length} result(s) — punctuation is still not being stripped`);
+        const { at, hit, rows } = await finds('$3,500');
+        if (at < 0) return bad(`not in ${rows.length} result(s) — punctuation is still not being stripped`);
+        // Reaching it fuzzily is not good enough here. "$3,500" used to clean
+        // to "500" — the comma became a space and the "3" was dropped as too
+        // short — so the number matched nothing and only trigram similarity
+        // carried the row through. That looked like a pass while the digits
+        // were being mangled.
+        return hit.matched_by === 'fuzzy'
+            ? bad('matched only by similarity — the thousands separator is still splitting the number')
+            : ok(`position ${at + 1} of ${rows.length}, matched_by ${hit.matched_by}`);
     });
 
     await check('"culvert" still works', async () => {
