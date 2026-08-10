@@ -249,7 +249,14 @@ begin
            c.subject,
            c.summary,
            c.body,
-           (coalesce(ts_rank(c.search, tsq), 0)
+           -- Normalisation 1 divides by 1 + log(length). Without it a long
+           -- transcript that mentions the subject outranks a short message
+           -- that is entirely about it — and the transcript that outranked
+           -- this message was the call that failed to find it, because the
+           -- caller said every search term aloud while looking for it.
+           -- Down-weighting the assistant does not help there; the terms are
+           -- caller-side. Length does.
+           (coalesce(ts_rank(c.search, tsq, 1), 0)
               -- A small nudge, not a second ranking. Fuzzy matching is here to
               -- make a row reachable; full text still decides the order.
               + coalesce(word_similarity(cleaned, coalesce(c.body_them, c.body, '')), 0) * 0.05

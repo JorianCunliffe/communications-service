@@ -98,8 +98,13 @@ await check('outbound sms has no caller half', async () => {
 console.log('\n--- 3. the four searches from the call ---');
 
 // Anchored on real content rather than an id, so the file stays runnable.
+//
+// Constrained to sms deliberately. Iris read the answer aloud on the call that
+// failed to find it, so that transcript also contains "porous culvert" — and
+// anchoring on the text alone picked the transcript, which made every search
+// below assert that the failed call can find itself.
 const [answer] = await must(db.from('communications')
-    .select('id, body').ilike('body', '%porous culvert%').limit(1));
+    .select('id, body').eq('channel', 'sms').ilike('body', '%porous culvert%').limit(1));
 
 if (!answer) {
     note('the "porous culvert" message is not in this database — skipping the replay');
