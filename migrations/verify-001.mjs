@@ -44,9 +44,17 @@ async function check(name, fn) {
 
 console.log('\n--- 1. schema exists ---');
 
-for (const table of ['communications', 'projects', 'project_contacts']) {
+// project_contacts is keyed on (project_id, contact_id) and has no id column,
+// so each table names a column it actually has. Selecting a column that is not
+// there fails with the same shape as the table being absent, which would report
+// a missing migration when the migration is fine.
+for (const [table, column] of [
+    ['communications', 'id'],
+    ['projects', 'id'],
+    ['project_contacts', 'project_id'],
+]) {
     await check(`table ${table}`, async () => {
-        const { error } = await db.from(table).select('id').limit(1);
+        const { error } = await db.from(table).select(column).limit(1);
         return error ? bad(error.message) : ok();
     });
 }
