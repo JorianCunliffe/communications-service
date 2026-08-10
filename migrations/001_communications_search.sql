@@ -178,7 +178,15 @@ create trigger communications_attach_project
 --
 -- Note for the call path: these fire on writes to public.calls, which happen
 -- while a call is live. They are after-row, operate on one small array, and do
--- no I/O. Worth knowing they are there all the same.
+-- no I/O.
+--
+-- Every one of them swallows its own errors. An AFTER trigger that raises
+-- aborts the statement that fired it, which here would mean a bug in search
+-- indexing failing saveTranscript or updateCallStatus midway through a live
+-- call. Indexing is worth exactly nothing next to that, so a projection that
+-- fails warns and lets the write through. The row is simply missing from the
+-- search surface until something touches it again, and the verify script
+-- reports the gap.
 
 create or replace function public.project_call_to_communications()
 returns trigger language plpgsql as $$
@@ -207,6 +215,13 @@ begin
          metadata    = excluded.metadata,
          updated_at  = now();
   return new;
+exception when others then
+  -- Never abort a write to calls. This trigger runs during live calls, where
+  -- an aborted UPDATE means a lost transcript or a lost status change. Search
+  -- indexing is worth nothing next to that: warn, let the write through, and
+  -- leave the row out of the search surface until something touches it again.
+  raise warning 'communications projection failed for call %: %', new.id, sqlerrm;
+  return new;
 end $$;
 
 drop trigger if exists calls_to_communications on public.calls;
@@ -233,6 +248,9 @@ begin
          direction   = excluded.direction,
          body        = excluded.body,
          updated_at  = now();
+  return new;
+exception when others then
+  raise warning 'communications projection failed for sms %: %', new.id, sqlerrm;
   return new;
 end $$;
 
@@ -271,6 +289,9 @@ begin
          body        = excluded.body,
          metadata    = excluded.metadata,
          updated_at  = now();
+  return new;
+exception when others then
+  raise warning 'communications projection failed for recording %: %', new.id, sqlerrm;
   return new;
 end $$;
 
