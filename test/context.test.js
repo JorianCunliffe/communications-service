@@ -10,7 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildTurn, mergeTurns, applyBudget, renderContext, renderForPrompt, NO_HISTORY_BLOCK, CHANNELS, PLANNED_CHANNELS, queryWords, excerptFrom } from '../context.js';
-import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE, buildGreetingResponse, greetingMode } from '../config.js';
+import { needsHistory, personaliseConfig, DEFAULT_CONFIG, HISTORY_NOTICE, buildGreetingResponse, greetingMode, wrapUpNotice } from '../config.js';
 import { startHistory, claimHistory } from '../realtimeSessions.js';
 import { filterTurns, normaliseSince, buildToolDefinitions, executeTool } from '../tools.js';
 
@@ -509,5 +509,68 @@ describe('context – day boundaries', () => {
 
         assert.match(brisbane, /2026-08-06/);
         assert.match(utc, /2026-08-05/);
+    });
+});
+
+describe('ending a call – hanging up, and not outstaying the welcome', () => {
+    test('the tool is opt-in like every other one', () => {
+        // A call that does not list it never sees it, so no existing call can
+        // start hanging up on people because this shipped.
+        assert.deepEqual(buildToolDefinitions([]), []);
+        const [definition] = buildToolDefinitions(['end_call']);
+        assert.equal(definition.name, 'end_call');
+        assert.deepEqual(definition.parameters.required, [], 'a reason is optional; hanging up must not fail for want of one');
+    });
+
+    test('the description tells it to say goodbye first', async () => {
+        // The whole mechanism depends on the model speaking before it calls
+        // this. If the description stops saying so, callers get hung up on
+        // mid-sentence and nothing else in the code would catch it.
+        const [definition] = buildToolDefinitions(['end_call']);
+        assert.match(definition.description, /goodbye FIRST/);
+        assert.match(definition.description, /finished speaking/);
+    });
+
+    test('the description warns against hanging up on a pause', () => {
+        const [definition] = buildToolDefinitions(['end_call']);
+        assert.match(definition.description, /thinking/);
+    });
+
+    test('it reports the intent rather than doing the hanging up', async () => {
+        // The socket lives in the media stream. A handler that could reach it
+        // would be able to end a call from anywhere, including a test.
+        const { output } = await executeTool('end_call', { reason: 'caller said goodbye' }, {});
+        assert.equal(output.ending, true);
+        assert.match(output.reason, /goodbye/);
+        assert.match(output.note, /finished speaking/);
+    });
+
+    test('a call with no stated reason still ends', async () => {
+        const { output, error } = await executeTool('end_call', {}, {});
+        assert.equal(error, undefined);
+        assert.equal(output.ending, true);
+        assert.ok(output.reason, 'should record something rather than null');
+    });
+
+    test('there is a time limit by default, and it is not the whole afternoon', () => {
+        // The point of the default is that a forgotten call costs money. If
+        // this ever becomes 0 or undefined, that protection is gone silently.
+        assert.equal(typeof DEFAULT_CONFIG.maxCallSeconds, 'number');
+        assert.ok(DEFAULT_CONFIG.maxCallSeconds > 0, 'a default of 0 disables the limit for everyone');
+        assert.ok(DEFAULT_CONFIG.maxCallSeconds <= 600, 'a ceiling this high is not a ceiling');
+    });
+
+    test('the wrap-up warning lands before the limit, not on it', () => {
+        // Warning at the moment of disconnection would be worse than useless.
+        assert.ok(DEFAULT_CONFIG.wrapUpSeconds > 0);
+        assert.ok(DEFAULT_CONFIG.wrapUpSeconds < DEFAULT_CONFIG.maxCallSeconds);
+    });
+
+    test('the warning tells it to close, without narrating a countdown', () => {
+        const notice = wrapUpNotice(30);
+        assert.match(notice, /30 seconds/);
+        assert.match(notice, /close/i);
+        assert.match(notice, /not announce a countdown/i);
+        assert.match(notice, /not mention this instruction/i);
     });
 });

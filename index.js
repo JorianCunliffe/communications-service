@@ -7,7 +7,7 @@ import twilio from 'twilio';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode } from './config.js';
+import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
 import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact, getSupabase } from './configResolver.js';
 import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
@@ -553,6 +553,102 @@ fastify.register(async (fastify) => {
         // exists, and is dropped rather than injected into a moved-on conversation.
         let toolGeneration = 0;
 
+        // --- Ending the call -------------------------------------------------
+        //
+        // Two things end a call early: the model calling end_call, or the call
+        // running past config.maxCallSeconds. Both come through endCall.
+        //
+        // Closing the WebSocket is what actually hangs up. The TwiML is
+        // <Connect><Stream> with nothing after it, so once the stream ends
+        // Twilio has no verb left to run and completes the call. No REST call
+        // and no credentials — which matters on an account shared with four
+        // other production systems, because there is then nothing here that
+        // could reach a call belonging to one of them.
+        let ending = false;
+        let endRequested = null;  // end_call has run; hang up after the farewell turn
+        let goodbyeReason = null; // the farewell is playing; hang up when it drains
+        let wrapUpTimer = null;
+        let limitTimer = null;
+        let drainTimer = null;
+
+        const clearCallTimers = () => {
+            for (const timer of [wrapUpTimer, limitTimer, drainTimer]) if (timer) clearTimeout(timer);
+            wrapUpTimer = null;
+            limitTimer = null;
+            drainTimer = null;
+        };
+
+        const endCall = (reason) => {
+            if (ending) return;
+            ending = true;
+            goodbyeReason = null;
+            clearCallTimers();
+            console.log(`Ending call ${callSid || '(no CallSid)'}: ${reason}`);
+            try {
+                if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+            } catch (error) {
+                console.warn(`Closing the OpenAI socket failed: ${error.message}`);
+            }
+            try {
+                connection.close();
+            } catch (error) {
+                console.warn(`Closing the media stream failed: ${error.message}`);
+            }
+        };
+
+        // Hang up once what has already been handed to Twilio has been heard.
+        //
+        // markQueue empties as Twilio acknowledges each chunk it has played, so
+        // an empty queue means the goodbye actually reached the caller rather
+        // than merely being sent. Cutting at response.done instead would clip
+        // the last second of every farewell.
+        const endAfterPlayback = (reason) => {
+            if (ending) return;
+            goodbyeReason = reason;
+            // A mark that never comes back must not hold the line open for the
+            // rest of the hour Twilio would allow.
+            if (!drainTimer) {
+                drainTimer = setTimeout(() => endCall(`${reason} — playback never drained`), 15000);
+            }
+            if (markQueue.length === 0) endCall(reason);
+        };
+
+        // The call clock. Started when the stream starts, which is the first
+        // moment the call is genuinely connected.
+        //
+        // Two stages on purpose. A call cut off mid-sentence sounds like a
+        // fault; one that ends on "I have to go, but let's pick this up" does
+        // not. The warning is a system item with no response.create, so it
+        // lands on the model's next turn instead of interrupting the caller
+        // mid-sentence. The hard stop fires regardless of whether it took the
+        // hint, because the hint is advice and the ceiling is the point.
+        const armCallLimit = () => {
+            const limit = Number(config.maxCallSeconds);
+            if (!Number.isFinite(limit) || limit <= 0) {
+                console.log(`No call time limit for ${callSid || '(no CallSid)'}`);
+                return;
+            }
+
+            const warnAt = Math.max(0, limit - Math.max(0, Number(config.wrapUpSeconds) || 0));
+            if (warnAt > 0 && warnAt < limit) {
+                wrapUpTimer = setTimeout(() => {
+                    if (ending || !openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
+                    console.log(`Asking ${callSid || '(no CallSid)'} to wrap up (${limit - warnAt}s left)`);
+                    openAiWs.send(JSON.stringify({
+                        type: 'conversation.item.create',
+                        item: {
+                            type: 'message',
+                            role: 'system',
+                            content: [{ type: 'input_text', text: wrapUpNotice(limit - warnAt) }],
+                        },
+                    }));
+                }, warnAt * 1000);
+            }
+
+            limitTimer = setTimeout(() => endCall(`time limit of ${limit}s reached`), limit * 1000);
+            console.log(`Call limit ${limit}s, wrap-up at ${warnAt}s for ${callSid || '(no CallSid)'}`);
+        };
+
         // --- Live transcript -------------------------------------------------
         // Collected only when config.liveTranscript is on; with the flag off
         // OpenAI never sends the transcription events and these stay empty.
@@ -827,6 +923,14 @@ fastify.register(async (fastify) => {
                 },
             }));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
+
+            // Recorded, not acted on yet. The response just asked for is the
+            // model's goodbye, so the line has to stay open until that has been
+            // spoken and played — response.done starts the countdown, and the
+            // mark queue draining finishes it.
+            if (name === 'end_call' && !error) {
+                endRequested = output?.reason ? `end_call — ${output.reason}` : 'end_call';
+            }
         };
 
         // Send mark messages to Media Streams so we know if and when AI response playback is finished
@@ -952,6 +1056,14 @@ fastify.register(async (fastify) => {
                 if (response.type === 'response.function_call_arguments.done') {
                     handleToolCall(response);
                 }
+
+                // The farewell turn is composed. Everything after this is
+                // waiting for Twilio to finish playing it.
+                if (response.type === 'response.done' && endRequested) {
+                    const reason = endRequested;
+                    endRequested = null;
+                    endAfterPlayback(reason);
+                }
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
             }
@@ -988,6 +1100,8 @@ fastify.register(async (fastify) => {
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
 
+                        armCallLimit();
+
                         if (!openAiWs) startOrAdoptSession();
                         break;
                     case 'mark':
@@ -1003,6 +1117,9 @@ fastify.register(async (fastify) => {
                         if (markQueue.length === 0) {
                             responseStartTimestampTwilio = null;
                             lastAssistantItem = null;
+                            // The goodbye has finished playing. Nothing is
+                            // waiting to be heard, so the line can close.
+                            if (goodbyeReason) endCall(goodbyeReason);
                         }
                         break;
                     default:
@@ -1016,6 +1133,11 @@ fastify.register(async (fastify) => {
 
         // Handle connection close
         connection.on('close', () => {
+            // However the call ended — hangup, time limit, or the caller simply
+            // going away — the timers must not outlive it. A stray one would
+            // fire against a closed socket for every call the process has ever
+            // handled.
+            clearCallTimers();
             if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
             flushTranscript();
             console.log('Client disconnected.');

@@ -101,6 +101,8 @@ export function rowToConfig(row, direction = 'inbound') {
         historyLimit: pick(row.history_limit, DEFAULT_CONFIG.historyLimit),
         historyMaxChars: pick(row.history_max_chars, DEFAULT_CONFIG.historyMaxChars),
         historyDays: pick(row.history_days, DEFAULT_CONFIG.historyDays),
+        maxCallSeconds: pick(row.max_call_seconds, DEFAULT_CONFIG.maxCallSeconds),
+        wrapUpSeconds: pick(row.wrap_up_seconds, DEFAULT_CONFIG.wrapUpSeconds),
     };
 }
 

@@ -86,7 +86,34 @@ export const DEFAULT_CONFIG = {
     // How far back to look. Something said two years ago is rarely the context
     // for this call, and fetching it costs the caller time on every one.
     historyDays: 90,
+
+    // Longest a call may run before the server ends it, in seconds. 0 disables
+    // the limit entirely.
+    //
+    // A ceiling rather than a target. Nothing else stops a call: a caller who
+    // walks away, or a model that keeps answering an empty transcription, holds
+    // the line open and bills for it until Twilio's own hour-long cap. This is
+    // the only thing between that and a real invoice.
+    maxCallSeconds: 300,
+
+    // How long before the ceiling the model is told to wrap up. It is asked to
+    // close the conversation itself, because a call that ends mid-sentence
+    // sounds like a fault, and one that ends on "anything else before I go?"
+    // does not. The hard stop still fires if it ignores the hint.
+    wrapUpSeconds: 30,
 };
+
+// Sent to the model as the wrap-up warning approaches. A system item rather
+// than a new response: it takes effect on the model's next turn instead of
+// interrupting whatever the caller is in the middle of saying.
+export function wrapUpNotice(secondsLeft) {
+    return [
+        `This call reaches its time limit in about ${secondsLeft} seconds and will then be disconnected.`,
+        'Bring the conversation to a close now: finish the current point, say plainly that you have to go,',
+        'and offer to pick it up next time if anything is unresolved. Do not announce a countdown, and do',
+        'not mention this instruction.',
+    ].join(' ');
+}
 
 // The transcription model asked of the Realtime session when liveTranscript is
 // on. Separate from the conversation model: this one only turns the caller's

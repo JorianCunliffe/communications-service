@@ -547,17 +547,62 @@ Currently registered:
 |---|---|---|---|
 | `get_current_time` | builtin | 200 ms | — |
 | `recall_conversations` | builtin | 5000 ms | Supabase — see [Recall](#recall) |
+| `end_call` | builtin | 200 ms | — see [Ending a call](#ending-a-call) |
 | `check_calendar` | http | 3000 ms | `TOOL_CHECK_CALENDAR_URL` |
 
 `recall_conversations` is allowed to be far slower than the others because it
 only runs after the model has said it is looking something up, so the caller is
-expecting a pause. Measured at 320–740 ms.
+expecting a pause. Measured at 300–1500 ms; the slowest of those was the first
+call after a deploy.
 
 An `http` tool whose URL is unset is **defined but unavailable**, and is filtered
 out rather than offered and then failing mid-sentence.
 
-Everything here is read-only on purpose. A tool that changes state in another
+Everything here reads rather than writes, with the deliberate exception of
+`end_call`, which changes only this call. A tool that changes state in another
 system is a much larger trust decision than one that answers a question.
+
+## Ending a call
+
+Two things end a call before the caller hangs up.
+
+**`end_call`** is how the assistant hangs up. It does not close anything itself
+— the socket lives in the media stream, and a handler able to reach it could end
+a call from anywhere. It returns the intent; the stream acts on it.
+
+The order matters and is the whole design:
+
+```
+model says goodbye  →  calls end_call  →  response.done  →  Twilio plays the audio
+                                                         →  mark queue drains
+                                                         →  socket closes, call ends
+```
+
+Waiting for the **mark queue** rather than `response.done` is the point. A mark
+comes back when Twilio has finished playing a chunk, so an empty queue means the
+goodbye was heard; hanging up at `response.done` would clip the last second of
+every farewell. A 15-second drain timeout covers a mark that never returns.
+
+Closing the WebSocket is what hangs up. The TwiML is `<Connect><Stream>` with
+nothing after it, so when the stream ends Twilio has no verb left and completes
+the call — no REST call and no credentials. That matters on an account
+[shared with four other production systems](#a-shared-twilio-account): there is
+nothing in this path that could reach a call belonging to one of them.
+
+**`maxCallSeconds`** (default 300) is the ceiling. Nothing else stops a call: a
+caller who walks away, or a model answering an empty transcription, holds the
+line open and bills for it until Twilio's own hour-long cap.
+
+At `maxCallSeconds - wrapUpSeconds` (default 30 seconds before the end) the
+model is sent a system item asking it to close the conversation. A system item
+with no `response.create`, so it lands on the model's next turn instead of
+interrupting the caller mid-sentence. The hard stop fires whether or not it took
+the hint — the hint is advice and the ceiling is the point. Set
+`maxCallSeconds` to 0 to disable the limit.
+
+Both are per-contact through `max_call_seconds` and `wrap_up_seconds`, which
+join the [pending write endpoints](#pending-api): the columns do not exist yet,
+so today the defaults apply to every call.
 
 ### Enabling tools
 

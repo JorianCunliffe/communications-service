@@ -190,6 +190,40 @@ const TOOLS = {
         },
     },
 
+    end_call: {
+        type: 'builtin',
+        timeoutMs: 200,
+        description:
+            'Hang up. Call this when the conversation is genuinely finished — the caller has said goodbye, ' +
+            'or said they are done, or asked you to hang up. ' +
+            'Say your goodbye FIRST, in the same turn, and then call this: the line stays open until you ' +
+            'have finished speaking, so the caller hears you out. ' +
+            'Do not call it because there is a pause, because you have answered the question, or because ' +
+            'you cannot help — a caller who goes quiet is thinking, and hanging up on them is worse than ' +
+            'waiting. When in doubt, ask whether there is anything else instead of calling this.',
+        parameters: {
+            type: 'object',
+            properties: {
+                reason: {
+                    type: 'string',
+                    description:
+                        'Why the call is ending, in a few words — "caller said goodbye", "caller asked to ' +
+                        'hang up". Recorded on the call, not spoken.',
+                },
+            },
+            required: [],
+        },
+        // The socket lives in the media stream, not here, so this cannot do the
+        // hanging up itself. It returns the intent; index.js watches for it and
+        // closes the line once the goodbye has finished playing.
+        handler: ({ reason = null } = {}) => ({
+            ending: true,
+            reason: reason || 'the assistant ended the call',
+            // Read by the model, which is still composing its farewell turn.
+            note: 'The line will close once you have finished speaking. Say goodbye now; do not say anything after it.',
+        }),
+    },
+
     get_current_time: {
         type: 'builtin',
         timeoutMs: 200,
