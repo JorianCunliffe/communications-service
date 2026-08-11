@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Updated: 11 August 2026
+Updated: 12 August 2026
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -202,6 +202,8 @@ Optional fields:
 
 Response: `201` plus a Communication.
 
+When `calendar_event_id` resolves to a stored calendar event, the canonical row retains that first-class relationship and inherits the event's explicit thread/project when they were not separately supplied. When no event is explicit and the person is known, the response also includes conservative `calendarCandidates`; candidates are never auto-linked.
+
 Events:
 
 - `communication.created`
@@ -215,6 +217,14 @@ GET /v1/communications/:communicationId
 ```
 
 Returns a Communication or `404 { "error": "Communication not found" }`.
+
+### Requeue memory enrichment
+
+```http
+POST /v1/communications/:communicationId/enrich
+```
+
+Creates or resets the durable `memory` enrichment job. It does not run model extraction inline. Returns the queued job or `404` when the communication does not exist.
 
 ### Send SMS
 
@@ -348,6 +358,79 @@ GET /v1/contacts/:personId
 
 Returns the raw contact row, `person_id`, and `identities`, or `404`.
 
+### Person memory
+
+```http
+GET /v1/contacts/:personId/memory
+```
+
+Returns the person, active threads, open commitments, active recent facts, recent communications, and upcoming calendar events. Unknown person returns `404`.
+
+### Project memory
+
+```http
+GET /v1/projects/:projectId/memory
+```
+
+Returns the project, associated people, related threads, active facts, open commitments, recent communications, and calendar events. This is a read model, not project-management state. Unknown project returns `404`.
+
+## Calendar context
+
+### Ingest an event
+
+```http
+POST /v1/calendar/events
+```
+
+```json
+{
+  "provider": "google",
+  "provider_id": "native-event-123",
+  "title": "Smith Street valuation meeting",
+  "starts_at": "2026-08-13T10:30:00+10:00",
+  "ends_at": "2026-08-13T11:00:00+10:00",
+  "location": "Cairns office",
+  "project_id": "project UUID",
+  "thread_id": "thread_...",
+  "participants": [
+    { "type": "email", "value": "jim@example.com", "response_status": "accepted" },
+    { "type": "email", "value": "unknown@example.com" }
+  ],
+  "metadata": {}
+}
+```
+
+`provider + provider_id` is idempotent. Participants resolve only by an exact existing channel identity. Unknown and ambiguous identities are retained with `contact_id: null`; write ingestion never fuzzy-merges people.
+
+Response: `201 { "event": {}, "participants": [] }` for both creates and idempotent updates.
+
+### Find nearby event candidates
+
+```http
+GET /v1/calendar/candidates?person_id=<uuid>&occurred_at=<timestamp>&window_minutes=120
+```
+
+Returns same-participant events inside the time window with an explainable reason and confidence. Multiple plausible candidates remain candidates and are never assigned automatically.
+
+### Before-meeting context
+
+```http
+GET /v1/calendar/events/:eventId/context
+```
+
+`eventId` may be the internal UUID or a unique provider ID. Returns:
+
+```json
+{
+  "event": {},
+  "participants": [],
+  "recent_threads": [],
+  "open_commitments": [],
+  "recent_facts": [],
+  "recent_communications": []
+}
+```
+
 ### Search context
 
 ```http
@@ -359,7 +442,18 @@ POST /v1/context/search
   "query": "Smith Street valuation",
   "person_id": "6b31dfc4-a25b-482b-bd06-623ee1289f39",
   "project_id": "project UUID when used",
+  "thread_id": "thread_...",
+  "calendar_event_id": "calendar event UUID",
+  "since": "2026-07-01T00:00:00Z",
+  "until": "2026-09-01T00:00:00Z",
   "channels": ["sms", "voice"],
+  "include": {
+    "communications": true,
+    "threads": true,
+    "facts": true,
+    "commitments": false,
+    "calendar": true
+  },
   "limit": 20
 }
 ```
@@ -369,12 +463,21 @@ POST /v1/context/search
 ```json
 {
   "communications": [],
+  "threads": [],
   "facts": [],
-  "threads": []
+  "calendar_events": [],
+  "commitments": [],
+  "query_context": {
+    "filters": {},
+    "include": {},
+    "weights": {}
+  }
 }
 ```
 
-`communications` comes from the `search_communications` database function. `facts` and `threads` are reserved and currently empty.
+`communications` still comes from the enhanced `search_communications` database function. Each direct result is labelled `relationship_to_query: "direct_match"` and includes `score` plus `score_reasons`. Other communications from a matched thread may be included as `thread_context` with the direct communication ID in `via`; they do not inherit the match score.
+
+Threads rank only when at least one member ranks. Facts default to active only. Calendar context defaults on; commitments are opt-in to keep the default response compact. Existing request fields remain compatible.
 
 ### Read a semantic thread
 
@@ -382,7 +485,58 @@ POST /v1/context/search
 GET /v1/threads/:threadId
 ```
 
-Returns the raw `communication_threads` row plus canonical `communications` ordered oldest first. Unknown thread returns `404`.
+Returns the original thread fields for compatibility plus:
+
+```json
+{
+  "thread": {},
+  "communications": [],
+  "calendar_events": [],
+  "participants": [],
+  "summary": null,
+  "current_state": null,
+  "commitments": [],
+  "facts": [],
+  "provenance": {
+    "summary": ["comm_..."],
+    "current_state": ["comm_..."],
+    "facts": {},
+    "commitments": {}
+  }
+}
+```
+
+Communications are chronological. Missing enrichment is returned as null/empty rather than failing the thread read.
+
+### List loose ends
+
+```http
+GET /v1/loose-ends?person_id=<uuid>&project_id=<uuid>&limit=100
+```
+
+Returns open commitments, unresolved Human Ask bindings, and conservative explicit outstanding thread state. Each item carries source communication IDs where available.
+
+### Update commitment status
+
+```http
+POST /v1/commitments/:commitmentId/status
+Content-Type: application/json
+
+{ "status": "completed" }
+```
+
+Statuses: `open`, `completed`, `cancelled`, `superseded`, `unknown`. Terminal states set `resolved_at`; reopening clears it.
+
+### Retract or reactivate a fact
+
+```http
+POST /v1/facts/:factId/status
+Content-Type: application/json
+
+{ "status": "retracted" }
+```
+
+Manual statuses are `active` and `retracted`. Enrichment automatically creates a new fact and marks the prior active fact `superseded`; it never deletes historical provenance.
 
 ### Resolve a Human Ask
 
@@ -443,6 +597,14 @@ Resolution order:
 Explicit links use confidence `1`. The limited participant inference uses confidence `0.8`. Link types are `native`, `explicit`, or `inferred`.
 
 An inbound Ask communication emits a candidate response event. It never changes Ask status automatically.
+
+## Asynchronous memory enrichment
+
+Every canonical communication with text is queued in `communication_enrichment_jobs` by a failure-isolated database trigger. The worker uses the OpenAI Responses API with strict Structured Outputs to derive conservative thread summary/current state, explicit commitments, active facts, and outstanding dependencies. Transcript text is treated as untrusted evidence rather than instructions.
+
+The queue is durable, reclaims stale work, retries failures with backoff, and preserves a rerun request when a communication changes during processing. Obvious explicit commitments are extracted conservatively even if the model call is temporarily unavailable. Raw communication persistence and provider webhooks never wait for enrichment.
+
+All derived claims retain source `comm_*` IDs. A newer fact with the same `fact_key` supersedes the old row without deleting it. Re-enrichment never reopens a commitment already completed or cancelled by a human.
 
 ## Durable event webhooks
 
@@ -632,13 +794,14 @@ Example:
   "supabaseConfig": true,
   "outboundCalls": true,
   "communicationsApi": true,
+  "memoryEnrichment": true,
   "durableEvents": true,
   "twilioSignatures": "enforce",
   "preconnect": { "enabled": true, "pending": 0 }
 }
 ```
 
-`outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `communicationsApi` reflects API key plus requested Supabase configuration, not a live database query. `durableEvents` also requires `HYPERFLOW_EVENT_URL`; a deployment using only per-thread callbacks may report `false` while callback delivery still works.
+`outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `communicationsApi` reflects API key plus requested Supabase configuration, not a live database query. `memoryEnrichment` reflects requested Supabase configuration plus the OpenAI key; it does not prove migrations are applied. `durableEvents` also requires `HYPERFLOW_EVENT_URL`; a deployment using only per-thread callbacks may report `false` while callback delivery still works.
 
 ## Management and recording API (`/api`)
 
@@ -713,6 +876,14 @@ Recording ingest example:
   "mediaAuth": "bearer_env:PLAUD_TOKEN",
   "durationSeconds": 120,
   "recordedAt": "2026-08-11T06:00:00.000Z",
+  "participants": [
+    { "type": "email", "value": "jim@example.com" }
+  ],
+  "calendarEventId": "native-event-123",
+  "projectId": "project UUID",
+  "threadId": "thread_...",
+  "title": "Smith Street valuation meeting",
+  "meetingType": "meeting",
   "metadata": {}
 }
 ```
@@ -726,6 +897,10 @@ Rules:
 - `mediaAuth` stores only a `bearer_env:VARIABLE_NAME` reference, never the token;
 - duplicate `(source, externalId)` returns `200 { "duplicate": true, … }`;
 - new queue item returns `201` with `pending`, or `done` for a supplied transcript.
+- exact participant identities resolve to contacts; unknown identities remain on the recording;
+- calendar/project/thread/title/meeting type remain first-class through canonical projection;
+- a supplied transcript skips retranscription and immediately becomes a searchable canonical recording communication;
+- `source: "plaud"` requires `externalId` and uses this same queue. The repository does not assume undocumented Plaud network endpoints.
 
 ## Status and error conventions
 
@@ -756,7 +931,8 @@ Errors are JSON unless the endpoint is a Twilio webhook rejection:
 - The Twilio provider may accept a send before strict persistence returns an error.
 - Canonical list endpoints do not yet expose cursor pagination.
 - Generic communication responses currently omit stored `subject` and raw metadata.
-- Context search reserves but does not populate `facts` and `threads`.
+- Memory enrichment is asynchronous and eventually consistent; raw communication search may lead derived facts/state.
+- Native Plaud polling requires an injected authenticated adapter; external Plaud pushes are supported immediately.
 - Contact plus identity creation is not transactional.
 - Event delivery is at least once and does not lease rows across multiple instances.
 - `/v1/calls` trusts authenticated `overrides`; the legacy call route has the stricter allow-list.

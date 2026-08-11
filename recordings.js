@@ -54,6 +54,12 @@ export async function enqueueRecording(recording) {
         channels: recording.channels ?? null,
         recorded_at: recording.recordedAt ?? new Date().toISOString(),
         status: recording.status ?? 'pending',
+        participant_identities: recording.participants ?? [],
+        calendar_event_id: recording.calendarEventId ?? null,
+        project_id: recording.projectId ?? null,
+        communication_thread_id: recording.threadId ?? null,
+        title: recording.title ?? null,
+        meeting_type: recording.meetingType ?? null,
         metadata: recording.metadata ?? {},
     };
 

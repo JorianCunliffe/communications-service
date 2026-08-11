@@ -79,6 +79,8 @@
       <dt>/v1/messages</dt>     <dd>Purpose-aware SMS</dd>
       <dt>/v1/calls</dt>        <dd>Purpose-aware voice calls</dd>
       <dt>/v1/context/search</dt><dd>Search communication history</dd>
+      <dt>/v1/loose-ends</dt>   <dd>Open commitments, Asks and outstanding dependencies</dd>
+      <dt>/v1/calendar/events</dt><dd>Ingest calendar context and prepare for meetings</dd>
       <dt>/incoming-call</dt>   <dd>TwiML for Twilio to answer an inbound call</dd>
       <dt>/outbound-call</dt>   <dd>Place a call &mdash; POST, needs <code>X-API-Key</code></dd>
       <dt>/sms</dt>             <dd>Send a message &mdash; POST, needs <code>X-API-Key</code></dd>
@@ -107,6 +109,7 @@
       chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
       chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
       chip(h.communicationsApi ? 'v1 API ready' : 'v1 API not configured', h.communicationsApi);
+      chip(h.memoryEnrichment ? 'memory ready' : 'memory not configured', h.memoryEnrichment);
       chip(h.durableEvents ? 'events ready' : 'events not configured', h.durableEvents);
     })
     .catch(() => {

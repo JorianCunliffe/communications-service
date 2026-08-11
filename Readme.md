@@ -1,16 +1,16 @@
 # Communications Service
 
-Purpose-aware, channel-independent communication history with production Twilio SMS and voice adapters, OpenAI Realtime voice conversations, Supabase persistence, cross-channel Ask threads, and durable outbound events.
+Purpose-aware, channel-independent communication memory with production Twilio SMS and voice adapters, OpenAI Realtime voice conversations, Supabase persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migration, and tests are present in this repository. A deployment must apply all three SQL migrations and configure Supabase before `/v1` can persist or retrieve communications.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must apply migrations `001` through `006` and configure Supabase before `/v1` can persist or retrieve communications memory.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Communications schema migration](migrations/003_communications_api.sql)
+- [Memory search migration](migrations/006_memory_search.sql)
 
 ## Architecture
 
@@ -82,6 +82,9 @@ If a person has two open Ask threads, the service does not guess. The sender mus
 | Ask threads | Explicit Ask binding, safe reply correlation, transactional resolution |
 | People and identities | Existing contacts plus multiple channel identities per person |
 | Context | Chronological call/SMS/recording history and ranked communication search |
+| Memory layer | Calendar context, explainable thread expansion, summaries/current state, commitments, facts, and loose ends |
+| Memory views | Before-meeting, person, project, and enriched thread read models |
+| Enrichment | Durable asynchronous queue; raw communication storage never waits for model extraction |
 | Events | Durable Supabase outbox, exponential retry, optional HMAC signature |
 | Management | Read/audit API for contacts, lines, calls, tools, history, and recordings |
 | Operator UI | Landing page, visible version/build marker, and test console |
@@ -113,6 +116,9 @@ Run these in order in the Supabase SQL editor:
 1. `migrations/001_communications_search.sql`
 2. `migrations/002_search_communications.sql`
 3. `migrations/003_communications_api.sql`
+4. `migrations/004_calendar_memory.sql`
+5. `migrations/005_communications_enrichment.sql`
+6. `migrations/006_memory_search.sql`
 
 Then configure:
 
@@ -122,7 +128,24 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds universal IDs, purpose, correlation, channel identities, Ask bindings, cross-channel threads, transactional Ask resolution, and the durable event outbox.
+Migration `003` adds the canonical API contract. Migrations `004`–`006` add calendar/recording relationships, the durable memory-enrichment queue, facts, commitments, thread state provenance, and explainable thread-aware search.
+
+### Memory ingestion and retrieval
+
+Calendar systems push provider-neutral, idempotent events to `POST /v1/calendar/events`. External Plaud/native recordings continue through `POST /api/recordings`; participants, calendar, project, and thread relationships are retained by the existing recording queue and canonical projection.
+
+Useful read models:
+
+```text
+POST /v1/context/search
+GET  /v1/threads/:threadId
+GET  /v1/loose-ends
+GET  /v1/calendar/events/:eventId/context
+GET  /v1/contacts/:personId/memory
+GET  /v1/projects/:projectId/memory
+```
+
+Search results distinguish direct matches from `thread_context` expansion and return the ranking components. Facts, commitments, summaries, and current state always carry source communication IDs.
 
 ### 3. Configure protected APIs
 
@@ -291,7 +314,10 @@ No destination means no outbox row is created.
 | `GREETING_MODE` | Optional | `instructions` by default; `item` restores the legacy greeting mode |
 | `CONTEXT_TIMEZONE` | Optional | IANA zone used for history grouping; default `Australia/Brisbane` |
 | `SUMMARY_MODEL` | Optional | Summary model; default `gpt-5.4-mini` |
+| `MEMORY_MODEL` | Optional | Structured memory extraction model; defaults to `SUMMARY_MODEL`, then `gpt-5.4-mini` |
 | `TRANSCRIBE_MODEL` | Optional | Diarized transcription model; default `gpt-4o-transcribe-diarize` |
+| `CALENDAR_CANDIDATE_WINDOW_MINUTES` | Optional | Nearby-event candidate window; default `120` minutes |
+| `MEMORY_SEARCH_*` | Optional | Testable text/person/project/thread/calendar/recency ranking weights |
 | `HYPERFLOW_EVENT_URL` | Optional | Default durable event destination |
 | `COMMUNICATIONS_WEBHOOK_SECRET` | Optional | HMAC-SHA256 event signing secret |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Makes that tool available to the voice model |
@@ -312,6 +338,10 @@ No destination means no outbox row is created.
 | `ask_bindings` | External Ask-to-thread binding and resolution state |
 | `outbound_events` | Durable webhook payload, retry, and delivery state |
 | `projects` / `project_contacts` | Optional project association for contextual retrieval |
+| `calendar_events` / `calendar_event_participants` | Idempotent provider events and resolved/unresolved attendees |
+| `communication_commitments` | Promise/request state with due date and source excerpt |
+| `communication_facts` | Active, superseded, or retracted claims with source communication IDs |
+| `communication_enrichment_jobs` | Recoverable asynchronous summary/state/fact/commitment work |
 
 The original provider tables remain because they contain channel-specific details. Database triggers project calls and SMS into `communications` without using provider SIDs as public identifiers.
 
@@ -327,7 +357,8 @@ The original provider tables remain because they contain channel-specific detail
 ## Operational limitations
 
 - Only Twilio currently sends communications; other channels enter through provider adapters using `POST /v1/communications`.
-- `/v1/context/search` currently returns ranked communications. `facts` and `threads` are reserved arrays and currently empty.
+- Memory enrichment is asynchronous and eventually consistent. A newly stored communication may appear in search before its summary, facts, commitments, or current state exist.
+- Direct Plaud network sync requires an injected authenticated adapter because no undocumented Plaud API is assumed. The generic idempotent recording endpoint is production-ready for pushes.
 - Config CRUD for legacy contact and phone-line settings is not implemented; `/api` provides read/audit endpoints.
 - Outbound SMS/calls are accepted by Twilio before the strict persistence write completes. There is no idempotency-key contract yet, so clients must investigate a `502` before blindly retrying a billable send.
 - Event delivery is at least once and the current worker does not lease rows across multiple service instances. Consumers must deduplicate `event_id`.
@@ -357,6 +388,10 @@ The purpose/thread suite verifies:
 - two open Asks remain ambiguous;
 - `/v1` fails closed without API and database configuration;
 - the migration contains the canonical ID, identity, thread, Ask, resolution, and outbox contracts.
+- calendar ingestion is idempotent and retains unresolved identities;
+- Plaud normalization feeds the existing recording contract;
+- thread context is explainable and unrelated threads are excluded;
+- commitments, due dates, loose ends, fact provenance, and supersession work as specified.
 
 ## Repository map
 
@@ -369,6 +404,10 @@ The purpose/thread suite verifies:
 | `eventOutbox.js` | Durable event enqueue and delivery worker |
 | `callLog.js` / `smsLog.js` | Provider persistence and canonical linkage |
 | `context.js` | Chronological history and ranked retrieval integration |
+| `calendar.js` / `calendarProviders.js` | Canonical calendar ingestion, exact identity resolution, and candidates |
+| `memory.js` | Thread-aware search, loose ends, and person/project/event memory views |
+| `enrichment.js` | Durable structured summary/state/fact/commitment worker |
+| `plaud.js` | Plaud adapter contract and recording normalization |
 | `migrations/` | Supabase schema and verification scripts |
 | `docs/API_REFERENCE.md` | Endpoint-by-endpoint API contract |
 

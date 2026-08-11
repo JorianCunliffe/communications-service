@@ -20,6 +20,7 @@ import { enqueueRecording, startRecordingSweeper } from './recordings.js';
 import { summariseCall } from './summarise.js';
 import v1Routes from './v1.js';
 import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbox.js';
+import { startEnrichmentSweeper } from './enrichment.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -153,6 +154,7 @@ fastify.get('/health', async (request, reply) => {
         supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
         communicationsApi: Boolean(process.env.API_KEY && process.env.SUPABASE_CONFIG_ENABLED === 'true'),
+        memoryEnrichment: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.OPENAI_API_KEY),
         durableEvents: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.HYPERFLOW_EVENT_URL),
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
@@ -1356,4 +1358,8 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
 
     // Delivers durable client webhooks independently of provider request paths.
     startEventSweeper();
+
+    // Derives summaries, current state, facts and commitments outside all
+    // provider ingestion paths. Failures remain isolated in the durable queue.
+    startEnrichmentSweeper();
 });

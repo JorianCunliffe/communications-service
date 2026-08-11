@@ -4,8 +4,8 @@
   "description": "Purpose-aware, channel-independent communications API for voice, SMS and future providers",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --test-reporter=spec test/transcripts.test.js test/context.test.js test/communications.test.js test/documentation.test.js test/suite.test.js",
-    "test:unit": "node --test --test-reporter=spec test/transcripts.test.js test/context.test.js test/communications.test.js test/documentation.test.js"
+    "test": "node --test --test-reporter=spec test/transcripts.test.js test/context.test.js test/communications.test.js test/memory.test.js test/documentation.test.js test/suite.test.js",
+    "test:unit": "node --test --test-reporter=spec test/transcripts.test.js test/context.test.js test/communications.test.js test/memory.test.js test/documentation.test.js"
   },
   "keywords": [],
   "author": "",

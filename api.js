@@ -17,9 +17,10 @@
 //   answering. Here, showing an operator defaults dressed up as their settings
 //   would be worse than an error, because they would act on it.
 //
-//   Nothing in this file writes. The one route that runs the real resolver
-//   passes createContact: false, so asking what would happen on a call is not
-//   the thing that creates a contact.
+//   Management reads do not mutate config. Recording ingestion is the explicit
+//   exception: it only appends to the existing durable transcription queue.
+//   The config resolver still passes createContact: false, so previewing a call
+//   never creates a contact.
 
 import { DEFAULT_CONFIG } from './config.js';
 import { getSupabase, resolveConfig, rowToConfig } from './configResolver.js';
@@ -29,6 +30,8 @@ import { enqueueRecording, sweepOnce } from './recordings.js';
 import { assertFetchable, isKnownSource } from './recordingSources.js';
 import { validate as validateTranscript, fromExternal as fromExternalTranscript, toText } from './transcripts.js';
 import { getContext, renderContext, renderForPrompt, CHANNELS, PLANNED_CHANNELS } from './context.js';
+import { normaliseParticipant, resolveCalendarEvent, resolveExactIdentity } from './calendar.js';
+import { normalisePlaudRecording } from './plaud.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -481,6 +484,25 @@ export default async function apiRoutes(fastify) {
             contactId = contact?.id ?? null;
         }
 
+        const participantInputs = Array.isArray(body.participants) ? body.participants.map(normaliseParticipant) : [];
+        for (const participant of participantInputs) {
+            participant.contactId = await resolveExactIdentity(db, participant);
+        }
+        const resolvedPeople = [...new Set(participantInputs.map((item) => item.contactId).filter(Boolean))];
+        if (!contactId && resolvedPeople.length === 1) contactId = resolvedPeople[0];
+        const contextual = body.source === 'plaud' ? normalisePlaudRecording(body) : {
+            calendarEventId: body.calendarEventId || body.calendar_event_id || null,
+            projectId: body.projectId || body.project_id || null,
+            threadId: body.threadId || body.thread_id || null,
+            title: body.title || null,
+            meetingType: body.meetingType || body.meeting_type || null,
+        };
+        const calendarEvent = await resolveCalendarEvent(db, contextual.calendarEventId);
+        const calendarEventId = calendarEvent?.id || null;
+        if (contextual.calendarEventId && !calendarEvent) {
+            return reply.code(400).send({ error: '"calendarEventId" did not resolve to exactly one calendar event' });
+        }
+
         const result = await enqueueRecording({
             source: body.source,
             externalId: body.externalId ?? null,
@@ -491,7 +513,24 @@ export default async function apiRoutes(fastify) {
             durationSeconds: Number(body.durationSeconds) || null,
             recordedAt: body.recordedAt ?? null,
             transcript,
-            metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
+            participants: participantInputs.map((item) => ({
+                contact_id: item.contactId, identity_type: item.identityType, identity_value: item.identityValue,
+                metadata: item.metadata,
+            })),
+            calendarEventId,
+            projectId: contextual.projectId || calendarEvent?.project_id || null,
+            threadId: contextual.threadId || calendarEvent?.communication_thread_id || null,
+            title: contextual.title,
+            meetingType: contextual.meetingType,
+            metadata: {
+                ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+                correlation: {
+                    ...(body.metadata?.correlation || {}),
+                    ...(calendarEventId ? { calendar_event_id: calendarEventId } : {}),
+                    ...(contextual.projectId || calendarEvent?.project_id ? { project_id: contextual.projectId || calendarEvent.project_id } : {}),
+                    ...(contextual.threadId || calendarEvent?.communication_thread_id ? { thread_id: contextual.threadId || calendarEvent.communication_thread_id } : {}),
+                },
+            },
         });
 
         if (result?.error) return dbError(reply, { message: result.error }, 'queue the recording');

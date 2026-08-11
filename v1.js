@@ -6,6 +6,8 @@ import { recordCall } from './callLog.js';
 import { enqueueEvent } from './eventOutbox.js';
 import { randomUUID } from 'node:crypto';
 import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
+import { calendarCandidates, ingestCalendarEvent, resolveCalendarEvent, resolveCalendarEventId } from './calendar.js';
+import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, searchMemory } from './memory.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
 const DIRECTIONS = ['inbound', 'outbound'];
@@ -96,12 +98,27 @@ export default async function v1Routes(fastify) {
 
         try {
             const communicationId = prefixedId('comm');
+            const requestedCalendarEvent = body.calendar_event_id || semantic.correlation.calendar_event_id || null;
+            const calendarEvent = await resolveCalendarEvent(db, requestedCalendarEvent);
+            const calendarEventId = calendarEvent?.id || null;
+            if (requestedCalendarEvent && !calendarEvent) {
+                return reply.code(400).send({ error: 'calendar_event_id did not resolve to exactly one calendar event' });
+            }
+            const projectId = body.project_id || calendarEvent?.project_id || semantic.correlation.project_id || null;
+            const resolvedCorrelation = {
+                ...semantic.correlation,
+                ...(projectId ? { project_id: projectId } : {}),
+                ...(calendarEventId ? { calendar_event_id: calendarEventId } : {}),
+            };
             const thread = await resolveCommunicationThread({
                 db,
                 participantIdentity: body.identity || body.person_id || null,
                 serviceIdentity: body.service_identity || null,
                 direction: body.direction,
-                ...semantic,
+                purpose: semantic.purpose,
+                correlation: resolvedCorrelation,
+                threadId: semantic.threadId || calendarEvent?.communication_thread_id || null,
+                callbackUrl: semantic.callbackUrl,
             });
             const row = {
                 communication_id: communicationId,
@@ -111,6 +128,7 @@ export default async function v1Routes(fastify) {
                 source_id: randomUUID(),
                 contact_id: body.person_id || null,
                 person_id: body.person_id || null,
+                project_id: projectId,
                 occurred_at: body.occurred_at || new Date().toISOString(),
                 subject: body.subject || null,
                 body: body.content || null,
@@ -122,6 +140,7 @@ export default async function v1Routes(fastify) {
                 correlation: thread.correlation,
                 thread_id: thread.threadId,
                 thread_link_type: thread.linkType,
+                calendar_event_id: calendarEventId,
                 metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
             };
             const { data, error } = await db.from('communications').insert(row).select('*').single();
@@ -146,7 +165,10 @@ export default async function v1Routes(fastify) {
                     payload: { ask_id: thread.purpose.ask_id, channel: body.channel, content: body.content || null },
                 });
             }
-            return reply.code(201).send(toCanonical(data));
+            const candidates = !calendarEventId && (data.person_id || data.contact_id)
+                ? await calendarCandidates(db, { contactId: data.person_id || data.contact_id, occurredAt: data.occurred_at })
+                : [];
+            return reply.code(201).send({ ...toCanonical(data), calendarCandidates: candidates });
         } catch (error) { return errorReply(reply, error, 500); }
     });
 
@@ -156,6 +178,21 @@ export default async function v1Routes(fastify) {
             const row = await getCommunication(db, request.params.communicationId);
             if (!row) return reply.code(404).send({ error: 'Communication not found' });
             return toCanonical(row);
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/communications/:communicationId/enrich', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const communication = await getCommunication(db, request.params.communicationId);
+            if (!communication) return reply.code(404).send({ error: 'Communication not found' });
+            const job = await db.from('communication_enrichment_jobs').upsert({
+                communication_id: request.params.communicationId, job_type: 'memory', status: 'pending',
+                attempts: 0, last_error: null, rerun_requested: false,
+                next_attempt_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            }, { onConflict: 'communication_id,job_type' }).select('*').single();
+            if (job.error) throw new Error(job.error.message);
+            return { job: job.data, requeued: true };
         } catch (error) { return errorReply(reply, error, 500); }
     });
 
@@ -328,29 +365,104 @@ export default async function v1Routes(fastify) {
         return { ...person.data, person_id: person.data.id, identities: identities.data || [] };
     });
 
+    fastify.get('/contacts/:personId/memory', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const memory = await getPersonMemory(db, request.params.personId);
+            if (!memory) return reply.code(404).send({ error: 'Contact not found' });
+            return memory;
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.get('/projects/:projectId/memory', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const memory = await getProjectMemory(db, request.params.projectId);
+            if (!memory) return reply.code(404).send({ error: 'Project not found' });
+            return memory;
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/calendar/events', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const result = await ingestCalendarEvent(db, request.body || {});
+            return reply.code(201).send(result);
+        } catch (error) { return errorReply(reply, error, 400); }
+    });
+
+    fastify.get('/calendar/candidates', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        if (!request.query.person_id || !request.query.occurred_at) {
+            return reply.code(400).send({ error: 'person_id and occurred_at are required' });
+        }
+        try {
+            return { calendarCandidates: await calendarCandidates(db, {
+                contactId: request.query.person_id, occurredAt: request.query.occurred_at,
+                windowMinutes: Number(request.query.window_minutes) || undefined,
+            }) };
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.get('/calendar/events/:eventId/context', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const eventId = await resolveCalendarEventId(db, request.params.eventId);
+            if (!eventId) return reply.code(404).send({ error: 'Calendar event not found' });
+            const context = await getEventContext(db, eventId);
+            return context;
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
     fastify.post('/context/search', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
-        const body = request.body || {};
-        const { data, error } = await db.rpc('search_communications', {
-            q: body.query || null,
-            contact: body.person_id || body.contact_id || null,
-            project: body.project_id || null,
-            channels: body.channels || null,
-            max_results: Math.min(Math.max(Number(body.limit) || 20, 1), 100),
-        });
-        if (error) return errorReply(reply, new Error(error.message), 500);
-        return { communications: data || [], facts: [], threads: [] };
+        try { return await searchMemory(db, request.body || {}); }
+        catch (error) { return errorReply(reply, error, 500); }
     });
 
     fastify.get('/threads/:threadId', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
-        const thread = await db.from('communication_threads').select('*')
-            .eq('thread_id', request.params.threadId).maybeSingle();
-        if (thread.error) return errorReply(reply, new Error(thread.error.message), 500);
-        if (!thread.data) return reply.code(404).send({ error: 'Thread not found' });
-        const communications = await db.from('communications').select('*')
-            .eq('thread_id', request.params.threadId).order('occurred_at');
-        return { ...thread.data, communications: (communications.data || []).map(toCanonical) };
+        try {
+            const memory = await getThreadMemory(db, request.params.threadId);
+            if (!memory) return reply.code(404).send({ error: 'Thread not found' });
+            return { ...memory.thread, ...memory, communications: memory.communications.map(toCanonical) };
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.get('/loose-ends', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const data = await getLooseEnds(db, {
+                personId: request.query.person_id || null,
+                projectId: request.query.project_id || null,
+                limit: request.query.limit,
+            });
+            return { data, count: data.length };
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/commitments/:commitmentId/status', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const statuses = ['open', 'completed', 'cancelled', 'superseded', 'unknown'];
+        if (!statuses.includes(request.body?.status)) return reply.code(400).send({ error: `status must be one of: ${statuses.join(', ')}` });
+        const now = new Date().toISOString();
+        const result = await db.from('communication_commitments').update({
+            status: request.body.status, updated_at: now,
+            resolved_at: ['completed', 'cancelled', 'superseded'].includes(request.body.status) ? now : null,
+        }).eq('id', request.params.commitmentId).select('*').maybeSingle();
+        if (result.error) return errorReply(reply, new Error(result.error.message), 500);
+        if (!result.data) return reply.code(404).send({ error: 'Commitment not found' });
+        return result.data;
+    });
+
+    fastify.post('/facts/:factId/status', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        if (!['active', 'retracted'].includes(request.body?.status)) return reply.code(400).send({ error: 'status must be active or retracted' });
+        const result = await db.from('communication_facts').update({ status: request.body.status, updated_at: new Date().toISOString() })
+            .eq('id', request.params.factId).select('*').maybeSingle();
+        if (result.error) return errorReply(reply, new Error(result.error.message), 500);
+        if (!result.data) return reply.code(404).send({ error: 'Fact not found' });
+        return result.data;
     });
 
     // Communications does not decide whether a reply answers an Ask. Hyperflow
