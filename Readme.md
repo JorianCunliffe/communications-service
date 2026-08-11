@@ -1,14 +1,49 @@
-# Iris — Twilio Voice + SMS with the OpenAI Realtime API
+# Communications Service
 
 A Node.js server that bridges Twilio phone calls to [OpenAI's Realtime
 API](https://platform.openai.com/docs/) for two-way voice conversation, records
 calls and SMS to Supabase, and personalises every interaction from a per-contact
-configuration cascade.
+configuration cascade. Twilio and OpenAI are provider implementations; the
+public model is channel-independent.
 
-Built on [Twilio Voice](https://www.twilio.com/docs/voice) and [Media
-Streams](https://www.twilio.com/docs/voice/media-streams). The original tutorial
-this grew from is
-[here](https://www.twilio.com/en-us/blog/voice-ai-assistant-openai-realtime-api-node).
+## Service boundary and Ask threading
+
+These rules define the integration contract:
+
+1. Hyperflow owns intent and workflow state.
+2. Communications owns people, channel identities and communication history.
+3. IDs and events cross the boundary; databases do not.
+4. Explicit correlation comes first; inferred correlation may be added later.
+
+`purpose` is a first-class communication field, separate from generic
+`metadata`. A message intended to resolve a Hyperflow Ask is represented as:
+
+```json
+{
+  "communication_id": "comm_82",
+  "purpose": {
+    "type": "human_ask",
+    "ask_id": "ask_93bc"
+  }
+}
+```
+
+The Ask is independent of its delivery channel. The initial SMS, a follow-up
+question, an outbound explanation, an incoming call and its transcript can all
+belong to the same `communication_thread`. An inbound interaction emits
+`ask.response.received`; it does **not** resolve the Ask. Hyperflow decides when
+a communication actually answers the question and then calls
+`POST /v1/asks/:ask_id/resolve` with that final `communication_id`. Only that
+communication receives an `ask_resolved` resolution marker.
+
+This keeps the distinction deliberate: approvals are a response surface;
+delivery and communication history are separate responsibilities. A direct
+form can call Hyperflow's `respondToAsk()` without creating a Communication,
+while SMS, email, voice and other channels use the same Ask purpose contract.
+
+Apply `migrations/001_communications_search.sql`,
+`002_search_communications.sql`, then `003_communications_api.sql` before using
+the versioned API.
 
 ## What it does today
 
@@ -31,8 +66,9 @@ this grew from is
 | Tool calling on voice calls, per contact and direction | Working |
 | Auto-reply to inbound SMS | **Not built** — see [Roadmap](#roadmap) |
 | Management API — reading contacts, config, tools, calls and messages | Working — see [Management API](#management-api-api) |
-| Management API — *writing* any of the above | **Not built** — see [Pending API](#pending-api) |
-| Outbound webhooks on call/SMS events | **Not built** — see [Roadmap](#roadmap) |
+| Versioned Communications API — calls, messages, contacts, context and canonical communications | Working — `/v1` |
+| Purpose-aware cross-channel Ask threads | Working — explicit Ask binding plus reply correlation |
+| Durable events for call/SMS/transcript/summary/Ask responses | Working — persisted outbox with retry |
 
 > **Everything is intended to be driven by the API.** Configuration that today
 > requires SQL against Supabase is listed under [Pending API](#pending-api) with
@@ -179,7 +215,7 @@ Landing page. Content-negotiated: a browser (`Accept: text/html`) gets
 `home.html`; anything else gets JSON.
 
 ```json
-{ "message": "Twilio Media Stream Server is running!", "console": "/console" }
+{ "message": "Communications Service is running!", "console": "/console", "api": "/v1" }
 ```
 
 ### `GET /console`
@@ -246,6 +282,49 @@ curl -X POST https://your-host/sms \
 
 `body` must be 1–1600 characters. **`201`** → `{ "messageSid": "SM…", … }`.
 
+### Versioned Communications API (`/v1`)
+
+All routes require `X-API-Key`; all writes require the communications migrations
+and Supabase service-role configuration.
+
+| Route | Purpose |
+|---|---|
+| `POST /v1/messages` | Send SMS and return a provider-independent `communication_id`. Accepts `purpose`, `correlation`, `thread_id`, and `callback_url`. |
+| `GET /v1/messages/:communication_id` | Read one canonical SMS communication. |
+| `POST /v1/calls` | Place a voice call with the same purpose/thread contract. |
+| `GET /v1/calls/:communication_id` | Read one canonical voice communication. |
+| `POST /v1/communications` | Record an inbound or outbound communication from any supported provider/channel adapter. |
+| `GET /v1/communications` | Filter canonical communications by channel, thread, Ask, or person. |
+| `GET /v1/communications/:communication_id` | Read one canonical communication. |
+| `GET/POST /v1/contacts` | Read or create people and their channel identities. |
+| `POST /v1/context/search` | Ranked communication search by query, person, project and channel. |
+| `GET /v1/threads/:thread_id` | Read a purpose-aware thread and its communications chronologically. |
+| `POST /v1/asks/:ask_id/resolve` | Mark one member communication as the answer and close the Ask thread. |
+| `GET /v1/events` | Inspect the durable webhook outbox. |
+
+Example Ask delivery:
+
+```json
+{
+  "to": "+61400000000",
+  "from": "+61411111111",
+  "body": "Can you approve the revised $180k budget?",
+  "purpose": { "type": "human_ask", "ask_id": "ask_93bc" },
+  "correlation": {
+    "tenant_id": "tenant_1",
+    "run_id": "run_8",
+    "task_id": "task_12",
+    "hold_id": "hold_5"
+  },
+  "callback_url": "https://hyperflow.example.com/api/communications/events"
+}
+```
+
+`purpose.token` is accepted when Hyperflow uses an opaque Ask capability token.
+It remains part of the explicit purpose object rather than being hidden among
+unrelated metadata. Event bodies contain `event_id`, `communication_id`, `type`,
+`occurred_at`, `purpose`, `correlation` and `payload`.
+
 ### Webhook endpoints (Twilio calls these)
 
 | Route | Methods | Purpose |
@@ -254,6 +333,7 @@ curl -X POST https://your-host/sms \
 | `/outbound-answer` | GET, POST | Fetched when the callee picks up. Same TwiML, intro suppressed. |
 | `/call-status` | GET, POST | Call progress. Updates status, `ended_at`, `duration_seconds`. Always answers `2xx` so Twilio does not retry. |
 | `/incoming-sms` | GET, POST | Records the inbound message. Returns empty TwiML — **nothing replies automatically yet.** |
+| `/message-status` | GET, POST | Updates provider delivery state and emits `sms.sent`/`sms.delivered`. |
 | `/media-stream` | WebSocket | The audio bridge. Twilio connects here from the TwiML above. |
 
 ### Management API (`/api`)
@@ -957,7 +1037,9 @@ run.
 
 | File | Status | What it does |
 |---|---|---|
-| `001_communications_search.sql` | **Not applied** | `communications`, `projects`, `project_contacts`, `contacts.is_principal`, `pg_trgm`, projection triggers, backfill |
+| `001_communications_search.sql` | Required | Searchable canonical projection, projects and entity resolution |
+| `002_search_communications.sql` | Required | Ranked and fuzzy cross-channel search |
+| `003_communications_api.sql` | Required for `/v1` | Universal `comm_` IDs, purpose, Ask threads, channel identities and durable events |
 
 Check whether one has landed by querying for its table rather than trusting the
 file's presence:
@@ -983,8 +1065,13 @@ required for everything the app reads and writes.
 | `sms_messages` | One row per message, `thread_id` → `sms_threads`. `inbound` → role `user`, `outbound` → role `assistant`. |
 | `messages` | **Unused.** Predates `sms_messages`. Nothing reads or writes it. |
 | `recordings` | Ingest queue and transcript store for audio from Twilio, Plaud or any URL. See [Transcription](#transcription). |
+| `communication_identities` | Many channel addresses (phone, email, Slack, WhatsApp, Teams) for one contact/person. |
+| `communication_threads` | Channel-independent thread state, purpose, correlation and callback destination. |
+| `communication_thread_members` | Explicit, native or inferred links from communications to threads. |
+| `ask_bindings` | External Hyperflow Ask to communication-thread binding and explicit resolution state. |
+| `outbound_events` | Durable webhook outbox with attempts, retry time, status and delivery result. |
 
-Created by `migrations/001_communications_search.sql`, **not yet applied**:
+Created and extended by the numbered communications migrations:
 
 | Table | Holds |
 |---|---|
@@ -1196,8 +1283,9 @@ In dependency order:
    than one calendar, which is the part that needs designing rather than wiring.
 9. **Actions** — a project management tool may be integrated later. Deliberately
    unspecified: the shape should follow whatever system it has to talk to.
-10. **Outbound webhooks** — best-effort POST of a JSON payload after call and
-    message events.
+10. **Webhook administration** — durable delivery is built. Add authenticated
+    subscription CRUD and secret rotation when multiple clients need destinations
+    beyond per-thread `callback_url` and `HYPERFLOW_EVENT_URL`.
 11. **Tenant and principal identity** — resolved through the cascade and carried
     into tool execution. `is_principal` is the placeholder, and caller ID is not
     authentication.

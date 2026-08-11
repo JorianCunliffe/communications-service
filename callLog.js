@@ -6,6 +6,8 @@
 // on the request path.
 
 import { createClient } from '@supabase/supabase-js';
+import { normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
+import { callbackForThread, enqueueEvent } from './eventOutbox.js';
 
 const WRITE_TIMEOUT_MS = 2500;
 
@@ -43,11 +45,38 @@ async function withTimeout(query, label) {
 // are talking to: the callee outbound, the caller inbound. `status` is the
 // call's state at the moment we record it — we create an outbound call
 // ourselves, but only hear about an inbound one once it is already ringing.
-export async function recordCall({ callSid, otherParty, direction, config, status = 'initiated', metadata = {} }) {
+export async function recordCall({
+    callSid,
+    otherParty,
+    serviceIdentity = null,
+    direction,
+    config,
+    status = 'initiated',
+    metadata = {},
+    communicationId = prefixedId('comm'),
+    purpose = null,
+    correlation = {},
+    threadId = null,
+    callbackUrl = null,
+    strict = false,
+}) {
     const db = getClient();
-    if (!db || !callSid) return;
+    if (!db || !callSid) {
+        if (strict) throw new Error('Communications persistence is not configured');
+        return null;
+    }
 
     try {
+        const semantic = await resolveCommunicationThread({
+            db,
+            participantIdentity: otherParty,
+            serviceIdentity,
+            direction,
+            threadId,
+            purpose: normalisePurpose(purpose),
+            correlation: normaliseCorrelation(correlation),
+            callbackUrl,
+        });
         const row = {
             twilio_call_sid: callSid,
             phone_number: otherParty || 'unknown',
@@ -64,6 +93,11 @@ export async function recordCall({ callSid, otherParty, direction, config, statu
                 ...metadata,
             },
             started_at: new Date().toISOString(),
+            communication_id: communicationId,
+            purpose: semantic.purpose,
+            correlation: semantic.correlation,
+            communication_thread_id: semantic.threadId,
+            thread_link_type: semantic.linkType,
         };
 
         // Link the call to the contact, the way SMS threads are linked, so a
@@ -82,8 +116,17 @@ export async function recordCall({ callSid, otherParty, direction, config, statu
             db.from('calls').upsert(row, { onConflict: 'twilio_call_sid' }),
             'Call record insert'
         );
+        return {
+            communicationId,
+            threadId: semantic.threadId,
+            purpose: semantic.purpose,
+            correlation: semantic.correlation,
+            callbackUrl: semantic.callbackUrl,
+        };
     } catch (error) {
+        if (strict) throw error;
         console.warn(`Could not record ${direction} call ${callSid}: ${error.message}`);
+        return null;
     }
 }
 
@@ -144,6 +187,33 @@ export async function saveTranscript({ callSid, transcript, status = 'completed'
             ? `, ${transcript.unintelligible} turn(s) unintelligible`
             : '';
         console.log(`Stored ${transcript.segments.length}-segment transcript for ${callSid}${lost}`);
+
+        const communication = await withTimeout(
+            db.from('calls').select('communication_id,purpose,correlation,communication_thread_id')
+                .eq('twilio_call_sid', callSid).maybeSingle(),
+            'Transcript event lookup'
+        );
+        if (communication?.communication_id) {
+            const destination = await callbackForThread(communication.communication_thread_id);
+            await enqueueEvent({
+                type: 'transcript.completed',
+                communicationId: communication.communication_id,
+                purpose: communication.purpose,
+                correlation: communication.correlation || {},
+                destination,
+                payload: { channel: 'voice', transcript },
+            });
+            if (communication.purpose?.type === 'human_ask') {
+                await enqueueEvent({
+                    type: 'ask.response.received',
+                    communicationId: communication.communication_id,
+                    purpose: communication.purpose,
+                    correlation: communication.correlation || {},
+                    destination,
+                    payload: { ask_id: communication.purpose.ask_id, channel: 'voice', transcript },
+                });
+            }
+        }
     } catch (error) {
         console.warn(`Could not store transcript for ${callSid}: ${error.message}`);
     }
@@ -182,7 +252,12 @@ export async function updateCallStatus({ callSid, status, durationSeconds }) {
             db.from('calls').update(patch).eq('twilio_call_sid', callSid),
             'Call status update'
         );
+        return await withTimeout(
+            db.from('calls').select('communication_id,purpose,correlation,communication_thread_id').eq('twilio_call_sid', callSid).maybeSingle(),
+            'Call event lookup'
+        );
     } catch (error) {
         console.warn(`Could not update status for ${callSid}: ${error.message}`);
+        return null;
     }
 }

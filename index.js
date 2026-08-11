@@ -18,6 +18,8 @@ import apiRoutes from './api.js';
 import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory, noteParty, partyFor } from './realtimeSessions.js';
 import { enqueueRecording, startRecordingSweeper } from './recordings.js';
 import { summariseCall } from './summarise.js';
+import v1Routes from './v1.js';
+import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbox.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -38,6 +40,7 @@ fastify.register(fastifyWs);
 // The management API. Every route under /api requires the shared key and reads
 // only — see api.js.
 fastify.register(apiRoutes, { prefix: '/api' });
+fastify.register(v1Routes, { prefix: '/v1' });
 
 // Constants (per-call tunables live in config.js)
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
@@ -68,7 +71,7 @@ const BUILD = (() => {
         'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
-        'context.js',
+        'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
         'console.html', 'home.html', 'package.json',
     ];
 
@@ -131,7 +134,7 @@ fastify.get('/', async (request, reply) => {
     if (HOME_HTML && (request.headers.accept || '').includes('text/html')) {
         return reply.type('text/html').send(HOME_HTML);
     }
-    reply.send({ message: 'Twilio Media Stream Server is running!', console: '/console' });
+    reply.send({ message: 'Communications Service is running!', console: '/console', api: '/v1' });
 });
 
 fastify.get('/console', async (request, reply) => {
@@ -149,6 +152,8 @@ fastify.get('/health', async (request, reply) => {
         playIntro: DEFAULT_CONFIG.playIntro,
         supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
+        communicationsApi: Boolean(process.env.API_KEY && process.env.SUPABASE_CONFIG_ENABLED === 'true'),
+        durableEvents: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.HYPERFLOW_EVENT_URL),
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
         twilioSignatures: signatureMode(),
@@ -231,11 +236,28 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     recordCall({
         callSid: params.CallSid,
         otherParty: params.From,
+        serviceIdentity: params.To,
         direction: 'inbound',
         config,
         status: 'ringing',
         metadata: { to: params.To },
-    });
+    }).then((stored) => {
+        if (!stored) return;
+        return Promise.all([
+            enqueueEvent({
+                type: 'communication.created', communicationId: stored.communicationId,
+                purpose: stored.purpose, correlation: stored.correlation,
+                destination: stored.callbackUrl,
+                payload: { channel: 'voice', direction: 'inbound' },
+            }),
+            enqueueEvent({
+                type: 'call.started', communicationId: stored.communicationId,
+                purpose: stored.purpose, correlation: stored.correlation,
+                destination: stored.callbackUrl,
+                payload: { channel: 'voice', direction: 'inbound', status: 'ringing' },
+            }),
+        ]);
+    }).catch((error) => console.warn(`Could not publish inbound call event: ${error.message}`));
 
     reply.type('text/xml').send(buildTwiml(config, request.headers.host));
 });
@@ -376,7 +398,7 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
     console.log(`Inbound SMS ${messageSid || '(no sid)'} from ${from || 'unknown'} to ${to || 'unknown'}`);
 
     ensureContact(from);
-    await recordMessage({
+    const stored = await recordMessage({
         otherParty: from,
         twilioNumber: to,
         direction: 'inbound',
@@ -385,7 +407,63 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
         status: params.SmsStatus || params.MessageStatus,
     });
 
+    if (stored) {
+        await enqueueEvent({
+            type: 'communication.created', communicationId: stored.communicationId,
+            purpose: stored.purpose, correlation: stored.correlation,
+            destination: stored.callbackUrl,
+            payload: { channel: 'sms', direction: 'inbound' },
+        }).catch((error) => console.warn(`Could not enqueue communication event: ${error.message}`));
+        await enqueueEvent({
+            type: 'sms.received', communicationId: stored.communicationId,
+            purpose: stored.purpose, correlation: stored.correlation,
+            destination: stored.callbackUrl,
+            payload: { channel: 'sms', direction: 'inbound', content: body },
+        }).catch((error) => console.warn(`Could not enqueue inbound SMS event: ${error.message}`));
+
+        // This is a candidate response, never a resolution. Hyperflow decides
+        // whether it answers the Ask and explicitly calls /v1/asks/:id/resolve.
+        if (stored.purpose?.type === 'human_ask') {
+            await enqueueEvent({
+                type: 'ask.response.received', communicationId: stored.communicationId,
+                purpose: stored.purpose, correlation: stored.correlation,
+                destination: stored.callbackUrl,
+                payload: { ask_id: stored.purpose.ask_id, channel: 'sms', content: body },
+            }).catch((error) => console.warn(`Could not enqueue Ask response event: ${error.message}`));
+        }
+    }
+
     reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<Response/>');
+});
+
+// Delivery updates are separate communications events, not new
+// communications. The universal ID stays stable while provider state changes.
+fastify.all('/message-status', twilioWebhook, async (request, reply) => {
+    const params = { ...request.query, ...request.body };
+    const db = getSupabase();
+    if (db && params.MessageSid) {
+        const { data: message, error } = await db.from('sms_messages')
+            .update({ status: params.MessageStatus || params.SmsStatus || null })
+            .eq('twilio_message_sid', params.MessageSid)
+            .select('communication_id,purpose,correlation,communication_thread_id')
+            .maybeSingle();
+        if (error) {
+            console.warn(`Could not update SMS status ${params.MessageSid}: ${error.message}`);
+        } else if (message?.communication_id) {
+            const status = params.MessageStatus || params.SmsStatus || 'unknown';
+            const destination = await callbackForThread(message.communication_thread_id)
+                .catch((callbackError) => { console.warn(callbackError.message); return null; });
+            await enqueueEvent({
+                type: status === 'delivered' ? 'sms.delivered' : 'sms.sent',
+                communicationId: message.communication_id,
+                purpose: message.purpose,
+                correlation: message.correlation || {},
+                destination,
+                payload: { channel: 'sms', status },
+            }).catch((eventError) => console.warn(`Could not enqueue SMS status event: ${eventError.message}`));
+        }
+    }
+    reply.code(204).send();
 });
 
 // Twilio fetches this once the callee answers.
@@ -519,11 +597,29 @@ fastify.all('/call-status', twilioWebhook, async (request, reply) => {
 
     console.log(`Call ${params.CallSid || '(no CallSid)'} is ${params.CallStatus || 'unknown'}${Number.isFinite(duration) ? ` after ${duration}s` : ''}`);
 
-    await updateCallStatus({
+    const communication = await updateCallStatus({
         callSid: params.CallSid,
         status: params.CallStatus,
         durationSeconds: Number.isFinite(duration) ? duration : undefined,
     });
+
+    if (communication?.communication_id) {
+        const eventType = params.CallStatus === 'answered'
+            ? 'call.answered'
+            : ['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(params.CallStatus)
+                ? (params.CallStatus === 'completed' ? 'call.completed' : 'call.failed')
+                : 'call.started';
+        const destination = await callbackForThread(communication.communication_thread_id)
+            .catch((callbackError) => { console.warn(callbackError.message); return null; });
+        await enqueueEvent({
+            type: eventType,
+            communicationId: communication.communication_id,
+            purpose: communication.purpose,
+            correlation: communication.correlation || {},
+            destination,
+            payload: { channel: 'voice', status: params.CallStatus, duration_seconds: Number.isFinite(duration) ? duration : null },
+        }).catch((error) => console.warn(`Could not enqueue call event: ${error.message}`));
+    }
 
     reply.code(204).send();
 });
@@ -1257,4 +1353,7 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
 
     // Drains the recordings queue: fetch, transcribe, store, delete the audio.
     startRecordingSweeper();
+
+    // Delivers durable client webhooks independently of provider request paths.
+    startEventSweeper();
 });

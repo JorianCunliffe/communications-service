@@ -1,5 +1,5 @@
 /**
- * Comprehensive test suite for the Twilio + OpenAI Realtime Voice Assistant.
+ * Comprehensive integration suite for Communications Service voice support.
  *
  * Run against a live server: node --test --test-reporter=spec test/suite.test.js
  * The server must be running on PORT (default 3000) before tests execute.
@@ -44,7 +44,7 @@ describe('HTTP – server health', () => {
         const body = await res.json();
         assert.equal(
             body.message,
-            'Twilio Media Stream Server is running!',
+            'Communications Service is running!',
             'Unexpected status message'
         );
     });

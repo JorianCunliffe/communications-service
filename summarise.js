@@ -17,6 +17,7 @@
 
 import { toText } from './transcripts.js';
 import { getSupabase } from './configResolver.js';
+import { callbackForThread, enqueueEvent } from './eventOutbox.js';
 
 // A small model is the right tool: this is compression, not reasoning, and it
 // runs after every call. Confirmed present on the account rather than assumed.
@@ -191,7 +192,7 @@ export async function summariseCall(callSid) {
     try {
         const { data: call } = await db
             .from('calls')
-            .select('id, contact_id, transcript, summary, started_at')
+            .select('id, contact_id, transcript, summary, started_at, communication_id, purpose, correlation, communication_thread_id')
             .eq('twilio_call_sid', callSid)
             .maybeSingle();
 
@@ -210,6 +211,17 @@ export async function summariseCall(callSid) {
                 channel: 'call',
                 line: result.historyLine,
                 when: call.started_at ? new Date(call.started_at) : new Date(),
+            });
+        }
+        if (call.communication_id && result.summary) {
+            const destination = await callbackForThread(call.communication_thread_id);
+            await enqueueEvent({
+                type: 'summary.completed',
+                communicationId: call.communication_id,
+                purpose: call.purpose,
+                correlation: call.correlation || {},
+                destination,
+                payload: { channel: 'voice', summary: result.summary },
             });
         }
     } catch (error) {
