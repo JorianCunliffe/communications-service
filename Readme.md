@@ -586,7 +586,7 @@ every farewell. A 15-second drain timeout covers a mark that never returns.
 Closing the WebSocket is what hangs up. The TwiML is `<Connect><Stream>` with
 nothing after it, so when the stream ends Twilio has no verb left and completes
 the call — no REST call and no credentials. That matters on an account
-[shared with four other production systems](#a-shared-twilio-account): there is
+[shared with four other production systems](#twilio-configuration): there is
 nothing in this path that could reach a call belonging to one of them.
 
 **`maxCallSeconds`** (default 300) is the ceiling. Nothing else stops a call: a
