@@ -59,6 +59,22 @@ Content-Type: application/json
 
 The database function resolves the Ask binding, thread, and final communication in one transaction. Direct forms bypass Communications and enter Hyperflow at `respondToAsk()` directly.
 
+### HyperFlow integration contract
+
+HyperFlow is a consumer of this API, not a shared-database component. A compatible HyperFlow client must:
+
+- authenticate outbound Communications requests with `X-API-Key`;
+- send SMS as `POST /v1/messages` with `to`, `from`, and `body`;
+- send calls as `POST /v1/calls` with `to`, `from`, and allow-listed `overrides`;
+- read the canonical `communication_id` response field (an `id` field is not returned);
+- deliver SMS/voice Asks through those channel endpoints with `purpose.type: "human_ask"`, `purpose.ask_id`, and an HTTPS `callback_url`;
+- keep email/web-form Ask delivery in HyperFlow until an email provider adapter exists here;
+- verify `X-Communications-Signature` over the raw webhook body, deduplicate `event_id`, and accept at-least-once delivery;
+- treat `sms.delivered` and `call.completed` as success, `call.failed` as failure, and inspect `sms.sent.payload.status` for Twilio SMS failure statuses; and
+- call `POST /v1/asks/:askId/resolve` only after HyperFlow has accepted a specific reply as the final answer.
+
+There is deliberately no `POST /v1/asks` delivery endpoint. Ask is semantic purpose attached to a real channel communication, not a separate transport. See the [API reference integration section](docs/API_REFERENCE.md#hyperflow-consumer-contract) for payload and event details.
+
 ### Thread correlation order
 
 For each communication, the service uses this order:

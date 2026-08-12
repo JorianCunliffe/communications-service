@@ -662,6 +662,54 @@ The signature header appears only when `COMMUNICATIONS_WEBHOOK_SECRET` is set.
 
 Delivery is at least once. Deduplicate on `event_id`.
 
+### HyperFlow consumer contract
+
+The following requirements are normative for a HyperFlow deployment consuming this API.
+
+#### Outbound requests
+
+- Use `X-API-Key: <API_KEY>`. `Authorization: Bearer` is not accepted by protected Communications routes.
+- For SMS, call `POST /v1/messages` with `to`, `from`, and `body`. The fields `content` and a missing `from` number are invalid.
+- For voice, call `POST /v1/calls` with `to`, `from`, and any approved voice configuration under `overrides`. A top-level `instruction` field is not the call configuration contract.
+- Read `communication_id` from the canonical response. Consumers may temporarily accept a legacy `id` alias from other adapters, but this service does not emit it.
+- Provide an HTTPS `callback_url` per request when callbacks must return to a specific HyperFlow environment. Otherwise the deployment-wide `HYPERFLOW_EVENT_URL` is used.
+
+#### Ask delivery and resolution
+
+There is no `POST /v1/asks` delivery route. Send an SMS or voice Ask through its real channel endpoint and include:
+
+```json
+{
+  "purpose": {
+    "type": "human_ask",
+    "ask_id": "ask_123",
+    "token": "optional-capability-token"
+  },
+  "correlation": {
+    "tenant_id": "tenant_1",
+    "project_id": "project_1",
+    "run_id": "run_1",
+    "task_id": "REVIEW_1",
+    "person_id": "person_1"
+  },
+  "callback_url": "https://hyperflow.example.com/api/events"
+}
+```
+
+HyperFlow must resolve `person_id` to an unambiguous channel destination before sending. Communications will not guess between multiple identities. Email and direct web-form delivery remain HyperFlow responsibilities until an outbound email adapter is configured in this service.
+
+An `ask.response.received` event is evidence, not resolution. For SMS, response text is in `payload.content`; for voice, evidence is in `payload.transcript`. HyperFlow should validate/interpret that evidence, persist its own Ask decision, then call `POST /v1/asks/:askId/resolve` with the accepted `communication_id`. That final call should be retried durably so the two systems cannot silently diverge.
+
+#### Event intake
+
+- Verify `X-Communications-Signature` against the exact raw request bytes whenever `COMMUNICATIONS_WEBHOOK_SECRET` is configured. Do not disable webhook authentication to accommodate this contract.
+- The envelope does not include a `source` field. A dedicated, signature-verified HyperFlow endpoint may normalize the source to `communications` after verification.
+- Deduplicate by `event_id`; delivery is at least once.
+- Use an explicit terminal mapping: `sms.delivered` and `call.completed` are success, and `call.failed` is failure. For `sms.sent`, inspect `payload.status`: Twilio terminal failure values such as `failed` or `undelivered` are failures; accepted/queued/sent states remain nonterminal. `call.started`, `call.answered`, and transcript/summary events are nonterminal.
+- Preserve all correlation values. Workflow actions should supply `tenant_id`, `project_id`, `run_id`, and `task_id` so a terminal event can identify exactly one pending run.
+
+Contract tests should use these real request, response, and event shapes. A mock returning `{ "id": "comm_..." }`, accepting bearer authentication, or exposing `/v1/asks` does not test compatibility with this service.
+
 ### Event types
 
 | Type | Emitted when |
