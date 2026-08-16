@@ -190,44 +190,31 @@ async function fetchContact(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) 
     }
 }
 
-// Notes when we are contacting someone marked do_not_contact. Deliberately
-// advisory: it records the fact and does not block the call. Fire-and-forget,
-// so it costs the outbound path nothing.
-export function warnIfSuppressed(phoneNumber, context = 'outbound') {
+// Outbound delivery is blocked for suppressed contacts. A narrowly-scoped
+// override must carry an operator reason so it is visible in application logs.
+export async function assertContactable(phoneNumber, context = 'outbound', override = null) {
     const client = getClient();
-    if (!client || !phoneNumber) return;
-
-    fetchContact(client, phoneNumber)
-        .then((contact) => {
-            if (contact?.do_not_contact) {
-                console.warn(`do_not_contact is set for ${contact.name || phoneNumber} — proceeding with ${context} anyway`);
-            }
-        })
-        .catch(() => {}); // fetchContact already logs its own failures
+    if (!client || !phoneNumber) return null;
+    const result = await client.from('contacts').select('id,name,do_not_contact').eq('phone_number', phoneNumber).maybeSingle();
+    if (result.error) throw new Error(`Could not verify do_not_contact for ${phoneNumber}: ${result.error.message}`);
+    const contact = result.data;
+    if (!contact?.do_not_contact) return contact;
+    if (override?.allowed === true && typeof override.reason === 'string' && override.reason.trim()) {
+        console.warn(`do_not_contact override for ${contact.name || phoneNumber} during ${context}: ${override.reason.trim()}`);
+        return contact;
+    }
+    const error = new Error(`${contact.name || phoneNumber} is marked do_not_contact`);
+    error.code = 'DO_NOT_CONTACT';
+    throw error;
 }
 
-// Creates a contact for a number we have never seen, so history can attach to
-// it from the first interaction. Fire-and-forget: never awaited on the call
-// path, and a failure is logged and ignored.
-export function ensureContact(phoneNumber) {
+export async function ensureContact(phoneNumber) {
     const client = getClient();
-    if (!client || !phoneNumber) return;
-
-    client
-        .from('contacts')
-        .upsert({ phone_number: phoneNumber }, { onConflict: 'phone_number', ignoreDuplicates: true })
-        .select('id')
-        .then(({ data, error }) => {
-            if (error) return console.warn(`Could not create contact for ${phoneNumber}: ${error.message}`);
-
-            // ignoreDuplicates makes this ON CONFLICT DO NOTHING, which returns
-            // no rows when the contact already existed. Announcing a creation
-            // either way made every repeat caller look like a new one.
-            if (!data?.length) return;
-
-            contactCache.delete(phoneNumber); // so the next call sees the new row
-            console.log(`Created contact for ${phoneNumber}`);
-        });
+    if (!client || !phoneNumber) return null;
+    const result = await client.rpc('ensure_communication_contact', { p_phone_number: phoneNumber });
+    if (result.error) throw new Error(`Could not ensure contact for ${phoneNumber}: ${result.error.message}`);
+    contactCache.delete(phoneNumber);
+    return result.data;
 }
 
 // Prime the connection at boot. The first query of a process pays for DNS, the
@@ -304,9 +291,9 @@ export async function resolveConfig({ from, to, direction, createContact = true 
             }
         }
 
-        // First contact with this number: create the record so history has
-        // something to attach to. Not awaited — the call must not wait on it.
-        if (!contact && otherParty && createContact) ensureContact(otherParty);
+        // First contact with this number: atomically create the contact and
+        // phone identity before provider persistence can reference them.
+        if (!contact && otherParty && createContact) await ensureContact(otherParty);
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
         return personaliseConfig(DEFAULT_CONFIG, contact);

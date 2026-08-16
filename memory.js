@@ -1,12 +1,19 @@
 const DEFAULT_LIMIT = 20;
 
+function weight(name, fallback) {
+    if (process.env[name] === undefined || process.env[name] === '') return fallback;
+    const parsed = Number(process.env[name]);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) throw new Error(`${name} must be a number between 0 and 1`);
+    return parsed;
+}
+
 export const SEARCH_WEIGHTS = Object.freeze({
-    text: Number(process.env.MEMORY_SEARCH_TEXT_WEIGHT) || 0.65,
-    project: Number(process.env.MEMORY_SEARCH_PROJECT_BOOST) || 0.10,
-    person: Number(process.env.MEMORY_SEARCH_PERSON_BOOST) || 0.10,
-    thread: Number(process.env.MEMORY_SEARCH_THREAD_BOOST) || 0.05,
-    calendar: Number(process.env.MEMORY_SEARCH_CALENDAR_BOOST) || 0.05,
-    recency: Number(process.env.MEMORY_SEARCH_RECENCY_BOOST) || 0.05,
+    text: weight('MEMORY_SEARCH_TEXT_WEIGHT', 0.65),
+    project: weight('MEMORY_SEARCH_PROJECT_BOOST', 0.10),
+    person: weight('MEMORY_SEARCH_PERSON_BOOST', 0.10),
+    thread: weight('MEMORY_SEARCH_THREAD_BOOST', 0.05),
+    calendar: weight('MEMORY_SEARCH_CALENDAR_BOOST', 0.05),
+    recency: weight('MEMORY_SEARCH_RECENCY_BOOST', 0.05),
 });
 
 function check(result, label) {

@@ -58,8 +58,8 @@ export function rejectUnauthorized(request, reply, feature) {
 // against real Twilio traffic before it is allowed to reject anything.
 //
 //   off      no checking at all
-//   warn     check and log, but let everything through   (default)
-//   enforce  reject a request that does not verify
+//   warn     check and log, but let everything through
+//   enforce  reject a request that does not verify       (secure default)
 const SIGNATURE_MODES = ['off', 'warn', 'enforce'];
 
 export function signatureMode() {
@@ -71,11 +71,11 @@ export function signatureMode() {
     if (['true', '1', 'yes'].includes(configured)) return 'enforce';
     if (['false', '0', 'no'].includes(configured)) return 'off';
 
-    if (configured) console.warn(`Unknown TWILIO_VALIDATE_SIGNATURES value "${configured}" — using "warn"`);
+    if (configured) console.warn(`Unknown TWILIO_VALIDATE_SIGNATURES value "${configured}" — using "enforce"`);
 
     // Nothing to check against without the token, so an unconfigured install
     // stays quiet rather than logging a failure on every webhook.
-    return process.env.TWILIO_AUTH_TOKEN ? 'warn' : 'off';
+    return process.env.TWILIO_AUTH_TOKEN ? 'enforce' : 'off';
 }
 
 // The URL Twilio signed. It signs the address it was configured with, which is

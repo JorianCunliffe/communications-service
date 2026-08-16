@@ -1,6 +1,6 @@
+import 'dotenv/config';
 import Fastify from 'fastify';
 import WebSocket from 'ws';
-import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
 import twilio from 'twilio';
@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
-import { resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, warnIfSuppressed, ensureContact, getSupabase } from './configResolver.js';
+import { assertContactable, resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact, getSupabase } from './configResolver.js';
 import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
 import { recordMessage } from './smsLog.js';
@@ -21,9 +21,8 @@ import { summariseCall } from './summarise.js';
 import v1Routes from './v1.js';
 import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbox.js';
 import { startEnrichmentSweeper } from './enrichment.js';
-
-// Load environment variables from .env file
-dotenv.config();
+import { prefixedId } from './communicationModel.js';
+import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 
 // Retrieve the OpenAI API key from environment variables.
 const { OPENAI_API_KEY } = process.env;
@@ -73,6 +72,8 @@ const BUILD = (() => {
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
+        'calendar.js', 'calendarProviders.js', 'memory.js', 'enrichment.js',
+        'plaud.js', 'safeFetch.js', 'outboundOperations.js',
         'console.html', 'home.html', 'package.json',
     ];
 
@@ -155,7 +156,7 @@ fastify.get('/health', async (request, reply) => {
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
         communicationsApi: Boolean(process.env.API_KEY && process.env.SUPABASE_CONFIG_ENABLED === 'true'),
         memoryEnrichment: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.OPENAI_API_KEY),
-        durableEvents: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.HYPERFLOW_EVENT_URL),
+        durableEvents: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.HYPERFLOW_EVENT_URL && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
         twilioSignatures: signatureMode(),
@@ -269,7 +270,7 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
 // Fields a caller of /outbound-call may override per request.
 const OVERRIDABLE_FIELDS = [
     'model', 'effort', 'voice', 'temperature', 'systemMessage',
-    'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst',
+    'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst', 'liveTranscript',
 ];
 
 // E164 and isAuthorized now live in auth.js, so the management API enforces
@@ -290,7 +291,7 @@ fastify.post('/outbound-call', async (request, reply) => {
         return reply.code(503).send({ error: 'Outbound calling is not configured' });
     }
 
-    const { to, from, overrides } = request.body || {};
+    const { to, from, overrides, override_do_not_contact: overrideDnc, override_reason: overrideReason } = request.body || {};
     if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 number, e.g. +447700900123' });
     if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 number you own on Twilio' });
 
@@ -305,16 +306,22 @@ fastify.post('/outbound-call', async (request, reply) => {
     // settings and name come from the number we are calling.
     const resolved = await resolveConfig({ from, to, direction: 'outbound' });
     const config = { ...resolved, ...(overrides || {}) };
-
-    // The callee gets a contact record so history attaches, and a note in the
-    // log if they are marked do_not_contact. Neither blocks the call.
-    ensureContact(to);
-    warnIfSuppressed(to, 'outbound call');
+    const operationDb = getSupabase();
+    if (!operationDb) return reply.code(503).send({ error: 'Outbound persistence is not configured' });
+    let communicationId = prefixedId('comm');
 
     try {
+        await assertContactable(to, 'outbound call', { allowed: overrideDnc === true, reason: overrideReason });
+        await ensureContact(to);
+        const operation = await reserveOutbound(operationDb, {
+            key: idempotencyKey(request), type: 'voice', communicationId,
+            request: { to, from, overrides: overrides || {}, override_do_not_contact: overrideDnc, override_reason: overrideReason },
+        });
+        communicationId = operation.communication_id;
+        if (operation.status === 'completed') return reply.code(200).send(operation.response);
         const base = PUBLIC_URL.replace(/\/$/, '');
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-        const call = await client.calls.create({
+        const call = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await client.calls.create({
             to,
             from,
             url: `${base}/outbound-answer`,
@@ -324,16 +331,25 @@ fastify.post('/outbound-call', async (request, reply) => {
             statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
             statusCallbackMethod: 'POST',
         });
+        if (operation.status !== 'provider_sent') {
+            await markOutbound(operationDb, operation.id, { status: 'provider_sent', provider_id: call.sid, provider_status: call.status });
+        }
 
         // The media stream finds this via the same CallSid on its 'start' event.
         storeCallConfig(call.sid, config);
         console.log(`Outbound call ${call.sid} to ${to} from ${from}`);
 
-        // Not awaited: a slow database write must not delay the response.
-        recordCall({ callSid: call.sid, otherParty: to, direction: 'outbound', config, metadata: { from } });
+        // Strict persistence completes before the idempotent operation does.
+        await recordCall({ callSid: call.sid, otherParty: to, direction: 'outbound', config, metadata: { from }, communicationId, strict: true });
 
-        return reply.code(201).send({ callSid: call.sid, to, from, status: call.status });
+        const response = { callSid: call.sid, communication_id: communicationId, to, from, status: call.status };
+        await markOutbound(operationDb, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
+        return reply.code(201).send(response);
     } catch (error) {
+        if (error.code === 'DO_NOT_CONTACT') return reply.code(409).send({ error: error.message });
+        if (error.code === 'IDEMPOTENCY_REQUIRED') return reply.code(400).send({ error: error.message });
+        if (error.code === 'IDEMPOTENCY_CONFLICT') return reply.code(409).send({ error: error.message });
+        if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return reply.code(409).send({ error: error.message });
         console.error('Failed to place outbound call:', error.message);
         return reply.code(502).send({ error: 'Failed to place call', detail: error.message });
     }
@@ -354,33 +370,50 @@ fastify.post('/sms', async (request, reply) => {
         return reply.code(503).send({ error: 'Messaging is not configured' });
     }
 
-    const { to, from, body } = request.body || {};
+    const { to, from, body, override_do_not_contact: overrideDnc, override_reason: overrideReason } = request.body || {};
     if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 number, e.g. +447700900123' });
     if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 number you own on Twilio' });
     if (typeof body !== 'string' || body.trim() === '') return reply.code(400).send({ error: '"body" must be a non-empty message' });
     if (body.length > 1600) return reply.code(400).send({ error: '"body" must be 1600 characters or fewer' });
-
-    ensureContact(to);
-    warnIfSuppressed(to, 'SMS');
+    const operationDb = getSupabase();
+    if (!operationDb) return reply.code(503).send({ error: 'Outbound persistence is not configured' });
+    let communicationId = prefixedId('comm');
 
     try {
+        await assertContactable(to, 'SMS', { allowed: overrideDnc === true, reason: overrideReason });
+        await ensureContact(to);
+        const operation = await reserveOutbound(operationDb, { key: idempotencyKey(request), type: 'sms', communicationId,
+            request: { to, from, body, override_do_not_contact: overrideDnc, override_reason: overrideReason } });
+        communicationId = operation.communication_id;
+        if (operation.status === 'completed') return reply.code(200).send(operation.response);
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-        const message = await client.messages.create({ to, from, body });
+        const message = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await client.messages.create({ to, from, body });
+        if (operation.status !== 'provider_sent') {
+            await markOutbound(operationDb, operation.id, { status: 'provider_sent', provider_id: message.sid, provider_status: message.status });
+        }
 
         console.log(`SMS ${message.sid} to ${to} from ${from}`);
 
-        // Not awaited: a slow database write must not delay the response.
-        recordMessage({
+        // Strict persistence completes before the idempotent operation does.
+        await recordMessage({
             otherParty: to,
             twilioNumber: from,
             direction: 'outbound',
             body,
             messageSid: message.sid,
             status: message.status,
+            communicationId,
+            strict: true,
         });
 
-        return reply.code(201).send({ messageSid: message.sid, to, from, status: message.status });
+        const response = { messageSid: message.sid, communication_id: communicationId, to, from, status: message.status };
+        await markOutbound(operationDb, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
+        return reply.code(201).send(response);
     } catch (error) {
+        if (error.code === 'DO_NOT_CONTACT') return reply.code(409).send({ error: error.message });
+        if (error.code === 'IDEMPOTENCY_REQUIRED') return reply.code(400).send({ error: error.message });
+        if (error.code === 'IDEMPOTENCY_CONFLICT') return reply.code(409).send({ error: error.message });
+        if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return reply.code(409).send({ error: error.message });
         console.error('Failed to send SMS:', error.message);
         return reply.code(502).send({ error: 'Failed to send message', detail: error.message });
     }
@@ -399,7 +432,7 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
 
     console.log(`Inbound SMS ${messageSid || '(no sid)'} from ${from || 'unknown'} to ${to || 'unknown'}`);
 
-    ensureContact(from);
+    await ensureContact(from).catch((error) => console.warn(error.message));
     const stored = await recordMessage({
         otherParty: from,
         twilioNumber: to,
@@ -453,10 +486,12 @@ fastify.all('/message-status', twilioWebhook, async (request, reply) => {
             console.warn(`Could not update SMS status ${params.MessageSid}: ${error.message}`);
         } else if (message?.communication_id) {
             const status = params.MessageStatus || params.SmsStatus || 'unknown';
+            const eventType = status === 'delivered' ? 'sms.delivered'
+                : ['failed', 'undelivered'].includes(status) ? 'sms.failed' : 'sms.sent';
             const destination = await callbackForThread(message.communication_thread_id)
                 .catch((callbackError) => { console.warn(callbackError.message); return null; });
             await enqueueEvent({
-                type: status === 'delivered' ? 'sms.delivered' : 'sms.sent',
+                type: eventType,
                 communicationId: message.communication_id,
                 purpose: message.purpose,
                 correlation: message.correlation || {},

@@ -21,7 +21,7 @@ import { callbackForThread, enqueueEvent } from './eventOutbox.js';
 
 // A small model is the right tool: this is compression, not reasoning, and it
 // runs after every call. Confirmed present on the account rather than assumed.
-const MODEL = process.env.SUMMARY_MODEL || 'gpt-5.4-mini';
+const summaryModel = () => process.env.SUMMARY_MODEL || 'gpt-5.4-mini';
 const TIMEOUT_MS = 60 * 1000;
 
 // How much history is kept. Both caps matter: the line count keeps the prompt
@@ -93,7 +93,7 @@ export async function summariseTranscript(transcript) {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                model: MODEL,
+                model: summaryModel(),
                 response_format: { type: 'json_object' },
                 messages: [
                     { role: 'system', content: SYSTEM_PROMPT },

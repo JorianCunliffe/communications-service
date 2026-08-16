@@ -146,6 +146,18 @@ describe('Ask-aware cross-channel threading', () => {
         assert.equal(inbound.threadId, null);
         assert.equal(inbound.purpose, null);
     });
+
+    test('terminal threads and Ask bindings cannot be reopened', async () => {
+        const db = new FakeDb();
+        db.tables.communication_threads.push({ thread_id: 'thread_done', status: 'resolved', purpose: { type: 'human_ask', ask_id: 'ask_done' }, correlation: {} });
+        db.tables.ask_bindings.push({ ask_id: 'ask_cancelled', thread_id: 'thread_other', status: 'cancelled' });
+        await assert.rejects(() => resolveCommunicationThread({
+            db, participantIdentity: '+61400000000', direction: 'inbound', threadId: 'thread_done', correlation: {},
+        }), /cannot accept/);
+        await assert.rejects(() => resolveCommunicationThread({
+            db, participantIdentity: '+61400000000', direction: 'outbound', purpose: { type: 'human_ask', ask_id: 'ask_cancelled' }, correlation: {},
+        }), /cancelled/);
+    });
 });
 
 describe('database contract', () => {

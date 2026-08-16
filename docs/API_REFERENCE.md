@@ -40,8 +40,8 @@ Twilio endpoints use `X-Twilio-Signature`, controlled by `TWILIO_VALIDATE_SIGNAT
 | Mode | Behavior |
 |---|---|
 | `off` | No verification |
-| `warn` | Verify and log failures without rejecting; default when `TWILIO_AUTH_TOKEN` exists |
-| `enforce` | Reject invalid or missing signatures with `403` |
+| `warn` | Verify and log failures without rejecting; explicit migration-only mode |
+| `enforce` | Reject invalid or missing signatures with `403`; default when `TWILIO_AUTH_TOKEN` exists |
 
 Validation uses `PUBLIC_URL` plus the raw request path. The configured public URL must match the URL Twilio signs.
 
@@ -113,7 +113,7 @@ Only these optional string fields are retained:
 ```json
 {
   "tenant_id": "tenant_1",
-  "project_id": "project_42",
+  "external_project_id": "workflow_project_42",
   "run_id": "run_8",
   "task_id": "task_12",
   "hold_id": "hold_5",
@@ -123,7 +123,7 @@ Only these optional string fields are retained:
 }
 ```
 
-Unknown correlation keys are ignored. Present values must be strings. `ask_id` belongs in `purpose`, not correlation.
+Unknown correlation keys are ignored. Present values must be strings. `ask_id` belongs in `purpose`, not correlation. Top-level `project_id` is the internal project UUID. The deprecated `correlation.project_id` alias is normalized to `external_project_id` and is never written to the UUID foreign key.
 
 ### Semantic request fields
 
@@ -136,6 +136,9 @@ The following optional fields are accepted by `POST /v1/communications`, `POST /
 | `metadata` | object | Used as a backward-compatible correlation source only when `correlation` is absent; generic communication writes also store it as provider metadata |
 | `thread_id` | string | Explicit semantic thread ID |
 | `callback_url` | HTTPS URL | Per-thread durable event destination |
+| `project_id` | UUID | Internal Communications project foreign key |
+
+Outbound SMS/calls additionally accept `override_do_not_contact: true` only with a non-empty `override_reason`. The override is logged and retained in the outbound operation audit context; without both fields a suppressed contact returns `409` before Twilio is called.
 
 ## Canonical `/v1` API
 
@@ -230,6 +233,7 @@ Creates or resets the durable `memory` enrichment job. It does not run model ext
 
 ```http
 POST /v1/messages
+Idempotency-Key: stable-workflow-operation-id
 ```
 
 Required body:
@@ -250,14 +254,17 @@ Requirements:
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `PUBLIC_URL` is optional for sending, but required to attach `/message-status`
+- a stable `Idempotency-Key` header
 
 Response: `201` plus a canonical SMS Communication.
+
+The idempotency key is bound to the normalized outbound request. An identical completed retry returns `200` with the original response and does not send another SMS. Reuse for a different request or an operation whose provider outcome is uncertain returns `409`.
 
 Events:
 
 - `communication.created`
 - `sms.sent`
-- later `sms.delivered` when Twilio reports that status
+- later `sms.delivered` or `sms.failed` when Twilio reports a terminal status
 
 Provider failures and strict persistence failures are returned as `502` with `Failed to send message: …`.
 
@@ -273,6 +280,7 @@ Returns the Communication only when its channel is `sms`; otherwise returns `404
 
 ```http
 POST /v1/calls
+Idempotency-Key: stable-workflow-operation-id
 ```
 
 Required body:
@@ -284,7 +292,7 @@ Required body:
 }
 ```
 
-Optional `overrides` is shallow-merged over resolved call configuration. The `/v1` implementation does not currently allow-list override keys; trusted callers must use only supported call configuration properties.
+Optional `overrides` is shallow-merged over resolved call configuration. Allowed keys are `model`, `effort`, `voice`, `temperature`, `systemMessage`, `introMessage`, `introMessage2`, `introVoice`, `greetingText`, `aiSpeaksFirst`, and `liveTranscript`; unknown keys return `400`.
 
 Requirements:
 
@@ -292,8 +300,11 @@ Requirements:
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `PUBLIC_URL`
+- a stable `Idempotency-Key` header
 
 Response: `201` plus a canonical voice Communication.
+
+An identical completed retry returns `200` with the original response and does not place another call. Key conflicts or operations whose provider outcome is uncertain return `409`.
 
 Events:
 
@@ -572,10 +583,12 @@ Errors:
 
 - `400` missing communication ID or communication is not in the Ask thread
 - `404` Ask has no binding
-- `409` Ask is already resolved
+- `409` Ask is cancelled or was resolved by a different communication
 - `500` transactional database failure
 
 Event: `ask.resolved`.
+
+Repeating the same resolution with the same `communication_id` is idempotent and returns success with `"duplicate": true`; it does not emit another resolution event.
 
 ### Inspect event outbox
 
@@ -584,6 +597,12 @@ GET /v1/events
 ```
 
 Returns the 100 newest raw `outbound_events` rows. This includes destination, payload, attempts, status, retry time, error, and delivery timestamps.
+
+```http
+POST /v1/events/:eventId/requeue
+```
+
+Resets a failed event to `pending`, clears its lease, error, and attempt count, and returns the requeued row. Requeueing does not change the event ID; consumers must continue to deduplicate by `event_id`.
 
 ## Thread and Ask behavior
 
@@ -647,18 +666,21 @@ X-Communications-Event-Id: evt_…
 X-Communications-Signature: sha256=<hex HMAC of raw JSON body>
 ```
 
-The signature header appears only when `COMMUNICATIONS_WEBHOOK_SECRET` is set.
+`COMMUNICATIONS_WEBHOOK_SECRET` is required whenever a durable destination is configured, so every delivered event carries the signature header.
 
 ### Delivery policy
 
 - public HTTPS destinations only;
 - DNS results are checked for private/reserved addresses;
+- every redirect target is revalidated and optional `COMMUNICATIONS_WEBHOOK_HOSTS` is enforced;
 - 15-second delivery timeout;
 - batches of 20;
 - sweeper interval 15 seconds;
 - maximum 12 attempts;
 - exponential delay starting at 5 seconds, capped at 1 hour;
 - states: `pending`, `retrying`, `delivered`, `failed`.
+- database leases prevent concurrent claims across service instances;
+- permanent HTTP 4xx responses fail immediately; `408`, `425`, `429`, and 5xx responses retry.
 
 Delivery is at least once. Deduplicate on `event_id`.
 
@@ -669,6 +691,7 @@ The following requirements are normative for a HyperFlow deployment consuming th
 #### Outbound requests
 
 - Use `X-API-Key: <API_KEY>`. `Authorization: Bearer` is not accepted by protected Communications routes.
+- Supply a stable `Idempotency-Key` for each workflow action that can create a billable SMS or call.
 - For SMS, call `POST /v1/messages` with `to`, `from`, and `body`. The fields `content` and a missing `from` number are invalid.
 - For voice, call `POST /v1/calls` with `to`, `from`, and any approved voice configuration under `overrides`. A top-level `instruction` field is not the call configuration contract.
 - Read `communication_id` from the canonical response. Consumers may temporarily accept a legacy `id` alias from other adapters, but this service does not emit it.
@@ -687,7 +710,7 @@ There is no `POST /v1/asks` delivery route. Send an SMS or voice Ask through its
   },
   "correlation": {
     "tenant_id": "tenant_1",
-    "project_id": "project_1",
+    "external_project_id": "workflow_project_1",
     "run_id": "run_1",
     "task_id": "REVIEW_1",
     "person_id": "person_1"
@@ -702,11 +725,12 @@ An `ask.response.received` event is evidence, not resolution. For SMS, response 
 
 #### Event intake
 
-- Verify `X-Communications-Signature` against the exact raw request bytes whenever `COMMUNICATIONS_WEBHOOK_SECRET` is configured. Do not disable webhook authentication to accommodate this contract.
+- Verify `X-Communications-Signature` against the exact raw request bytes. `COMMUNICATIONS_WEBHOOK_SECRET` is required whenever durable event delivery is configured.
 - The envelope does not include a `source` field. A dedicated, signature-verified HyperFlow endpoint may normalize the source to `communications` after verification.
 - Deduplicate by `event_id`; delivery is at least once.
-- Use an explicit terminal mapping: `sms.delivered` and `call.completed` are success, and `call.failed` is failure. For `sms.sent`, inspect `payload.status`: Twilio terminal failure values such as `failed` or `undelivered` are failures; accepted/queued/sent states remain nonterminal. `call.started`, `call.answered`, and transcript/summary events are nonterminal.
-- Preserve all correlation values. Workflow actions should supply `tenant_id`, `project_id`, `run_id`, and `task_id` so a terminal event can identify exactly one pending run.
+- Use an explicit terminal mapping: `sms.delivered` and `call.completed` are success; `sms.failed` and `call.failed` are failure. `sms.sent`, `call.started`, `call.answered`, and transcript/summary events are nonterminal.
+- Preserve all correlation values. Workflow actions should supply `tenant_id`, `external_project_id`, `run_id`, and `task_id` so a terminal event can identify exactly one pending run.
+- During the transition, event envelopes also include `correlation.project_id` as an alias of `external_project_id`; new consumers should prefer the explicit field.
 
 Contract tests should use these real request, response, and event shapes. A mock returning `{ "id": "comm_..." }`, accepting bearer authentication, or exposing `/v1/asks` does not test compatibility with this service.
 
@@ -716,8 +740,9 @@ Contract tests should use these real request, response, and event shapes. A mock
 |---|---|
 | `communication.created` | Canonical communication is persisted |
 | `communication.received` | Generic inbound canonical communication is recorded |
-| `sms.sent` | Twilio accepts SMS or reports a non-delivered status |
+| `sms.sent` | Twilio accepts SMS or reports a nonterminal status |
 | `sms.delivered` | Twilio reports delivered |
+| `sms.failed` | Twilio reports failed or undelivered |
 | `sms.received` | Inbound SMS is persisted |
 | `call.started` | Call record starts or Twilio reports a nonterminal state |
 | `call.answered` | Twilio reports answered |
@@ -737,6 +762,7 @@ These are preserved for compatibility. New integrations should use `/v1/messages
 ```http
 POST /outbound-call
 X-API-Key: …
+Idempotency-Key: stable-operation-id
 ```
 
 ```json
@@ -750,10 +776,10 @@ X-API-Key: …
 }
 ```
 
-The legacy route allow-lists override keys. Response:
+The legacy route requires Supabase persistence and allow-lists override keys. Response:
 
 ```json
-{ "callSid": "CA…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
+{ "callSid": "CA…", "communication_id": "comm_…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
 ```
 
 ### Send SMS
@@ -761,6 +787,7 @@ The legacy route allow-lists override keys. Response:
 ```http
 POST /sms
 X-API-Key: …
+Idempotency-Key: stable-operation-id
 ```
 
 ```json
@@ -771,10 +798,10 @@ X-API-Key: …
 }
 ```
 
-Response:
+This route also requires Supabase persistence. Response:
 
 ```json
-{ "messageSid": "SM…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
+{ "messageSid": "SM…", "communication_id": "comm_…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
 ```
 
 ## Twilio webhook routes
@@ -849,7 +876,7 @@ Example:
 }
 ```
 
-`outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `communicationsApi` reflects API key plus requested Supabase configuration, not a live database query. `memoryEnrichment` reflects requested Supabase configuration plus the OpenAI key; it does not prove migrations are applied. `durableEvents` also requires `HYPERFLOW_EVENT_URL`; a deployment using only per-thread callbacks may report `false` while callback delivery still works.
+`outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `communicationsApi` reflects API key plus requested Supabase configuration, not a live database query. `memoryEnrichment` reflects requested Supabase configuration plus the OpenAI key; it does not prove migrations are applied. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; a deployment using only per-thread callbacks may report `false` while signed callback delivery still works.
 
 ## Management and recording API (`/api`)
 
@@ -921,7 +948,7 @@ Recording ingest example:
   "externalId": "plaud_123",
   "contactPhone": "+61400000000",
   "mediaUrl": "https://public-media.example.com/recording.mp3",
-  "mediaAuth": "bearer_env:PLAUD_TOKEN",
+  "useProviderAuth": true,
   "durationSeconds": 120,
   "recordedAt": "2026-08-11T06:00:00.000Z",
   "participants": [
@@ -941,8 +968,8 @@ Rules:
 - `source` is required and `twilio` is rejected here;
 - provide `mediaUrl` or a validated transcript;
 - `mediaBase64` currently returns `501`;
-- remote URLs must be public HTTPS and pass DNS/SSRF checks;
-- `mediaAuth` stores only a `bearer_env:VARIABLE_NAME` reference, never the token;
+- remote URLs and every redirect must be public HTTPS and pass DNS/SSRF checks;
+- `useProviderAuth: true` selects fixed server-side `RECORDING_SOURCE_<SOURCE>_TOKEN`; callers cannot name environment variables;
 - duplicate `(source, externalId)` returns `200 { "duplicate": true, … }`;
 - new queue item returns `201` with `pending`, or `done` for a supplied transcript.
 - exact participant identities resolve to contacts; unknown identities remain on the recording;
@@ -961,7 +988,7 @@ Rules:
 | `401` | Missing/wrong API key |
 | `403` | Twilio signature rejected in enforce mode |
 | `404` | Requested communication/contact/thread/recording/Ask binding not found |
-| `409` | Ask already resolved |
+| `409` | Idempotency conflict/in-progress operation, suppressed contact, or terminal Ask conflict |
 | `422` | Invalid transcript or unsafe recording URL |
 | `501` | Inline base64 recording not implemented |
 | `502` | Provider, persistence, or management database operation failed |
@@ -975,12 +1002,9 @@ Errors are JSON unless the endpoint is a Twilio webhook rejection:
 
 ## Known contract limitations
 
-- No idempotency key exists for billable SMS/call creation.
-- The Twilio provider may accept a send before strict persistence returns an error.
+- Billable creates require idempotency keys. A process failure in the narrow gap between provider acceptance and provider-ID persistence remains deliberately ambiguous and requires operator reconciliation; automatic retries are blocked rather than risking a duplicate charge.
 - Canonical list endpoints do not yet expose cursor pagination.
 - Generic communication responses currently omit stored `subject` and raw metadata.
 - Memory enrichment is asynchronous and eventually consistent; raw communication search may lead derived facts/state.
 - Native Plaud polling requires an injected authenticated adapter; external Plaud pushes are supported immediately.
-- Contact plus identity creation is not transactional.
-- Event delivery is at least once and does not lease rows across multiple instances.
 - `/v1/calls` trusts authenticated `overrides`; the legacy call route has the stricter allow-list.

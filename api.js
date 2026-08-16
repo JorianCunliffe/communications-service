@@ -1,10 +1,8 @@
 // The management API — everything the system needs to be driven over HTTP
 // instead of by editing rows in Supabase by hand.
 //
-// Read paths only, for now. Writes are a deliberate second step: with these in
-// place an operator can see exactly what the resolver will do before anything
-// is able to change it, and every write endpoint that follows has an obvious
-// way to be checked.
+// Read, audit, and controlled recording-ingest paths. Writes are explicit and
+// protected by the same shared API key as provider actions.
 //
 // Three rules hold across every route here.
 //
@@ -32,6 +30,8 @@ import { validate as validateTranscript, fromExternal as fromExternalTranscript,
 import { getContext, renderContext, renderForPrompt, CHANNELS, PLANNED_CHANNELS } from './context.js';
 import { normaliseParticipant, resolveCalendarEvent, resolveExactIdentity } from './calendar.js';
 import { normalisePlaudRecording } from './plaud.js';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -399,7 +399,7 @@ export default async function apiRoutes(fastify) {
         // transcripts is megabytes, and nobody listing recordings wants them.
         let query = db
             .from('recordings')
-            .select('id, source, external_id, call_id, contact_id, phone_number, status, attempts, error, duration_seconds, channels, provider, model, transcript_text, recorded_at, created_at', { count: 'exact' })
+            .select('id, source, external_id, call_id, contact_id, phone_number, status, attempts, error, duration_seconds, channels, provider, model, recorded_at, created_at', { count: 'exact' })
             .order('created_at', { ascending: false })
             .range(from, to);
 
@@ -497,6 +497,9 @@ export default async function apiRoutes(fastify) {
             title: body.title || null,
             meetingType: body.meetingType || body.meeting_type || null,
         };
+        if (contextual.projectId && !UUID.test(contextual.projectId)) {
+            return reply.code(400).send({ error: '"projectId" must be an internal project UUID; put workflow IDs in metadata.correlation.external_project_id' });
+        }
         const calendarEvent = await resolveCalendarEvent(db, contextual.calendarEventId);
         const calendarEventId = calendarEvent?.id || null;
         if (contextual.calendarEventId && !calendarEvent) {
@@ -509,7 +512,7 @@ export default async function apiRoutes(fastify) {
             contactId,
             phoneNumber: phone,
             mediaUrl: body.mediaUrl ?? null,
-            mediaAuth: typeof body.mediaAuth === 'string' && body.mediaAuth.startsWith('bearer_env:') ? body.mediaAuth : null,
+            mediaAuth: body.useProviderAuth === true ? 'provider' : null,
             durationSeconds: Number(body.durationSeconds) || null,
             recordedAt: body.recordedAt ?? null,
             transcript,

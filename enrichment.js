@@ -6,35 +6,53 @@ const STALE_CLAIM_MS = 15 * 60 * 1000;
 let running = null;
 let timer = null;
 
-function nextWeekday(name, from) {
+function partsInZone(date, timeZone) {
+    const values = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long' })
+        .formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+    return { year: Number(values.year), month: Number(values.month), day: Number(values.day), weekday: values.weekday.toLowerCase() };
+}
+
+function localTime(year, month, day, hour, minute, timeZone) {
+    const wanted = Date.UTC(year, month - 1, day, hour, minute);
+    let instant = wanted;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const values = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+            .formatToParts(new Date(instant)).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+        instant += wanted - Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), Number(values.hour), Number(values.minute));
+    }
+    return new Date(instant).toISOString();
+}
+
+function nextWeekday(name, from, timeZone) {
     const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const target = weekdays.indexOf(name.toLowerCase());
     if (target < 0) return null;
-    const date = new Date(from);
-    let days = (target - date.getUTCDay() + 7) % 7;
+    const local = partsInZone(new Date(from), timeZone);
+    let days = (target - weekdays.indexOf(local.weekday) + 7) % 7;
     if (days === 0) days = 7;
-    date.setUTCDate(date.getUTCDate() + days);
-    date.setUTCHours(17, 0, 0, 0);
-    return date.toISOString();
+    const date = new Date(Date.UTC(local.year, local.month - 1, local.day + days));
+    return localTime(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), 17, 0, timeZone);
 }
 
 export function parseObviousDueDate(text, occurredAt = new Date().toISOString()) {
+    const timeZone = process.env.CONTEXT_TIMEZONE || 'Australia/Brisbane';
     const value = String(text || '');
     const explicit = value.match(/\b(20\d{2}-\d{2}-\d{2})(?:[t ](\d{2}):(\d{2}))?/i);
     if (explicit) {
-        const date = new Date(`${explicit[1]}T${explicit[2] || '17'}:${explicit[3] || '00'}:00Z`);
-        return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+        const [year, month, day] = explicit[1].split('-').map(Number);
+        return localTime(year, month, day, Number(explicit[2] || 17), Number(explicit[3] || 0), timeZone);
     }
     const base = new Date(occurredAt);
     if (!Number.isFinite(base.getTime())) return null;
     if (/\btomorrow\b/i.test(value)) {
-        base.setUTCDate(base.getUTCDate() + 1); base.setUTCHours(17, 0, 0, 0); return base.toISOString();
+        const local = partsInZone(base, timeZone); const date = new Date(Date.UTC(local.year, local.month - 1, local.day + 1));
+        return localTime(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), 17, 0, timeZone);
     }
     if (/\bthis afternoon\b/i.test(value)) {
-        base.setUTCHours(15, 0, 0, 0); return base.toISOString();
+        const local = partsInZone(base, timeZone); return localTime(local.year, local.month, local.day, 15, 0, timeZone);
     }
     const weekday = value.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
-    return weekday ? nextWeekday(weekday[1], base) : null;
+    return weekday ? nextWeekday(weekday[1], base, timeZone) : null;
 }
 
 export function extractExplicitCommitments(text, occurredAt = new Date().toISOString()) {
@@ -108,20 +126,9 @@ export async function extractMemoryWithModel(communications, { fetchImpl = fetch
 }
 
 async function claimNext(db) {
-    const now = new Date();
-    const stale = new Date(now.getTime() - STALE_CLAIM_MS).toISOString();
-    const candidates = await db.from('communication_enrichment_jobs').select('*')
-        .or(`and(status.eq.pending,next_attempt_at.lte.${now.toISOString()}),and(status.eq.processing,claimed_at.lt.${stale})`)
-        .order('next_attempt_at').limit(1);
-    if (candidates.error) throw new Error(candidates.error.message);
-    if (!candidates.data?.length) return null;
-    const job = candidates.data[0];
-    const claimed = await db.from('communication_enrichment_jobs').update({
-        status: 'processing', claimed_at: now.toISOString(), attempts: (job.attempts || 0) + 1,
-        rerun_requested: false, updated_at: now.toISOString(),
-    }).eq('id', job.id).eq('status', job.status).select('*').maybeSingle();
+    const claimed = await db.rpc('claim_enrichment_job', { p_lease_seconds: Math.round(STALE_CLAIM_MS / 1000) });
     if (claimed.error) throw new Error(claimed.error.message);
-    return claimed.data || null;
+    return claimed.data?.[0] || null;
 }
 
 async function fail(db, job, error) {
@@ -130,10 +137,11 @@ async function fail(db, job, error) {
     await db.from('communication_enrichment_jobs').update({
         status: exhausted ? 'failed' : 'pending', last_error: String(error.message).slice(0, 1000),
         next_attempt_at: new Date(Date.now() + delay).toISOString(), updated_at: new Date().toISOString(),
-    }).eq('id', job.id);
+        lease_token: null, lease_expires_at: null,
+    }).eq('id', job.id).eq('lease_token', job.lease_token);
 }
 
-export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id])) {
+export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id]), evidenceById = new Map([[communication.communication_id, communication]])) {
     const deterministic = extractExplicitCommitments(communication.body, communication.occurred_at);
     const modelItems = (extracted.commitments || []).map((item) => ({
         description: item.description, due_at: item.due_at, confidence: item.confidence,
@@ -144,14 +152,15 @@ export async function storeCommitments(db, communication, extracted, validIds = 
         item.description && all.findIndex((other) => other.description.toLowerCase() === item.description.toLowerCase()) === index);
     for (const item of items) {
         const sourceCommunicationId = item.source_communication_id || communication.communication_id;
-        const promisor = communication.direction === 'inbound' && /^\s*(i['’]?ll|i will|we['’]?ll|we will)/i.test(item.description)
-            ? communication.person_id || communication.contact_id : null;
+        const sourceCommunication = evidenceById.get(sourceCommunicationId) || communication;
+        const promisor = sourceCommunication.direction === 'inbound' && /^\s*(i['’]?ll|i will|we['’]?ll|we will)/i.test(item.description)
+            ? sourceCommunication.person_id || sourceCommunication.contact_id : null;
         const existing = await db.from('communication_commitments').select('*')
             .eq('communication_id', sourceCommunicationId).eq('description', item.description.slice(0, 1000)).maybeSingle();
         if (existing.error) throw new Error(`Commitment lookup: ${existing.error.message}`);
         const parsedDue = item.due_at && Number.isFinite(new Date(item.due_at).getTime()) ? new Date(item.due_at).toISOString() : null;
         const row = {
-            communication_id: sourceCommunicationId, thread_id: communication.thread_id,
+            communication_id: sourceCommunicationId, thread_id: sourceCommunication.thread_id,
             promisor_contact_id: promisor, description: item.description.slice(0, 1000),
             due_at: parsedDue, confidence: Math.min(1, Math.max(0, Number(item.confidence) || 0)),
             source_excerpt: item.source_excerpt?.slice(0, 1000) || null, updated_at: new Date().toISOString(),
@@ -165,15 +174,16 @@ export async function storeCommitments(db, communication, extracted, validIds = 
     }
 }
 
-export async function storeFactVersions(db, communication, facts, validIds) {
+export async function storeFactVersions(db, communication, facts, validIds, evidenceById = new Map([[communication.communication_id, communication]])) {
     for (const fact of facts || []) {
         if (!fact.fact_key || !fact.text) continue;
         const sourceIds = [...new Set((fact.source_communication_ids || []).filter((id) => validIds.has(id)))];
         if (!sourceIds.length) sourceIds.push(communication.communication_id);
+        const attributed = evidenceById.get(sourceIds[0]) || communication;
         let query = db.from('communication_facts').select('*').eq('fact_key', fact.fact_key).eq('status', 'active');
-        if (communication.thread_id) query = query.eq('thread_id', communication.thread_id);
-        else if (communication.project_id) query = query.eq('project_id', communication.project_id);
-        else if (communication.person_id) query = query.eq('contact_id', communication.person_id);
+        if (attributed.thread_id) query = query.eq('thread_id', attributed.thread_id);
+        else if (attributed.project_id) query = query.eq('project_id', attributed.project_id);
+        else if (attributed.person_id) query = query.eq('contact_id', attributed.person_id);
         const current = await query.order('updated_at', { ascending: false }).limit(1).maybeSingle();
         if (current.error) throw new Error(`Fact lookup: ${current.error.message}`);
         if (current.data?.text === fact.text) {
@@ -185,8 +195,8 @@ export async function storeFactVersions(db, communication, facts, validIds) {
         }
         const inserted = await db.from('communication_facts').insert({
             fact_key: fact.fact_key.slice(0, 200), text: fact.text.slice(0, 2000),
-            contact_id: communication.person_id || communication.contact_id, project_id: communication.project_id,
-            thread_id: communication.thread_id, source_communication_ids: sourceIds,
+            contact_id: attributed.person_id || attributed.contact_id, project_id: attributed.project_id,
+            thread_id: attributed.thread_id, source_communication_ids: sourceIds,
             confidence: Math.min(1, Math.max(0, Number(fact.confidence) || 0)), status: 'active',
         }).select('*').single();
         if (inserted.error) throw new Error(`Fact storage: ${inserted.error.message}`);
@@ -214,11 +224,12 @@ async function processJob(db, job) {
     await storeCommitments(db, communication.data, { commitments: [] });
     const extracted = await extractMemoryWithModel(evidence);
     const validIds = new Set(evidence.map((row) => row.communication_id));
+    const evidenceById = new Map(evidence.map((row) => [row.communication_id, row]));
     const sourceIds = [...new Set((extracted.source_communication_ids || []).filter((id) => validIds.has(id)))];
     if (!sourceIds.length) sourceIds.push(communication.data.communication_id);
 
-    await storeCommitments(db, communication.data, extracted, validIds);
-    await storeFactVersions(db, communication.data, extracted.facts, validIds);
+    await storeCommitments(db, communication.data, extracted, validIds, evidenceById);
+    await storeFactVersions(db, communication.data, extracted.facts, validIds, evidenceById);
     if (communication.data.thread_id) {
         const update = await db.from('communication_threads').update({
             summary: extracted.summary || null, summary_updated_at: new Date().toISOString(), summary_source_ids: sourceIds,
@@ -235,7 +246,8 @@ async function processJob(db, job) {
         status: rerun ? 'pending' : 'done', completed_at: rerun ? null : new Date().toISOString(),
         next_attempt_at: new Date().toISOString(), rerun_requested: false,
         updated_at: new Date().toISOString(), last_error: null,
-    }).eq('id', job.id);
+        lease_token: null, lease_expires_at: null,
+    }).eq('id', job.id).eq('lease_token', job.lease_token);
     if (done.error) throw new Error(done.error.message);
 }
 

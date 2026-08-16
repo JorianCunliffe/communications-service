@@ -22,6 +22,7 @@ class Query {
     single() { this.one = true; return this; }
     insert(value) { this.op = 'insert'; this.payload = value; return this; }
     update(value) { this.op = 'update'; this.payload = value; return this; }
+    delete() { this.op = 'delete'; return this; }
     upsert(value, options = {}) { this.op = 'upsert'; this.payload = value; this.conflict = options.onConflict; return this; }
     then(resolve, reject) { return Promise.resolve(this.execute()).then(resolve, reject); }
     execute() {
@@ -37,6 +38,7 @@ class Query {
             return { data: this.one ? row : [row], error: null };
         }
         let found = rows.filter((row) => this.filters.every((filter) => filter(row)));
+        if (this.op === 'delete') { this.db.tables[this.table] = rows.filter((row) => !this.filters.every((filter) => filter(row))); return { data: found, error: null }; }
         if (this.op === 'update') { found.forEach((row) => Object.assign(row, this.payload)); return { data: this.one ? found[0] || null : found, error: null }; }
         if (this.sort) found = [...found].sort((a, b) => String(a[this.sort.key] || '').localeCompare(String(b[this.sort.key] || '')) * (this.sort.ascending ? 1 : -1));
         if (this.max !== null) found = found.slice(0, this.max);
@@ -71,6 +73,9 @@ describe('calendar memory foundation', () => {
         assert.equal(db.tables.calendar_event_participants.length, 2);
         assert.equal(db.tables.calendar_event_participants.find((row) => row.identity_value === 'jim@example.com').contact_id, 'person_jim');
         assert.equal(db.tables.calendar_event_participants.find((row) => row.identity_value === 'unknown@example.com').contact_id, null);
+
+        await ingestCalendarEvent(db, { ...input, participants: [{ type: 'email', value: 'jim@example.com' }] });
+        assert.equal(db.tables.calendar_event_participants.length, 1, 'participants missing from the new provider snapshot are removed');
     });
 
     test('ambiguous nearby events remain candidates and are never auto-linked', async () => {
@@ -110,7 +115,7 @@ describe('commitment extraction', () => {
     test('extracts an obvious promise and due weekday conservatively', () => {
         const [commitment] = extractExplicitCommitments("I'll send the valuation Monday.", '2026-08-07T00:00:00Z');
         assert.match(commitment.description, /send the valuation/);
-        assert.equal(commitment.due_at, '2026-08-10T17:00:00.000Z');
+        assert.equal(commitment.due_at, '2026-08-10T07:00:00.000Z');
     });
 
     test('does not manufacture a commitment from an ordinary statement', () => {
@@ -256,7 +261,8 @@ describe('fact lifecycle', () => {
 
 describe('migration contract', () => {
     test('adds calendar, durable enrichment, provenance, lifecycle and recording correlation', () => {
-        const sql = [4, 5, 6].map((number) => readFileSync(new URL(`../migrations/00${number}_${number === 4 ? 'calendar_memory' : number === 5 ? 'communications_enrichment' : 'memory_search'}.sql`, import.meta.url), 'utf8')).join('\n');
-        for (const token of ['calendar_events', 'calendar_event_participants', 'communication_commitments', 'communication_facts', 'source_communication_ids', 'superseded', 'communication_enrichment_jobs', 'rerun_requested', 'participant_identities', 'calendar_event_id', "exception when others"]) assert.match(sql, new RegExp(token));
+        const files = ['004_calendar_memory', '005_communications_enrichment', '006_memory_search', '007_rectification'];
+        const sql = files.map((name) => readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), 'utf8')).join('\n');
+        for (const token of ['calendar_events', 'calendar_event_participants', 'communication_commitments', 'communication_facts', 'source_communication_ids', 'superseded', 'communication_enrichment_jobs', 'rerun_requested', 'participant_identities', 'calendar_event_id', 'outbound_operations', 'lease_token', 'communication_row_id', "exception when others"]) assert.match(sql, new RegExp(token));
     });
 });

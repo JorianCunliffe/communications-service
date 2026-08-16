@@ -23,7 +23,7 @@ export function normalisePlaudRecording(raw = {}) {
         externalId: externalId.trim(),
         recordedAt: raw.recordedAt || raw.recorded_at || null,
         mediaUrl: raw.mediaUrl || raw.media_url || null,
-        mediaAuth: raw.mediaAuth || raw.media_auth || null,
+        mediaAuth: raw.useProviderAuth === true || raw.mediaAuth === 'provider' || raw.media_auth === 'provider' ? 'provider' : null,
         transcript: raw.transcript || null,
         participants: Array.isArray(raw.participants) ? raw.participants : [],
         calendarEventId: raw.calendarEventId || raw.calendar_event_id || null,

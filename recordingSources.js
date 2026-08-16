@@ -13,6 +13,7 @@
 
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { safeFetch } from './safeFetch.js';
 
 const FETCH_TIMEOUT_MS = 60 * 1000;
 
@@ -146,16 +147,19 @@ async function fetchUrl(recording) {
     const url = await assertFetchable(recording.media_url, recording.source);
 
     const headers = {};
-    // 'bearer_env:PLAUD_TOKEN' — the name of the variable, never the value, is
-    // what gets stored on the row.
-    if (typeof recording.media_auth === 'string' && recording.media_auth.startsWith('bearer_env:')) {
-        const name = recording.media_auth.slice('bearer_env:'.length);
+    // The caller can request provider authentication, but the source name maps
+    // to one fixed server-side credential; no environment name is accepted.
+    if (recording.media_auth === 'provider') {
+        const name = `RECORDING_SOURCE_${String(recording.source).toUpperCase()}_TOKEN`;
         const token = process.env[name];
         if (!token) throw new Error(`${name} is not set, so ${recording.source} media cannot be fetched`);
         headers.Authorization = `Bearer ${token}`;
     }
 
-    const response = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const response = await safeFetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }, {
+        scope: `RECORDING_SOURCE_${String(recording.source).toUpperCase()}`,
+        allowedHosts: allowedHosts(recording.source),
+    });
     const { buffer, contentType } = await readBody(response, url);
     return { buffer, contentType, filename: new URL(url).pathname.split('/').pop() || 'audio' };
 }

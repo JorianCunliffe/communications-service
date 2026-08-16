@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 export const CORRELATION_FIELDS = [
-    'tenant_id', 'project_id', 'run_id', 'task_id', 'hold_id',
+    'tenant_id', 'external_project_id', 'run_id', 'task_id', 'hold_id',
     'thread_id', 'calendar_event_id', 'person_id',
 ];
 
@@ -46,6 +46,11 @@ export function normaliseCorrelation(value = {}) {
         if (item === undefined || item === null || item === '') continue;
         if (typeof item !== 'string') throw new Error(`"correlation.${field}" must be a string`);
         correlation[field] = item;
+    }
+    // Transition alias: workflow project IDs are external correlation, never
+    // promoted into the internal UUID foreign key.
+    if (!correlation.external_project_id && typeof value.project_id === 'string' && value.project_id) {
+        correlation.external_project_id = value.project_id;
     }
     return correlation;
 }
@@ -108,6 +113,7 @@ export async function resolveCommunicationThread({
         linkType = 'explicit';
         thread = queryError(await db.from('communication_threads')
             .select('*').eq('thread_id', explicitId).maybeSingle(), 'Thread lookup');
+        if (thread && thread.status !== 'open') throw new Error(`Thread ${explicitId} is ${thread.status} and cannot accept new communications`);
     }
 
     if (!thread && purpose?.type === 'human_ask') {
@@ -115,7 +121,7 @@ export async function resolveCommunicationThread({
             .select('thread_id,status').eq('ask_id', purpose.ask_id).maybeSingle(), 'Ask lookup');
         if (binding) {
             linkType = 'explicit';
-            if (binding.status === 'resolved') throw new Error(`Ask ${purpose.ask_id} is already resolved`);
+            if (binding.status !== 'open') throw new Error(`Ask ${purpose.ask_id} is ${binding.status}`);
             thread = queryError(await db.from('communication_threads')
                 .select('*').eq('thread_id', binding.thread_id).maybeSingle(), 'Ask thread lookup');
         }
@@ -167,11 +173,14 @@ export async function resolveCommunicationThread({
     }).eq('thread_id', thread.thread_id);
 
     if (inheritedPurpose?.type === 'human_ask') {
+        const existing = queryError(await db.from('ask_bindings').select('thread_id,status')
+            .eq('ask_id', inheritedPurpose.ask_id).maybeSingle(), 'Ask binding lookup');
+        if (existing && existing.status !== 'open') throw new Error(`Ask ${inheritedPurpose.ask_id} is ${existing.status}`);
         queryError(await db.from('ask_bindings').upsert({
             ask_id: inheritedPurpose.ask_id,
             thread_id: thread.thread_id,
             tenant_id: inheritedCorrelation.tenant_id || null,
-            status: 'open',
+            status: existing?.status || 'open',
             purpose: inheritedPurpose,
             updated_at: new Date().toISOString(),
         }, { onConflict: 'ask_id' }), 'Ask binding');

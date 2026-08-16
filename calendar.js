@@ -1,6 +1,7 @@
 import { normalisePushedCalendarEvent } from './calendarProviders.js';
 
 const CANDIDATE_WINDOW_MINUTES = Math.max(1, Number(process.env.CALENDAR_CANDIDATE_WINDOW_MINUTES) || 120);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function requiredString(value, name) {
     if (typeof value !== 'string' || !value.trim()) throw new Error(`"${name}" is required`);
@@ -19,6 +20,7 @@ export function normaliseCalendarEvent(raw) {
     const startsAt = iso(event.startsAt, 'starts_at', true);
     const endsAt = iso(event.endsAt, 'ends_at');
     if (endsAt && endsAt < startsAt) throw new Error('"ends_at" cannot be before "starts_at"');
+    if (event.projectId && !UUID.test(event.projectId)) throw new Error('"project_id" must be an internal project UUID');
     return {
         ...event,
         provider: requiredString(event.provider, 'provider'),
@@ -53,6 +55,14 @@ export async function resolveExactIdentity(db, participant) {
 
 export async function ingestCalendarEvent(db, raw) {
     const event = normaliseCalendarEvent(raw);
+    // Production uses one database transaction for the event and its complete
+    // participant snapshot. Lightweight test adapters fall through to the
+    // equivalent query sequence below.
+    if (typeof db.rpc === 'function') {
+        const atomic = await db.rpc('ingest_calendar_event', { p_event: event });
+        if (atomic?.error) throw new Error(`Calendar event ingest: ${atomic.error.message}`);
+        if (atomic?.data?.event) return atomic.data;
+    }
     const organiser = event.organiser ? normaliseParticipant(event.organiser) : null;
     const organiserContactId = event.organiserContactId || (organiser ? await resolveExactIdentity(db, organiser) : null);
     const row = {
@@ -111,6 +121,11 @@ export async function ingestCalendarEvent(db, raw) {
             if (updated.error) throw new Error(`Calendar participant update: ${updated.error.message}`);
             participants.push(updated.data);
         }
+    }
+    const retainedIds = participants.filter(Boolean).map((item) => item.id);
+    for (const stale of (existing.data || []).filter((item) => !retainedIds.includes(item.id))) {
+        const removed = await db.from('calendar_event_participants').delete().eq('id', stale.id);
+        if (removed.error) throw new Error(`Calendar participant removal: ${removed.error.message}`);
     }
     return { event: result.data, participants: participants.filter(Boolean) };
 }

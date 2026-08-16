@@ -1,16 +1,20 @@
 # Communications Service
 
+Current contract release: `2.0.0`.
+
 Purpose-aware, channel-independent communication memory with production Twilio SMS and voice adapters, OpenAI Realtime voice conversations, Supabase persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
+
+Runtime requirement: Node.js `20.18.1` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must apply migrations `001` through `006` and configure Supabase before `/v1` can persist or retrieve communications memory.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must apply migrations `001` through `007` and configure Supabase before `/v1` can persist or retrieve communications memory.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Memory search migration](migrations/006_memory_search.sql)
+- [Latest database migration](migrations/007_rectification.sql)
 
 ## Architecture
 
@@ -64,13 +68,14 @@ The database function resolves the Ask binding, thread, and final communication 
 HyperFlow is a consumer of this API, not a shared-database component. A compatible HyperFlow client must:
 
 - authenticate outbound Communications requests with `X-API-Key`;
+- supply a stable `Idempotency-Key` for every billable SMS or voice request;
 - send SMS as `POST /v1/messages` with `to`, `from`, and `body`;
 - send calls as `POST /v1/calls` with `to`, `from`, and allow-listed `overrides`;
 - read the canonical `communication_id` response field (an `id` field is not returned);
 - deliver SMS/voice Asks through those channel endpoints with `purpose.type: "human_ask"`, `purpose.ask_id`, and an HTTPS `callback_url`;
 - keep email/web-form Ask delivery in HyperFlow until an email provider adapter exists here;
 - verify `X-Communications-Signature` over the raw webhook body, deduplicate `event_id`, and accept at-least-once delivery;
-- treat `sms.delivered` and `call.completed` as success, `call.failed` as failure, and inspect `sms.sent.payload.status` for Twilio SMS failure statuses; and
+- treat `sms.delivered` and `call.completed` as success, `sms.failed` and `call.failed` as failure, and all started/sent/answered events as nonterminal; and
 - call `POST /v1/asks/:askId/resolve` only after HyperFlow has accepted a specific reply as the final answer.
 
 There is deliberately no `POST /v1/asks` delivery endpoint. Ask is semantic purpose attached to a real channel communication, not a separate transport. See the [API reference integration section](docs/API_REFERENCE.md#hyperflow-consumer-contract) for payload and event details.
@@ -101,7 +106,7 @@ If a person has two open Ask threads, the service does not guess. The sender mus
 | Memory layer | Calendar context, explainable thread expansion, summaries/current state, commitments, facts, and loose ends |
 | Memory views | Before-meeting, person, project, and enriched thread read models |
 | Enrichment | Durable asynchronous queue; raw communication storage never waits for model extraction |
-| Events | Durable Supabase outbox, exponential retry, optional HMAC signature |
+| Events | Durable leased Supabase outbox, exponential retry, required HMAC signature |
 | Management | Read/audit API for contacts, lines, calls, tools, history, and recordings |
 | Operator UI | Landing page, visible version/build marker, and test console |
 
@@ -135,6 +140,7 @@ Run these in order in the Supabase SQL editor:
 4. `migrations/004_calendar_memory.sql`
 5. `migrations/005_communications_enrichment.sql`
 6. `migrations/006_memory_search.sql`
+7. `migrations/007_rectification.sql`
 
 Then configure:
 
@@ -144,7 +150,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`–`006` add calendar/recording relationships, the durable memory-enrichment queue, facts, commitments, thread state provenance, and explainable thread-aware search.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` is required for outbound idempotency, terminal Ask protection, worker leases, atomic contact/calendar writes, and the `external_project_id` correlation field.
 
 ### Memory ingestion and retrieval
 
@@ -177,7 +183,7 @@ All `/v1` and `/api` routes require `X-API-Key`. If `API_KEY` is missing, protec
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 PUBLIC_URL=https://communications.example.com
-TWILIO_VALIDATE_SIGNATURES=warn
+TWILIO_VALIDATE_SIGNATURES=enforce
 ```
 
 Configure the Twilio number:
@@ -190,7 +196,7 @@ Configure the Twilio number:
 
 Outbound calls and messages attach their status callbacks programmatically. If the number belongs to a Twilio Messaging Service, configure the inbound message webhook on that service.
 
-Start in `warn`, confirm real callbacks validate in the logs, then use `enforce`. Signature enforcement depends on `PUBLIC_URL` matching the externally visible URL exactly.
+New deployments should use `enforce`. Existing deployments may temporarily use `warn` while confirming that `PUBLIC_URL` exactly matches the externally visible URL Twilio signs.
 
 ### 5. Start
 
@@ -209,6 +215,7 @@ Open:
 ```bash
 curl -X POST https://communications.example.com/v1/messages \
   -H "X-API-Key: $API_KEY" \
+  -H "Idempotency-Key: ask_93bc:sms:initial" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "+61400000000",
@@ -220,6 +227,7 @@ curl -X POST https://communications.example.com/v1/messages \
     },
     "correlation": {
       "tenant_id": "tenant_1",
+      "external_project_id": "project_42",
       "run_id": "run_8",
       "task_id": "task_12",
       "hold_id": "hold_5"
@@ -244,6 +252,7 @@ Example response:
   "provider_id": "SM…",
   "correlation": {
     "tenant_id": "tenant_1",
+    "external_project_id": "project_42",
     "run_id": "run_8",
     "task_id": "task_12",
     "hold_id": "hold_5",
@@ -274,11 +283,11 @@ inbound | outbound
 Allowed correlation fields:
 
 ```text
-tenant_id | project_id | run_id | task_id | hold_id |
+tenant_id | external_project_id | run_id | task_id | hold_id |
 thread_id | calendar_event_id | person_id
 ```
 
-`ask_id` deliberately is not correlation metadata. It belongs under `purpose`.
+`ask_id` deliberately is not correlation metadata. It belongs under `purpose`. Top-level `project_id` is the internal project UUID; workflow IDs belong in `correlation.external_project_id`. During transition, `correlation.project_id` is accepted as an alias and normalized to `external_project_id`.
 
 ## Durable events
 
@@ -296,7 +305,9 @@ The outbox:
 - retries up to 12 times with exponential backoff from 5 seconds to 1 hour;
 - accepts only public HTTPS destinations after DNS/private-address checks;
 - includes `X-Communications-Event-Id`;
-- includes `X-Communications-Signature: sha256=<hex>` when a secret is configured.
+- requires `COMMUNICATIONS_WEBHOOK_SECRET` and includes `X-Communications-Signature: sha256=<hex>`;
+- validates every redirect destination against HTTPS, DNS, private-address, and optional host allow-list policy;
+- leases rows so multiple service instances cannot deliver the same claim concurrently.
 
 Delivery is at least once. Consumers should deduplicate by `event_id`.
 
@@ -304,7 +315,8 @@ Implemented event types:
 
 ```text
 communication.created     communication.received
-sms.sent                  sms.delivered             sms.received
+sms.sent                  sms.delivered             sms.failed
+sms.received
 call.started              call.answered             call.completed
 call.failed               transcript.completed      summary.completed
 ask.response.received     ask.resolved
@@ -325,7 +337,7 @@ No destination means no outbox row is created.
 | `TWILIO_ACCOUNT_SID` | Twilio delivery/signing | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Twilio delivery/signing | Twilio auth token |
 | `PUBLIC_URL` | Outbound voice and webhook verification | Exact public base URL, without a required trailing slash |
-| `TWILIO_VALIDATE_SIGNATURES` | Optional | `off`, `warn`, or `enforce`; defaults to `warn` when the auth token exists |
+| `TWILIO_VALIDATE_SIGNATURES` | Optional | `off`, `warn`, or `enforce`; defaults to `enforce` when the auth token exists |
 | `PRECONNECT_REALTIME` | Optional | Set `false` to disable early Realtime connection |
 | `GREETING_MODE` | Optional | `instructions` by default; `item` restores the legacy greeting mode |
 | `CONTEXT_TIMEZONE` | Optional | IANA zone used for history grouping; default `Australia/Brisbane` |
@@ -335,9 +347,11 @@ No destination means no outbox row is created.
 | `CALENDAR_CANDIDATE_WINDOW_MINUTES` | Optional | Nearby-event candidate window; default `120` minutes |
 | `MEMORY_SEARCH_*` | Optional | Testable text/person/project/thread/calendar/recency ranking weights |
 | `HYPERFLOW_EVENT_URL` | Optional | Default durable event destination |
-| `COMMUNICATIONS_WEBHOOK_SECRET` | Optional | HMAC-SHA256 event signing secret |
+| `COMMUNICATIONS_WEBHOOK_SECRET` | Durable events | Required HMAC-SHA256 event signing secret |
+| `COMMUNICATIONS_WEBHOOK_HOSTS` | Optional | Comma-separated allow-list for event destinations |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Makes that tool available to the voice model |
 | `RECORDING_SOURCE_<NAME>_HOSTS` | Optional | Comma-separated host allow-list for external recording media |
+| `RECORDING_SOURCE_<NAME>_TOKEN` | Authenticated media | Fixed server-side bearer credential for that recording source |
 
 ## Data model
 
@@ -365,7 +379,9 @@ The original provider tables remain because they contain channel-specific detail
 
 - Protected APIs fail closed when `API_KEY` is absent.
 - API keys are compared in constant time.
-- Twilio callbacks support signature enforcement.
+- Twilio callbacks enforce signatures by default when the auth token exists.
+- `do_not_contact` blocks outbound delivery; an override requires `override_do_not_contact: true` and a non-empty `override_reason`.
+- Recording-provider credentials are selected from fixed server-side configuration, not request-supplied environment-variable names.
 - External recording URLs and event destinations reject private, loopback, link-local, carrier NAT, multicast, reserved, and cloud-metadata addresses.
 - Supabase service-role credentials belong in deployment secrets, never source control.
 - `purpose.token`, when supplied, is persisted and included in event payloads. Treat it as a secret-bearing capability and scope/rotate it accordingly.
@@ -376,8 +392,8 @@ The original provider tables remain because they contain channel-specific detail
 - Memory enrichment is asynchronous and eventually consistent. A newly stored communication may appear in search before its summary, facts, commitments, or current state exist.
 - Direct Plaud network sync requires an injected authenticated adapter because no undocumented Plaud API is assumed. The generic idempotent recording endpoint is production-ready for pushes.
 - Config CRUD for legacy contact and phone-line settings is not implemented; `/api` provides read/audit endpoints.
-- Outbound SMS/calls are accepted by Twilio before the strict persistence write completes. There is no idempotency-key contract yet, so clients must investigate a `502` before blindly retrying a billable send.
-- Event delivery is at least once and the current worker does not lease rows across multiple service instances. Consumers must deduplicate `event_id`.
+- Outbound SMS/calls require `Idempotency-Key`. Reusing a key with a different request, or retrying an operation whose provider outcome is uncertain, returns `409` instead of risking a second billable send.
+- Event delivery is at least once and rows are leased across service instances. Consumers must still deduplicate `event_id`.
 - Applying migration files is an operational step; committed SQL does not prove the live Supabase schema has been updated.
 - Full integration tests require a running server and real provider credentials. Unit tests do not place calls or send SMS.
 
@@ -408,6 +424,7 @@ The purpose/thread suite verifies:
 - Plaud normalization feeds the existing recording contract;
 - thread context is explainable and unrelated threads are excluded;
 - commitments, due dates, loose ends, fact provenance, and supersession work as specified.
+- outbound idempotency, signature defaults, redirect validation, and project-ID normalization match the documented contract.
 
 ## Repository map
 

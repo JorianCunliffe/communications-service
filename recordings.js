@@ -105,35 +105,12 @@ export async function enqueueRecording(recording) {
 // Takes one row and marks it in flight. A conditional update rather than a
 // plain one: the status is part of the WHERE clause, so if anything else has
 // already claimed this row the update matches nothing and we move on. That is
-// the whole concurrency story, and it is enough for one process.
+// the claim is leased by the database, so multiple service instances cannot
+// transcribe the same row concurrently.
 async function claimNext(db) {
-    const nowIso = new Date().toISOString();
-    const staleIso = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
-
-    const { data: candidates, error } = await db
-        .from('recordings')
-        .select('*')
-        .or(`and(status.eq.pending,next_attempt_at.lte.${nowIso}),and(status.eq.transcribing,claimed_at.lt.${staleIso})`)
-        .order('next_attempt_at', { ascending: true })
-        .limit(1);
-
-    if (error) throw new Error(error.message);
-    if (!candidates?.length) return null;
-
-    const candidate = candidates[0];
-    const { data: claimed, error: claimError } = await db
-        .from('recordings')
-        .update({ status: 'transcribing', claimed_at: nowIso, attempts: candidate.attempts + 1 })
-        .eq('id', candidate.id)
-        .eq('status', candidate.status) // lost the race if this no longer holds
-        .select('*')
-        .maybeSingle();
-
-    if (claimError) throw new Error(claimError.message);
-    if (claimed && candidate.status === 'transcribing') {
-        console.warn(`Reclaimed recording ${claimed.id}, left mid-transcription by a restart`);
-    }
-    return claimed ?? null;
+    const result = await db.rpc('claim_recording', { p_lease_seconds: Math.round(STALE_CLAIM_MS / 1000) });
+    if (result.error) throw new Error(result.error.message);
+    return result.data?.[0] || null;
 }
 
 async function fail(db, recording, message) {
@@ -146,7 +123,8 @@ async function fail(db, recording, message) {
         status: permanent ? 'failed' : 'pending',
         error: String(message).slice(0, 1000),
         next_attempt_at: new Date(Date.now() + delayMs).toISOString(),
-    }).eq('id', recording.id);
+        lease_token: null, lease_expires_at: null,
+    }).eq('id', recording.id).eq('lease_token', recording.lease_token);
 
     // The call row should say transcription was tried and did not work, so an
     // empty transcript is distinguishable from one nobody attempted.
@@ -185,7 +163,9 @@ async function process(db, recording) {
         bytes: buffer.length,
         content_type: contentType,
         error: null,
-    }).eq('id', recording.id);
+        lease_token: null,
+        lease_expires_at: null,
+    }).eq('id', recording.id).eq('lease_token', recording.lease_token);
     if (error) throw new Error(`Storing the transcript failed: ${error.message}`);
 
     // Project onto the call, if this recording belongs to one. saveTranscript

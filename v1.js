@@ -1,6 +1,6 @@
 import twilio from 'twilio';
 import { E164, rejectUnauthorized } from './auth.js';
-import { getSupabase, resolveConfig, ensureContact, storeCallConfig, warnIfSuppressed } from './configResolver.js';
+import { assertContactable, getSupabase, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
 import { recordMessage } from './smsLog.js';
 import { recordCall } from './callLog.js';
 import { enqueueEvent } from './eventOutbox.js';
@@ -8,10 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
 import { calendarCandidates, ingestCalendarEvent, resolveCalendarEvent, resolveCalendarEventId } from './calendar.js';
 import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, searchMemory } from './memory.js';
+import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
 const DIRECTIONS = ['inbound', 'outbound'];
 const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
+const CALL_OVERRIDE_FIELDS = ['model', 'effort', 'voice', 'temperature', 'systemMessage', 'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst', 'liveTranscript'];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function database(reply) {
     const db = getSupabase();
@@ -58,6 +61,7 @@ function parseSemantic(body = {}) {
             throw new Error('"callback_url" must be a valid https URL');
         }
     }
+    if (body.project_id && !UUID.test(body.project_id)) throw new Error('"project_id" must be an internal project UUID; use correlation.external_project_id for workflow IDs');
     return {
         purpose: normalisePurpose(body.purpose),
         correlation: normaliseCorrelation(body.correlation || body.metadata),
@@ -97,6 +101,12 @@ export default async function v1Routes(fastify) {
         try { semantic = parseSemantic(body); } catch (error) { return errorReply(reply, error); }
 
         try {
+            if (body.provider && body.provider_id) {
+                const existing = await db.from('communications').select('*').eq('provider', body.provider)
+                    .eq('provider_id', body.provider_id).maybeSingle();
+                if (existing.error) throw new Error(existing.error.message);
+                if (existing.data) return reply.code(200).send({ ...toCanonical(existing.data), duplicate: true });
+            }
             const communicationId = prefixedId('comm');
             const requestedCalendarEvent = body.calendar_event_id || semantic.correlation.calendar_event_id || null;
             const calendarEvent = await resolveCalendarEvent(db, requestedCalendarEvent);
@@ -104,7 +114,7 @@ export default async function v1Routes(fastify) {
             if (requestedCalendarEvent && !calendarEvent) {
                 return reply.code(400).send({ error: 'calendar_event_id did not resolve to exactly one calendar event' });
             }
-            const projectId = body.project_id || calendarEvent?.project_id || semantic.correlation.project_id || null;
+            const projectId = body.project_id || calendarEvent?.project_id || null;
             const resolvedCorrelation = {
                 ...semantic.correlation,
                 ...(projectId ? { project_id: projectId } : {}),
@@ -144,6 +154,12 @@ export default async function v1Routes(fastify) {
                 metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
             };
             const { data, error } = await db.from('communications').insert(row).select('*').single();
+            if (error?.code === '23505' && body.provider && body.provider_id) {
+                const duplicate = await db.from('communications').select('*').eq('provider', body.provider)
+                    .eq('provider_id', body.provider_id).maybeSingle();
+                if (duplicate.error) throw new Error(duplicate.error.message);
+                return reply.code(200).send({ ...toCanonical(duplicate.data), duplicate: true });
+            }
             if (error) throw new Error(error.message);
 
             await enqueueEvent({
@@ -186,11 +202,7 @@ export default async function v1Routes(fastify) {
         try {
             const communication = await getCommunication(db, request.params.communicationId);
             if (!communication) return reply.code(404).send({ error: 'Communication not found' });
-            const job = await db.from('communication_enrichment_jobs').upsert({
-                communication_id: request.params.communicationId, job_type: 'memory', status: 'pending',
-                attempts: 0, last_error: null, rerun_requested: false,
-                next_attempt_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-            }, { onConflict: 'communication_id,job_type' }).select('*').single();
+            const job = await db.rpc('requeue_communication_enrichment', { p_communication_id: request.params.communicationId });
             if (job.error) throw new Error(job.error.message);
             return { job: job.data, requeued: true };
         } catch (error) { return errorReply(reply, error, 500); }
@@ -212,15 +224,31 @@ export default async function v1Routes(fastify) {
             return reply.code(503).send({ error: 'Twilio messaging is not configured' });
         }
 
-        const communicationId = prefixedId('comm');
-        ensureContact(to);
-        warnIfSuppressed(to, 'SMS');
+        let communicationId = prefixedId('comm');
         try {
-            const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-            const message = await client.messages.create({
-                to, from, body,
-                ...(PUBLIC_URL ? { statusCallback: `${PUBLIC_URL.replace(/\/$/, '')}/message-status` } : {}),
+            await assertContactable(to, 'SMS', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason });
+            await ensureContact(to);
+        } catch (error) {
+            if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
+            return errorReply(reply, error, 500);
+        }
+        try {
+            const operation = await reserveOutbound(db, {
+                key: idempotencyKey(request), type: 'sms', communicationId,
+                request: { to, from, body, purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
+                    override_do_not_contact: request.body?.override_do_not_contact, override_reason: request.body?.override_reason },
             });
+            communicationId = operation.communication_id;
+            if (operation.status === 'completed') return reply.code(200).send(operation.response);
+            let message = { sid: operation.provider_id, status: operation.provider_status };
+            if (operation.status !== 'provider_sent') {
+                const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+                message = await client.messages.create({
+                    to, from, body,
+                    ...(PUBLIC_URL ? { statusCallback: `${PUBLIC_URL.replace(/\/$/, '')}/message-status` } : {}),
+                });
+                await markOutbound(db, operation.id, { status: 'provider_sent', provider_id: message.sid, provider_status: message.status });
+            }
             const stored = await recordMessage({
                 otherParty: to, twilioNumber: from, direction: 'outbound', body,
                 messageSid: message.sid, status: message.status, communicationId,
@@ -241,8 +269,13 @@ export default async function v1Routes(fastify) {
                 correlation: stored.correlation, destination: stored.callbackUrl,
                 payload: { status: message.status, channel: 'sms', direction: 'outbound' },
             });
+            await markOutbound(db, operation.id, { status: 'completed', response: communication, completed_at: new Date().toISOString() });
             return reply.code(201).send(communication);
         } catch (error) {
+            if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
+            if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
+            if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
+            if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return errorReply(reply, error, 409);
             return errorReply(reply, new Error(`Failed to send message: ${error.message}`), 502);
         }
     });
@@ -261,6 +294,9 @@ export default async function v1Routes(fastify) {
         const { to, from, overrides = {} } = request.body || {};
         if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 phone number' });
         if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 phone number' });
+        if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return reply.code(400).send({ error: '"overrides" must be an object' });
+        const unknownOverrides = Object.keys(overrides).filter((field) => !CALL_OVERRIDE_FIELDS.includes(field));
+        if (unknownOverrides.length) return reply.code(400).send({ error: `Unknown override field(s): ${unknownOverrides.join(', ')}` });
         let semantic;
         try { semantic = parseSemantic(request.body); } catch (error) { return errorReply(reply, error); }
 
@@ -269,16 +305,34 @@ export default async function v1Routes(fastify) {
             return reply.code(503).send({ error: 'Twilio calling is not configured' });
         }
 
-        const communicationId = prefixedId('comm');
+        let communicationId = prefixedId('comm');
         try {
+            await assertContactable(to, 'outbound call', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason });
+            await ensureContact(to);
+        } catch (error) {
+            if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
+            return errorReply(reply, error, 500);
+        }
+        try {
+            const operation = await reserveOutbound(db, {
+                key: idempotencyKey(request), type: 'voice', communicationId,
+                request: { to, from, overrides, purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
+                    override_do_not_contact: request.body?.override_do_not_contact, override_reason: request.body?.override_reason },
+            });
+            communicationId = operation.communication_id;
+            if (operation.status === 'completed') return reply.code(200).send(operation.response);
             const resolved = await resolveConfig({ from, to, direction: 'outbound' });
             const config = { ...resolved, ...overrides };
             const base = PUBLIC_URL.replace(/\/$/, '');
-            const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-            const call = await client.calls.create({
-                to, from, url: `${base}/outbound-answer`, statusCallback: `${base}/call-status`,
-                statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'], statusCallbackMethod: 'POST',
-            });
+            let call = { sid: operation.provider_id, status: operation.provider_status };
+            if (operation.status !== 'provider_sent') {
+                const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+                call = await client.calls.create({
+                    to, from, url: `${base}/outbound-answer`, statusCallback: `${base}/call-status`,
+                    statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'], statusCallbackMethod: 'POST',
+                });
+                await markOutbound(db, operation.id, { status: 'provider_sent', provider_id: call.sid, provider_status: call.status });
+            }
             storeCallConfig(call.sid, config);
             const stored = await recordCall({
                 callSid: call.sid, otherParty: to, serviceIdentity: from, direction: 'outbound', config,
@@ -294,11 +348,17 @@ export default async function v1Routes(fastify) {
                 correlation: stored.correlation, destination: stored.callbackUrl,
                 payload: { status: call.status, channel: 'voice', direction: 'outbound' },
             });
-            return reply.code(201).send(canonicalCommunication({
+            const response = canonicalCommunication({
                 communicationId, channel: 'voice', direction: 'outbound', provider: 'twilio',
                 providerId: call.sid, correlation: stored.correlation, purpose: stored.purpose,
-            }));
+            });
+            await markOutbound(db, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
+            return reply.code(201).send(response);
         } catch (error) {
+            if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
+            if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
+            if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
+            if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return errorReply(reply, error, 409);
             return errorReply(reply, new Error(`Failed to place call: ${error.message}`), 502);
         }
     });
@@ -332,25 +392,20 @@ export default async function v1Routes(fastify) {
         const phone = body.phone_number || identities.find((item) => item?.type === 'phone')?.value || null;
         if (phone && !E164.test(phone)) return reply.code(400).send({ error: 'Phone identity must be E.164' });
 
-        const { data: person, error } = await db.from('contacts').insert({
-            name: body.name.trim(), phone_number: phone,
-        }).select('*').single();
-        if (error) return errorReply(reply, new Error(error.message), 500);
-
         const rows = identities.map((identity) => ({
-            person_id: person.id,
             type: identity.type,
             value: identity.value,
             provider: identity.provider || null,
             metadata: identity.metadata || {},
         }));
         if (phone && !rows.some((row) => row.type === 'phone' && row.value === phone)) {
-            rows.push({ person_id: person.id, type: 'phone', value: phone, provider: 'twilio', metadata: {} });
+            rows.push({ type: 'phone', value: phone, provider: 'twilio', metadata: {} });
         }
-        if (rows.length) {
-            const identitiesWrite = await db.from('communication_identities').insert(rows);
-            if (identitiesWrite.error) return errorReply(reply, new Error(identitiesWrite.error.message), 500);
-        }
+        const created = await db.rpc('create_communication_contact', {
+            p_name: body.name.trim(), p_phone_number: phone, p_identities: rows,
+        });
+        if (created.error) return errorReply(reply, new Error(created.error.message), 500);
+        const person = created.data;
         return reply.code(201).send({ ...person, person_id: person.id, identities: rows });
     });
 
@@ -478,7 +533,14 @@ export default async function v1Routes(fastify) {
         const binding = await db.from('ask_bindings').select('*').eq('ask_id', request.params.askId).maybeSingle();
         if (binding.error) return errorReply(reply, new Error(binding.error.message), 500);
         if (!binding.data) return reply.code(404).send({ error: 'Ask is not bound to a communication thread' });
-        if (binding.data.status === 'resolved') return reply.code(409).send({ error: 'Ask is already resolved' });
+        if (binding.data.status === 'resolved') {
+            if (binding.data.resolved_by === communicationId) {
+                return { ask_id: request.params.askId, status: 'resolved', communication_id: communicationId,
+                    thread_id: binding.data.thread_id, resolved_at: binding.data.resolved_at, duplicate: true };
+            }
+            return reply.code(409).send({ error: 'Ask was resolved by a different communication' });
+        }
+        if (binding.data.status !== 'open') return reply.code(409).send({ error: `Ask is ${binding.data.status}` });
         const communication = await getCommunication(db, communicationId);
         if (!communication || communication.thread_id !== binding.data.thread_id) {
             return reply.code(400).send({ error: 'The resolving communication is not in this Ask thread' });
@@ -506,6 +568,17 @@ export default async function v1Routes(fastify) {
         const { data, error } = await db.from('outbound_events').select('*').order('created_at', { ascending: false }).limit(100);
         if (error) return errorReply(reply, new Error(error.message), 500);
         return { data: data || [] };
+    });
+
+    fastify.post('/events/:eventId/requeue', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const result = await db.from('outbound_events').update({
+            status: 'pending', attempts: 0, last_error: null, next_attempt_at: new Date().toISOString(),
+            lease_token: null, lease_expires_at: null,
+        }).eq('event_id', request.params.eventId).select('*').maybeSingle();
+        if (result.error) return errorReply(reply, new Error(result.error.message), 500);
+        if (!result.data) return reply.code(404).send({ error: 'Event not found' });
+        return { ...result.data, requeued: true };
     });
 }
 

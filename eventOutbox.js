@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { getSupabase } from './configResolver.js';
 import { assertFetchable } from './recordingSources.js';
+import { safeFetch } from './safeFetch.js';
 import { prefixedId } from './communicationModel.js';
 
 const MAX_ATTEMPTS = 12;
@@ -18,14 +19,18 @@ export async function enqueueEvent({
     const db = getSupabase();
     const target = destination || process.env.HYPERFLOW_EVENT_URL;
     if (!db || !target) return null;
+    if (!process.env.COMMUNICATIONS_WEBHOOK_SECRET) throw new Error('COMMUNICATIONS_WEBHOOK_SECRET is required for durable webhook delivery');
 
+    const eventCorrelation = correlation.external_project_id && !correlation.project_id
+        ? { ...correlation, project_id: correlation.external_project_id }
+        : correlation;
     const event = {
         event_id: prefixedId('evt'),
         communication_id: communicationId,
         type,
         occurred_at: new Date().toISOString(),
         purpose,
-        correlation,
+        correlation: eventCorrelation,
         payload,
     };
 
@@ -60,13 +65,7 @@ export async function deliverPendingEvents() {
     const db = getSupabase();
     if (!db) return { attempted: 0, delivered: 0 };
 
-    const now = new Date().toISOString();
-    const { data, error } = await db.from('outbound_events').select('*')
-        .in('status', ['pending', 'retrying'])
-        .lte('next_attempt_at', now)
-        .lt('attempts', MAX_ATTEMPTS)
-        .order('created_at')
-        .limit(BATCH_SIZE);
+    const { data, error } = await db.rpc('claim_outbound_events', { p_limit: BATCH_SIZE, p_lease_seconds: 60 });
     if (error) throw new Error(`Could not read outbound events: ${error.message}`);
 
     let delivered = 0;
@@ -79,24 +78,33 @@ export async function deliverPendingEvents() {
             const signed = signature(body);
             if (signed) headers['x-communications-signature'] = signed;
 
-            const response = await fetch(destination, {
+            const allowedHosts = process.env.COMMUNICATIONS_WEBHOOK_HOSTS
+                ? process.env.COMMUNICATIONS_WEBHOOK_HOSTS.split(',').map((host) => host.trim().toLowerCase()).filter(Boolean)
+                : null;
+            const response = await safeFetch(destination, {
                 method: 'POST', headers, body, signal: AbortSignal.timeout(15000),
-            });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            }, { scope: 'COMMUNICATIONS_WEBHOOK', allowedHosts });
+            if (!response.ok) {
+                const deliveryError = new Error(`HTTP ${response.status}`);
+                deliveryError.retryable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+                throw deliveryError;
+            }
 
             await db.from('outbound_events').update({
                 status: 'delivered', attempts, delivered_at: new Date().toISOString(), last_error: null,
-            }).eq('event_id', row.event_id);
+                lease_token: null, lease_expires_at: null,
+            }).eq('event_id', row.event_id).eq('lease_token', row.lease_token);
             delivered += 1;
         } catch (eventError) {
-            const exhausted = attempts >= MAX_ATTEMPTS;
+            const exhausted = attempts >= MAX_ATTEMPTS || eventError.retryable === false;
             const delayMs = Math.min(60 * 60 * 1000, 5000 * (2 ** Math.min(attempts - 1, 9)));
             await db.from('outbound_events').update({
                 status: exhausted ? 'failed' : 'retrying',
                 attempts,
                 last_error: String(eventError.message).slice(0, 500),
                 next_attempt_at: new Date(Date.now() + delayMs).toISOString(),
-            }).eq('event_id', row.event_id);
+                lease_token: null, lease_expires_at: null,
+            }).eq('event_id', row.event_id).eq('lease_token', row.lease_token);
         }
     }
     return { attempted: data?.length || 0, delivered };
