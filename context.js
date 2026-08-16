@@ -14,7 +14,7 @@
 // should contain — it returns turns and a renderer, and the caller chooses.
 // And it does not write anything, ever.
 
-import { getSupabase } from './configResolver.js';
+import { getDatabase } from './database.js';
 
 // Every channel we can read today. The names match transcripts.js so a turn and
 // a transcript segment describe the same thing.
@@ -346,7 +346,7 @@ export async function getContext({
     since = null,
     until = null,
 } = {}) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) return { subject: null, turns: [], dropped: 0, errors: [], unavailable: PLANNED_CHANNELS };
     if (!phoneNumber && !contactId) throw new Error('getContext needs a phoneNumber or a contactId');
 
@@ -498,7 +498,7 @@ export async function searchCommunications({
     limit = 5,
     timeZone = CONTEXT_TIMEZONE,
 } = {}) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) {
         return { conversations: [], returned: 0, searched: null, suggestions: [], errors: ['history is not configured'] };
     }
@@ -637,7 +637,7 @@ export const NO_HISTORY_BLOCK = [
 
 // The history block for a call, always a string.
 //
-// Never throws and never hangs: every failure — Supabase down, a slow query, a
+// Never throws and never hangs: every failure — database down, a slow query, a
 // provider erroring — degrades to the empty record rather than to nothing. A
 // call that would have happened without this feature must still happen exactly
 // the same way when this feature is having a bad day, and "we have not spoken"

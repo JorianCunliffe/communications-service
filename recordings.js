@@ -10,7 +10,7 @@
 // recoverable, and so "why has this not been transcribed" is answerable by
 // looking at a row instead of by reading logs that have rotated away.
 
-import { getSupabase } from './configResolver.js';
+import { getDatabase } from './database.js';
 import { transcribeAudio } from './transcribe.js';
 import { toText, isEmpty } from './transcripts.js';
 import { sourceFor } from './recordingSources.js';
@@ -39,7 +39,7 @@ let sweeper = null;
 // callbacks and an MCP server will re-push, and neither should produce a second
 // transcription of the same audio.
 export async function enqueueRecording(recording) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) return null;
 
     const row = {
@@ -197,7 +197,7 @@ async function process(db, recording) {
 }
 
 export function sweepOnce() {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) return Promise.resolve();
     if (running) return running;
 
@@ -222,7 +222,7 @@ export function sweepOnce() {
 }
 
 export function startRecordingSweeper() {
-    if (sweeper || !getSupabase()) return;
+    if (sweeper || !getDatabase()) return;
     sweeper = setInterval(sweepOnce, SWEEP_INTERVAL_MS);
     sweeper.unref?.();
     console.log('Recording sweeper started');

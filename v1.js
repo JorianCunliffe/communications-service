@@ -1,6 +1,7 @@
 import twilio from 'twilio';
 import { E164, rejectUnauthorized } from './auth.js';
-import { assertContactable, getSupabase, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
+import { assertContactable, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
+import { getDatabase } from './database.js';
 import { recordMessage } from './smsLog.js';
 import { recordCall } from './callLog.js';
 import { enqueueEvent } from './eventOutbox.js';
@@ -17,7 +18,7 @@ const CALL_OVERRIDE_FIELDS = ['model', 'effort', 'voice', 'temperature', 'system
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function database(reply) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) reply.code(503).send({ error: 'Communications persistence is not configured' });
     return db;
 }

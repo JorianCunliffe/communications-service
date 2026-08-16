@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { getSupabase } from './configResolver.js';
+import { getDatabase } from './database.js';
 import { assertFetchable } from './recordingSources.js';
 import { safeFetch } from './safeFetch.js';
 import { prefixedId } from './communicationModel.js';
@@ -16,7 +16,7 @@ export async function enqueueEvent({
     payload = {},
     destination = null,
 }) {
-    const db = getSupabase();
+    const db = getDatabase();
     const target = destination || process.env.HYPERFLOW_EVENT_URL;
     if (!db || !target) return null;
     if (!process.env.COMMUNICATIONS_WEBHOOK_SECRET) throw new Error('COMMUNICATIONS_WEBHOOK_SECRET is required for durable webhook delivery');
@@ -48,7 +48,7 @@ export async function enqueueEvent({
 }
 
 export async function callbackForThread(threadId) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db || !threadId) return null;
     const { data, error } = await db.from('communication_threads').select('callback_url')
         .eq('thread_id', threadId).maybeSingle();
@@ -62,7 +62,7 @@ function signature(body) {
 }
 
 export async function deliverPendingEvents() {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) return { attempted: 0, delivered: 0 };
 
     const { data, error } = await db.rpc('claim_outbound_events', { p_limit: BATCH_SIZE, p_lease_seconds: 60 });
@@ -111,7 +111,7 @@ export async function deliverPendingEvents() {
 }
 
 export function startEventSweeper() {
-    if (timer || !getSupabase()) return;
+    if (timer || !getDatabase()) return;
     const sweep = () => deliverPendingEvents().catch((error) => console.warn(`Event outbox: ${error.message}`));
     timer = setInterval(sweep, 15000);
     timer.unref?.();

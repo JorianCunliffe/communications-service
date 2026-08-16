@@ -106,7 +106,7 @@
       chip(h.version || 'unknown', null);
       if (h.build) chip('build ' + h.build, null);
       chip('model ' + h.model, null);
-      chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
+      chip(h.persistenceProvider ? `${h.persistenceProvider} persistence` : 'persistence off', Boolean(h.persistenceProvider));
       chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
       chip(h.communicationsApi ? 'v1 API ready' : 'v1 API not configured', h.communicationsApi);
       chip(h.memoryEnrichment ? 'memory ready' : 'memory not configured', h.memoryEnrichment);

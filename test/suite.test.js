@@ -371,7 +371,9 @@ describe('HTTP – /health', () => {
 
         const body = await res.json();
         assert.equal(body.status, 'ok');
+        assert.ok(body.persistenceProvider === null || ['supabase', 'postgres'].includes(body.persistenceProvider));
         assert.equal(typeof body.supabaseConfig, 'boolean', 'supabaseConfig should be a boolean');
+        assert.equal(typeof body.postgresPersistence, 'boolean', 'postgresPersistence should be a boolean');
         assert.equal(typeof body.outboundCalls, 'boolean', 'outboundCalls should be a boolean');
     });
 });

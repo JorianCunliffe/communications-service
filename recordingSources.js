@@ -7,7 +7,7 @@
 //
 // The security shape of this file is worth stating plainly: it makes the server
 // fetch a URL that, for some sources, came from outside. That is the exact
-// shape of an SSRF, on a process holding a Supabase service-role key and a
+// shape of an SSRF, on a process holding database credentials and a
 // Twilio auth token. So a URL from an untrusted source is checked before it is
 // fetched, and a URL from Twilio is not taken from the request at all.
 

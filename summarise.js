@@ -16,7 +16,7 @@
 // the feature is worth having at all.
 
 import { toText } from './transcripts.js';
-import { getSupabase } from './configResolver.js';
+import { getDatabase } from './database.js';
 import { callbackForThread, enqueueEvent } from './eventOutbox.js';
 
 // A small model is the right tool: this is compression, not reasoning, and it
@@ -143,7 +143,7 @@ export async function summariseTranscript(transcript) {
 // limitation and an acceptable one — the loss is a history entry, not a
 // transcript, and the alternative is a stored procedure for a nicety.
 export async function appendHistory({ contactId, channel = 'call', line, when = new Date() }) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db || !contactId || !line) return;
 
     try {
@@ -186,7 +186,7 @@ export async function appendHistory({ contactId, channel = 'call', line, when = 
 // argument: whichever producer wrote last is the one that should be summarised,
 // and that is a question only the row can answer.
 export async function summariseCall(callSid) {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db || !callSid) return;
 
     try {

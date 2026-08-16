@@ -2,13 +2,13 @@
 
 Current contract release: `2.0.0`.
 
-Purpose-aware, channel-independent communication memory with production Twilio SMS and voice adapters, OpenAI Realtime voice conversations, Supabase persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
+Purpose-aware, channel-independent communication memory with production Twilio SMS and voice adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
 Runtime requirement: Node.js `20.18.1` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must apply migrations `001` through `007` and configure Supabase before `/v1` can persist or retrieve communications memory.
+> Implementation status: the source, migrations, and tests are present in this repository. A new deployment must apply migrations `000` through `007` and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory.
 
 ## Documentation
 
@@ -106,7 +106,7 @@ If a person has two open Ask threads, the service does not guess. The sender mus
 | Memory layer | Calendar context, explainable thread expansion, summaries/current state, commitments, facts, and loose ends |
 | Memory views | Before-meeting, person, project, and enriched thread read models |
 | Enrichment | Durable asynchronous queue; raw communication storage never waits for model extraction |
-| Events | Durable leased Supabase outbox, exponential retry, required HMAC signature |
+| Events | Durable leased PostgreSQL outbox, exponential retry, required HMAC signature |
 | Management | Read/audit API for contacts, lines, calls, tools, history, and recordings |
 | Operator UI | Landing page, visible version/build marker, and test console |
 
@@ -128,29 +128,48 @@ OPENAI_API_KEY=sk-...
 PORT=5050
 ```
 
-The process exits when `OPENAI_API_KEY` is absent. Without Supabase, voice can still use built-in configuration, but communications are not persisted and `/v1` returns `503`.
+The process exits when `OPENAI_API_KEY` is absent. Without a persistence provider, voice can still use built-in configuration, but communications are not persisted and `/v1` returns `503`.
 
 ### 2. Apply the database migrations
 
-Run these in order in the Supabase SQL editor:
+For Replit Database or any direct PostgreSQL deployment, add the database, make sure `DATABASE_URL` is available, then run:
 
-1. `migrations/001_communications_search.sql`
-2. `migrations/002_search_communications.sql`
-3. `migrations/003_communications_api.sql`
-4. `migrations/004_calendar_memory.sql`
-5. `migrations/005_communications_enrichment.sql`
-6. `migrations/006_memory_search.sql`
-7. `migrations/007_rectification.sql`
+```powershell
+npm.cmd run db:migrate
+```
 
-Then configure:
+The runner applies every numbered SQL file once and refuses to continue if an already-applied migration has changed. For Supabase, either use the same command with its direct PostgreSQL connection string or run the files in order in the SQL editor:
+
+1. `migrations/000_core.sql`
+2. `migrations/001_communications_search.sql`
+3. `migrations/002_search_communications.sql`
+4. `migrations/003_communications_api.sql`
+5. `migrations/004_calendar_memory.sql`
+6. `migrations/005_communications_enrichment.sql`
+7. `migrations/006_memory_search.sql`
+8. `migrations/007_rectification.sql`
+
+Choose one runtime provider. Replit Database is direct PostgreSQL:
 
 ```dotenv
+PERSISTENCE_PROVIDER=postgres
+DATABASE_URL=postgresql://...
+```
+
+[Replit Database](https://docs.replit.com/build/add-database) normally injects `DATABASE_URL` after a database is added to the app. Verify the deployment is connected to the intended production database before applying migrations; development and production data should not be assumed to be the same.
+
+Existing Supabase deployments use:
+
+```dotenv
+PERSISTENCE_PROVIDER=supabase
 SUPABASE_CONFIG_ENABLED=true
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
 Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` is required for outbound idempotency, terminal Ask protection, worker leases, atomic contact/calendar writes, and the `external_project_id` correlation field.
+
+If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
 ### Memory ingestion and retrieval
 
@@ -331,7 +350,11 @@ No destination means no outbox row is created.
 | `OPENAI_API_KEY` | Always | Required at process startup; Realtime voice and summaries/transcription use it |
 | `PORT` | Optional | Listen port; default `5050` |
 | `API_KEY` | Using `/v1`, `/api`, `/sms`, `/outbound-call` | Shared `X-API-Key` secret |
-| `SUPABASE_CONFIG_ENABLED` | Persistence/config enabled | Must be exactly `true` |
+| `PERSISTENCE_PROVIDER` | Persistence enabled | `postgres` for Replit/direct PostgreSQL, `supabase` for Supabase, or `none`; explicit selection is recommended |
+| `DATABASE_URL` | PostgreSQL selected | PostgreSQL connection string; supplied by Replit Database when attached |
+| `DATABASE_POOL_MAX` | Optional PostgreSQL tuning | Maximum pool size; default `10` |
+| `DATABASE_CONNECT_TIMEOUT_MS` | Optional PostgreSQL tuning | Connection timeout; default `5000` ms |
+| `SUPABASE_CONFIG_ENABLED` | Legacy Supabase selection | Set exactly `true` only for backward-compatible Supabase selection; prefer `PERSISTENCE_PROVIDER=supabase` |
 | `SUPABASE_URL` | Supabase enabled | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase enabled | Service role; required because tables use RLS |
 | `TWILIO_ACCOUNT_SID` | Twilio delivery/signing | Twilio account SID |
@@ -383,7 +406,7 @@ The original provider tables remain because they contain channel-specific detail
 - `do_not_contact` blocks outbound delivery; an override requires `override_do_not_contact: true` and a non-empty `override_reason`.
 - Recording-provider credentials are selected from fixed server-side configuration, not request-supplied environment-variable names.
 - External recording URLs and event destinations reject private, loopback, link-local, carrier NAT, multicast, reserved, and cloud-metadata addresses.
-- Supabase service-role credentials belong in deployment secrets, never source control.
+- Database URLs and Supabase service-role credentials belong in deployment secrets, never source control.
 - `purpose.token`, when supplied, is persisted and included in event payloads. Treat it as a secret-bearing capability and scope/rotate it accordingly.
 
 ## Operational limitations
@@ -394,7 +417,7 @@ The original provider tables remain because they contain channel-specific detail
 - Config CRUD for legacy contact and phone-line settings is not implemented; `/api` provides read/audit endpoints.
 - Outbound SMS/calls require `Idempotency-Key`. Reusing a key with a different request, or retrying an operation whose provider outcome is uncertain, returns `409` instead of risking a second billable send.
 - Event delivery is at least once and rows are leased across service instances. Consumers must still deduplicate `event_id`.
-- Applying migration files is an operational step; committed SQL does not prove the live Supabase schema has been updated.
+- Applying migration files is an operational step; committed SQL does not prove a live Supabase or Replit PostgreSQL schema has been updated.
 - Full integration tests require a running server and real provider credentials. Unit tests do not place calls or send SMS.
 
 ## Testing
@@ -441,7 +464,9 @@ The purpose/thread suite verifies:
 | `memory.js` | Thread-aware search, loose ends, and person/project/event memory views |
 | `enrichment.js` | Durable structured summary/state/fact/commitment worker |
 | `plaud.js` | Plaud adapter contract and recording normalization |
-| `migrations/` | Supabase schema and verification scripts |
+| `database.js` | Supabase/direct PostgreSQL provider selection and compatibility adapter |
+| `migrations/` | Provider-neutral PostgreSQL schema and verification scripts |
+| `scripts/migrate.js` | Ordered, checksummed direct-PostgreSQL migration runner |
 | `docs/API_REFERENCE.md` | Endpoint-by-endpoint API contract |
 
 ## License

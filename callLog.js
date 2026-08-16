@@ -5,25 +5,14 @@
 // call must never delay or fail the call itself. Callers should not await these
 // on the request path.
 
-import { createClient } from '@supabase/supabase-js';
 import { normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
 import { callbackForThread, enqueueEvent } from './eventOutbox.js';
+import { getDatabase } from './database.js';
 
 const WRITE_TIMEOUT_MS = 2500;
 
-let client; // undefined = not yet initialised, null = disabled
-
-// Built on first use, not at import time — index.js runs dotenv.config() after
-// module evaluation, so reading credentials at module scope sees nothing.
 function getClient() {
-    if (client !== undefined) return client;
-
-    const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_CONFIG_ENABLED } = process.env;
-    client = SUPABASE_CONFIG_ENABLED === 'true' && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-        ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-        : null;
-
-    return client;
+    return getDatabase();
 }
 
 async function withTimeout(query, label) {

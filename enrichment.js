@@ -1,4 +1,4 @@
-import { getSupabase } from './configResolver.js';
+import { getDatabase } from './database.js';
 
 const SWEEP_INTERVAL_MS = 15000;
 const MAX_ATTEMPTS = 5;
@@ -252,7 +252,7 @@ async function processJob(db, job) {
 }
 
 export function sweepEnrichmentOnce() {
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) return Promise.resolve();
     if (running) return running;
     running = (async () => {
@@ -269,7 +269,7 @@ export function sweepEnrichmentOnce() {
 }
 
 export function startEnrichmentSweeper() {
-    if (timer || !getSupabase()) return;
+    if (timer || !getDatabase()) return;
     timer = setInterval(sweepEnrichmentOnce, SWEEP_INTERVAL_MS);
     timer.unref?.();
     sweepEnrichmentOnce();

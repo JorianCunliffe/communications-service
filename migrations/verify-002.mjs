@@ -10,11 +10,11 @@
 // Read-only. Nothing here writes.
 
 import 'dotenv/config';
-import { getSupabase } from '../configResolver.js';
+import { getDatabase } from '../database.js';
 
-const db = getSupabase();
+const db = getDatabase();
 if (!db) {
-    console.error('Supabase is not configured — set SUPABASE_CONFIG_ENABLED, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
+    console.error('Persistence is not configured — select Supabase or PostgreSQL and set its credentials.');
     process.exit(1);
 }
 

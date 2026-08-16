@@ -220,7 +220,7 @@
       // only thing that actually changes when a deploy lands.
       if (h.build) chip('build ' + h.build, null);
       chip('model ' + h.model, null);
-      chip(h.supabaseConfig ? 'config on' : 'config off', h.supabaseConfig);
+      chip(h.persistenceProvider ? `${h.persistenceProvider} persistence` : 'persistence off', Boolean(h.persistenceProvider));
       chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
     })
     .catch(() => {

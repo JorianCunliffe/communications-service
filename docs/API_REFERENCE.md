@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Updated: 12 August 2026
+Updated: 16 August 2026
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -28,10 +28,21 @@ The legacy `POST /sms` and `POST /outbound-call` routes use the same header.
 |---|---:|---|
 | `API_KEY` is not configured | `503` | `{ "error": "<feature> is not configured" }` |
 | Header is missing or wrong | `401` | `{ "error": "Invalid or missing X-API-Key" }` |
-| `/v1` needs Supabase but it is disabled | `503` | `{ "error": "Communications persistence is not configured" }` |
-| `/api` needs Supabase but it is disabled | `503` | Error plus required Supabase configuration detail |
+| `/v1` needs persistence but it is disabled | `503` | `{ "error": "Communications persistence is not configured" }` |
+| `/api` needs persistence but it is disabled | `503` | Error plus required provider configuration detail |
 
-`GET /api/tools`, `GET /api/tools/names`, and `GET /api/tools/:name` still require the API key even though they do not require Supabase.
+`GET /api/tools`, `GET /api/tools/names`, and `GET /api/tools/:name` still require the API key even though they do not require database persistence.
+
+### Persistence provider
+
+All persistent APIs support either Supabase or direct PostgreSQL. Replit Database uses the direct PostgreSQL path:
+
+```dotenv
+PERSISTENCE_PROVIDER=postgres
+DATABASE_URL=postgresql://...
+```
+
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. New PostgreSQL databases require migrations `000` through `007`; `npm run db:migrate` applies them in order using `DATABASE_URL`.
 
 ### Twilio webhooks
 
@@ -142,7 +153,7 @@ Outbound SMS/calls additionally accept `override_do_not_contact: true` only with
 
 ## Canonical `/v1` API
 
-All endpoints in this section require the API key and configured Supabase persistence.
+All endpoints in this section require the API key and configured database persistence.
 
 ### List communications
 
@@ -250,7 +261,7 @@ Required body:
 
 Requirements:
 
-- Supabase communications persistence
+- configured Supabase or PostgreSQL communications persistence
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `PUBLIC_URL` is optional for sending, but required to attach `/message-status`
@@ -296,7 +307,7 @@ Optional `overrides` is shallow-merged over resolved call configuration. Allowed
 
 Requirements:
 
-- Supabase communications persistence
+- configured Supabase or PostgreSQL communications persistence
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `PUBLIC_URL`
@@ -776,7 +787,7 @@ Idempotency-Key: stable-operation-id
 }
 ```
 
-The legacy route requires Supabase persistence and allow-lists override keys. Response:
+The legacy route requires configured database persistence and allow-lists override keys. Response:
 
 ```json
 { "callSid": "CA…", "communication_id": "comm_…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
@@ -798,7 +809,7 @@ Idempotency-Key: stable-operation-id
 }
 ```
 
-This route also requires Supabase persistence. Response:
+This route also requires configured database persistence. Response:
 
 ```json
 { "messageSid": "SM…", "communication_id": "comm_…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
@@ -866,7 +877,9 @@ Example:
   "build": "12-character-source-fingerprint",
   "model": "gpt-realtime",
   "playIntro": false,
-  "supabaseConfig": true,
+  "persistenceProvider": "postgres",
+  "supabaseConfig": false,
+  "postgresPersistence": true,
   "outboundCalls": true,
   "communicationsApi": true,
   "memoryEnrichment": true,
@@ -876,19 +889,19 @@ Example:
 }
 ```
 
-`outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `communicationsApi` reflects API key plus requested Supabase configuration, not a live database query. `memoryEnrichment` reflects requested Supabase configuration plus the OpenAI key; it does not prove migrations are applied. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; a deployment using only per-thread callbacks may report `false` while signed callback delivery still works.
+`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` does not prove migrations are applied. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; a deployment using only per-thread callbacks may report `false` while signed callback delivery still works.
 
 ## Management and recording API (`/api`)
 
-All routes require `X-API-Key`. Unless noted, they require Supabase. List endpoints use `limit` (default 50, maximum 200) and `offset`.
+All routes require `X-API-Key`. Unless noted, they require configured database persistence. List endpoints use `limit` (default 50, maximum 200) and `offset`.
 
 ### Tools
 
 | Method | Route | Result |
 |---|---|---|
-| `GET` | `/api/tools` | Tool registry plus availability; no Supabase required |
-| `GET` | `/api/tools/names` | Registered tool names; no Supabase required |
-| `GET` | `/api/tools/:name` | One tool or `404` with valid names; no Supabase required |
+| `GET` | `/api/tools` | Tool registry plus availability; no database required |
+| `GET` | `/api/tools/names` | Registered tool names; no database required |
+| `GET` | `/api/tools/:name` | One tool or `404` with valid names; no database required |
 
 ### Contacts and history
 

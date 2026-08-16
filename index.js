@@ -8,7 +8,8 @@ import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
-import { assertContactable, resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact, getSupabase } from './configResolver.js';
+import { assertContactable, resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
+import { databaseProvider, getDatabase } from './database.js';
 import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
 import { recordMessage } from './smsLog.js';
@@ -68,7 +69,7 @@ const VERSION = (() => {
 // does. Files are hashed by name as well as content so a rename still moves it.
 const BUILD = (() => {
     const SOURCES = [
-        'index.js', 'config.js', 'configResolver.js', 'callLog.js', 'smsLog.js',
+        'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
@@ -146,17 +147,21 @@ fastify.get('/console', async (request, reply) => {
 
 // Health check: reports which optional features are wired up.
 fastify.get('/health', async (request, reply) => {
+    const persistenceProvider = databaseProvider();
     reply.send({
         status: 'ok',
         version: VERSION,
         build: BUILD,
         model: DEFAULT_CONFIG.model,
         playIntro: DEFAULT_CONFIG.playIntro,
-        supabaseConfig: process.env.SUPABASE_CONFIG_ENABLED === 'true',
+        persistenceProvider,
+        // Retained for clients that used the original health response.
+        supabaseConfig: persistenceProvider === 'supabase',
+        postgresPersistence: persistenceProvider === 'postgres',
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
-        communicationsApi: Boolean(process.env.API_KEY && process.env.SUPABASE_CONFIG_ENABLED === 'true'),
-        memoryEnrichment: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.OPENAI_API_KEY),
-        durableEvents: Boolean(process.env.SUPABASE_CONFIG_ENABLED === 'true' && process.env.HYPERFLOW_EVENT_URL && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
+        communicationsApi: Boolean(process.env.API_KEY && persistenceProvider),
+        memoryEnrichment: Boolean(persistenceProvider && process.env.OPENAI_API_KEY),
+        durableEvents: Boolean(persistenceProvider && process.env.HYPERFLOW_EVENT_URL && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
         twilioSignatures: signatureMode(),
@@ -306,7 +311,7 @@ fastify.post('/outbound-call', async (request, reply) => {
     // settings and name come from the number we are calling.
     const resolved = await resolveConfig({ from, to, direction: 'outbound' });
     const config = { ...resolved, ...(overrides || {}) };
-    const operationDb = getSupabase();
+    const operationDb = getDatabase();
     if (!operationDb) return reply.code(503).send({ error: 'Outbound persistence is not configured' });
     let communicationId = prefixedId('comm');
 
@@ -375,7 +380,7 @@ fastify.post('/sms', async (request, reply) => {
     if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 number you own on Twilio' });
     if (typeof body !== 'string' || body.trim() === '') return reply.code(400).send({ error: '"body" must be a non-empty message' });
     if (body.length > 1600) return reply.code(400).send({ error: '"body" must be 1600 characters or fewer' });
-    const operationDb = getSupabase();
+    const operationDb = getDatabase();
     if (!operationDb) return reply.code(503).send({ error: 'Outbound persistence is not configured' });
     let communicationId = prefixedId('comm');
 
@@ -475,7 +480,7 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
 // communications. The universal ID stays stable while provider state changes.
 fastify.all('/message-status', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
-    const db = getSupabase();
+    const db = getDatabase();
     if (db && params.MessageSid) {
         const { data: message, error } = await db.from('sms_messages')
             .update({ status: params.MessageStatus || params.SmsStatus || null })
@@ -581,7 +586,7 @@ fastify.all('/recording-status', twilioWebhook, async (request, reply) => {
 
     if (!recordingSid) return;
 
-    const db = getSupabase();
+    const db = getDatabase();
     if (!db) return;
 
     // 'absent' means Twilio produced no recording — silence, or a call that

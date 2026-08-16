@@ -1,5 +1,5 @@
 // The management API — everything the system needs to be driven over HTTP
-// instead of by editing rows in Supabase by hand.
+// instead of by editing database rows by hand.
 //
 // Read, audit, and controlled recording-ingest paths. Writes are explicit and
 // protected by the same shared API key as provider actions.
@@ -10,7 +10,7 @@
 //   absent key disables rather than opens. This reads the whole contact
 //   database, so it is not a lighter class of endpoint than placing a call.
 //
-//   Supabase being unavailable is a 503, never a fallback. The call path is the
+//   persistence being unavailable is a 503, never a fallback. The call path is the
 //   opposite on purpose: there, answering with default config beats not
 //   answering. Here, showing an operator defaults dressed up as their settings
 //   would be worse than an error, because they would act on it.
@@ -21,7 +21,8 @@
 //   never creates a contact.
 
 import { DEFAULT_CONFIG } from './config.js';
-import { getSupabase, resolveConfig, rowToConfig } from './configResolver.js';
+import { resolveConfig, rowToConfig } from './configResolver.js';
+import { getDatabase } from './database.js';
 import { listTools, toolNames, isKnownTool } from './tools.js';
 import { E164, rejectUnauthorized } from './auth.js';
 import { enqueueRecording, sweepOnce } from './recordings.js';
@@ -69,7 +70,7 @@ function sanitiseSearch(raw) {
     return String(raw ?? '').replace(/[,()*%\\:."']/g, '').trim();
 }
 
-// Turns a Supabase error into a response. Kept in one place so every route
+// Turns a database error into a response. Kept in one place so every route
 // reports the database's own message rather than a generic failure — the
 // operator reading this is the person who can fix a bad column or a broken
 // policy, and hiding the reason from them helps nobody.
@@ -130,20 +131,20 @@ export default async function apiRoutes(fastify) {
     // Resolves the client once per request. Returns null having already replied,
     // so routes read `if (!db) return reply;`.
     const client = (reply) => {
-        const supabase = getSupabase();
-        if (!supabase) {
+        const database = getDatabase();
+        if (!database) {
             reply.code(503).send({
-                error: 'Supabase is not configured',
-                detail: 'Set SUPABASE_CONFIG_ENABLED=true, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY',
+                error: 'Communications persistence is not configured',
+                detail: 'Set PERSISTENCE_PROVIDER and its required database credentials',
             });
             return null;
         }
-        return supabase;
+        return database;
     };
 
     // --- Tools ------------------------------------------------------------
     // The registry, not the database: this is what tools.js defines and whether
-    // the environment can actually run each one. Needs no Supabase.
+    // the environment can actually run each one. Needs no database.
     fastify.get('/tools', async () => ({ data: listTools() }));
 
     // --- Contacts ---------------------------------------------------------

@@ -1,16 +1,16 @@
 // Resolves the per-call config and hands it from the TwiML webhook to the
 // media-stream WebSocket, keyed by Twilio CallSid.
 //
-// Config lives in Supabase (public.phone_configs), one row per phone number in
+// Config lives in the selected database (public.phone_configs), one row per phone number in
 // E.164. A row may describe an inbound caller (a personal override) or one of
 // our Twilio lines (the default for anyone dialling it), so lookups try the
 // caller first and fall back to the line, then to DEFAULT_CONFIG.
 //
-// Answering a call must never depend on Supabase being reachable: every failure
+// Answering a call must never depend on persistence being reachable: every failure
 // path here returns DEFAULT_CONFIG.
 
-import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_CONFIG, personaliseConfig } from './config.js';
+import { databaseProvider, getDatabase } from './database.js';
 
 const LOOKUP_TIMEOUT_MS = 2500;
 const WARM_UP_TIMEOUT_MS = 10000;
@@ -19,33 +19,8 @@ const ROW_CACHE_TTL_MS = 60 * 1000;
 // Read env on first use, not at import time: ES module imports are evaluated
 // before index.js calls dotenv.config(), so reading it here at module scope
 // would silently see no credentials and disable config for every call.
-let supabase; // undefined = not yet initialised, null = disabled
-
 function getClient() {
-    if (supabase !== undefined) return supabase;
-
-    const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_CONFIG_ENABLED } = process.env;
-    const requested = SUPABASE_CONFIG_ENABLED === 'true';
-    const credentialed = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
-
-    if (requested && !credentialed) {
-        console.warn('SUPABASE_CONFIG_ENABLED is true but SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are missing — using default config for every call.');
-    }
-
-    supabase = requested && credentialed
-        ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-        : null;
-
-    console.log(`Supabase call config ${supabase ? 'enabled' : 'disabled'}`);
-    return supabase;
-}
-
-// The configured client, for read paths outside the call flow — the management
-// API reads the same rows this resolver does, and building a second client for
-// them would mean a second set of credentials to get wrong. Null when Supabase
-// is disabled: callers must handle that rather than assume a client.
-export function getSupabase() {
-    return getClient();
+    return getDatabase();
 }
 
 // Maps a settings row onto DEFAULT_CONFIG. Works for contact_config and
@@ -131,7 +106,7 @@ async function fetchRows(client, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
 
     let timer;
     const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Supabase lookup timed out after ${timeoutMs}ms`)), timeoutMs);
+        timer = setTimeout(() => reject(new Error(`Database lookup timed out after ${timeoutMs}ms`)), timeoutMs);
     });
 
     try {
@@ -231,9 +206,9 @@ export async function warmUp() {
         // A number that will never match: we want the round trip, not the row.
         await fetchRows(client, ['+00000000000'], WARM_UP_TIMEOUT_MS);
         rowCache.delete('+00000000000');
-        console.log(`Supabase config warmed up in ${Date.now() - started}ms`);
+        console.log(`${databaseProvider() || 'Database'} config warmed up in ${Date.now() - started}ms`);
     } catch (error) {
-        console.warn(`Supabase config warm-up failed after ${Date.now() - started}ms (${error.message}) — the first call may fall back to defaults`);
+        console.warn(`Database config warm-up failed after ${Date.now() - started}ms (${error.message}) — the first call may fall back to defaults`);
     }
 }
 

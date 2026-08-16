@@ -29,7 +29,7 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
     });
 
     test('the README documents the core runtime configuration', () => {
-        for (const name of ['API_KEY', 'OPENAI_API_KEY', 'PUBLIC_URL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY']) {
+        for (const name of ['API_KEY', 'OPENAI_API_KEY', 'PUBLIC_URL', 'PERSISTENCE_PROVIDER', 'DATABASE_URL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY']) {
             assert.ok(readme.includes(name), `README is missing ${name}`);
         }
     });
