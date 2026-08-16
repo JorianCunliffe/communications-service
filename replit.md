@@ -52,8 +52,8 @@ npm run db:migrate
 
 ## Twilio webhook URLs (set in Twilio console)
 
-- Voice: `POST https://<PUBLIC_URL>/incoming-call`
-- SMS: `POST https://<PUBLIC_URL>/sms`
-- Call status: `POST https://<PUBLIC_URL>/call-status`
+- Voice: `POST https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb-lguwe7ry.worf.replit.dev/incoming-call`
+- Inbound SMS: `POST https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb-lguwe7ry.worf.replit.dev/incoming-sms`
+- Call status: `POST https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb-lguwe7ry.worf.replit.dev/call-status`
 
 ## User preferences
