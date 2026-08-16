@@ -1,0 +1,1 @@
+- [Twilio PUBLIC_URL coupling](twilio-public-url.md) — "application error" with clean logs usually means PUBLIC_URL doesn't match the live domain; .replit userenv wins over shared env vars.

@@ -11,7 +11,7 @@ expertMode = true
 [userenv.shared]
 PORT = "3000"
 PERSISTENCE_PROVIDER = "postgres"
-PUBLIC_URL = "https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb-lguwe7ry.worf.replit.dev"
+PUBLIC_URL = "https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb.worf.replit.dev"
 TWILIO_VALIDATE_SIGNATURES = "warn"
 
 [workflows]
