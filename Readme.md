@@ -251,7 +251,7 @@ curl -X POST https://communications.example.com/v1/messages \
       "task_id": "task_12",
       "hold_id": "hold_5"
     },
-    "callback_url": "https://hyperflow.example.com/api/communications/events"
+    "callback_url": "https://hyperflow.example.com/api/events"
   }'
 ```
 
@@ -313,7 +313,7 @@ thread_id | calendar_event_id | person_id
 Set a deployment-wide destination, pass a per-thread HTTPS callback URL, or both:
 
 ```dotenv
-HYPERFLOW_EVENT_URL=https://hyperflow.example.com/api/communications/events
+HYPERFLOW_EVENT_URL=https://hyperflow.example.com/api/events
 COMMUNICATIONS_WEBHOOK_SECRET=replace-with-a-shared-secret
 ```
 
