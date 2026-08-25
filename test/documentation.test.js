@@ -33,4 +33,10 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
             assert.ok(readme.includes(name), `README is missing ${name}`);
         }
     });
+
+    test('the test console supplies an idempotency key for outbound actions', () => {
+        const consolePage = read('../console.html');
+        assert.match(consolePage, /['"]Idempotency-Key['"]\s*:/);
+        assert.match(consolePage, /crypto\.randomUUID\(\)/);
+    });
 });

@@ -19,7 +19,7 @@ import apiRoutes from './api.js';
 import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory, noteParty, partyFor } from './realtimeSessions.js';
 import { enqueueRecording, startRecordingSweeper } from './recordings.js';
 import { summariseCall } from './summarise.js';
-import v1Routes from './v1.js';
+import v1Routes, { outboundError } from './v1.js';
 import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbox.js';
 import { startEnrichmentSweeper } from './enrichment.js';
 import { prefixedId } from './communicationModel.js';
@@ -355,8 +355,8 @@ fastify.post('/outbound-call', async (request, reply) => {
         if (error.code === 'IDEMPOTENCY_REQUIRED') return reply.code(400).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_CONFLICT') return reply.code(409).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return reply.code(409).send({ error: error.message });
-        console.error('Failed to place outbound call:', error.message);
-        return reply.code(502).send({ error: 'Failed to place call', detail: error.message });
+        const failure = outboundError('Failed to place call', error);
+        return reply.code(502).send({ error: 'Failed to place call', detail: failure.message, provider_error: failure.providerError });
     }
 });
 
@@ -419,8 +419,8 @@ fastify.post('/sms', async (request, reply) => {
         if (error.code === 'IDEMPOTENCY_REQUIRED') return reply.code(400).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_CONFLICT') return reply.code(409).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return reply.code(409).send({ error: error.message });
-        console.error('Failed to send SMS:', error.message);
-        return reply.code(502).send({ error: 'Failed to send message', detail: error.message });
+        const failure = outboundError('Failed to send message', error);
+        return reply.code(502).send({ error: 'Failed to send message', detail: failure.message, provider_error: failure.providerError });
     }
 });
 

@@ -24,7 +24,24 @@ function database(reply) {
 }
 
 function errorReply(reply, error, status = 400) {
-    return reply.code(status).send({ error: error.message });
+    const payload = { error: error.message };
+    if (error.providerError) payload.provider_error = error.providerError;
+    return reply.code(status).send(payload);
+}
+
+function outboundError(action, error) {
+    const code = /^\d+$/.test(String(error?.code ?? '')) ? Number(error.code) : null;
+    const providerError = {
+        provider: 'twilio',
+        code,
+        status: Number.isInteger(error?.status) ? error.status : null,
+        more_info: typeof error?.moreInfo === 'string' ? error.moreInfo : null,
+    };
+    const suffix = code ? ` (Twilio ${code})` : '';
+    const wrapped = new Error(`${action}: ${error?.message || 'Unknown outbound provider error'}${suffix}`);
+    wrapped.providerError = providerError;
+    console.error(wrapped.message, providerError);
+    return wrapped;
 }
 
 function toCanonical(row) {
@@ -277,7 +294,7 @@ export default async function v1Routes(fastify) {
             if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
             if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
             if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return errorReply(reply, error, 409);
-            return errorReply(reply, new Error(`Failed to send message: ${error.message}`), 502);
+            return errorReply(reply, outboundError('Failed to send message', error), 502);
         }
     });
 
@@ -360,7 +377,7 @@ export default async function v1Routes(fastify) {
             if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
             if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
             if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return errorReply(reply, error, 409);
-            return errorReply(reply, new Error(`Failed to place call: ${error.message}`), 502);
+            return errorReply(reply, outboundError('Failed to place call', error), 502);
         }
     });
 
@@ -583,4 +600,4 @@ export default async function v1Routes(fastify) {
     });
 }
 
-export { CHANNELS, DIRECTIONS, TERMINAL_CALL_STATUSES, toCanonical, parseSemantic };
+export { CHANNELS, DIRECTIONS, TERMINAL_CALL_STATUSES, toCanonical, parseSemantic, outboundError };

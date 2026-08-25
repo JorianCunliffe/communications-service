@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import Fastify from 'fastify';
-import v1Routes, { parseSemantic } from '../v1.js';
+import v1Routes, { outboundError, parseSemantic } from '../v1.js';
 import {
     canonicalCommunication,
     normaliseCorrelation,
@@ -67,6 +67,25 @@ class FakeDb {
     }
     from(table) { return new FakeQuery(this, table); }
 }
+
+describe('outbound provider diagnostics', () => {
+    test('retains the Twilio error code without exposing credentials', () => {
+        const source = new Error('Policy evaluation failed');
+        source.code = 60250;
+        source.status = 400;
+        source.moreInfo = 'https://www.twilio.com/docs/api/errors/60250';
+
+        const result = outboundError('Failed to send message', source);
+
+        assert.equal(result.message, 'Failed to send message: Policy evaluation failed (Twilio 60250)');
+        assert.deepEqual(result.providerError, {
+            provider: 'twilio',
+            code: 60250,
+            status: 400,
+            more_info: 'https://www.twilio.com/docs/api/errors/60250',
+        });
+    });
+});
 
 describe('first-class communication purpose', () => {
     test('human_ask requires and preserves a real ask_id', () => {

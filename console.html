@@ -160,7 +160,14 @@
     try {
       const res = await fetch(path, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': key,
+          // Each button click is a new user-authorised outbound operation.
+          // A retry performed by fetch or an intermediary retains this value,
+          // while a later deliberate click receives a fresh key.
+          'Idempotency-Key': `console-${path.replace(/\W+/g, '-')}-${crypto.randomUUID()}`,
+        },
         body: JSON.stringify(payload),
       });
 
