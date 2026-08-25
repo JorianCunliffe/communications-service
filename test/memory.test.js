@@ -116,6 +116,8 @@ describe('commitment extraction', () => {
         const [commitment] = extractExplicitCommitments("I'll send the valuation Monday.", '2026-08-07T00:00:00Z');
         assert.match(commitment.description, /send the valuation/);
         assert.equal(commitment.due_at, '2026-08-10T07:00:00.000Z');
+        assert.equal(extractExplicitCommitments('We will confirm tomorrow.').length, 1);
+        assert.equal(extractExplicitCommitments('We’ll confirm tomorrow.').length, 1);
     });
 
     test('does not manufacture a commitment from an ordinary statement', () => {
@@ -130,6 +132,22 @@ describe('commitment extraction', () => {
             direction: 'outbound', body_them: 'I need SMS for the next test.',
             body: 'assistant: Please tell me which you prefer.\nuser: I need SMS for the next test.',
         }), 'I need SMS for the next test.');
+    });
+
+    test('does not store a counterparty question as a commitment', async () => {
+        const question = "Yeah, well, what's your question?";
+        const communication = {
+            communication_id: 'comm_question', direction: 'outbound', channel: 'voice', person_id: 'p1',
+            occurred_at: '2026-08-26T07:16:16Z', thread_id: 'thread_1',
+            body: `user: ${question}`, body_them: question,
+        };
+        const db = new FakeDb({ communication_commitments: [] });
+        assert.deepEqual(extractExplicitCommitments(question), []);
+        await storeCommitments(db, communication, { commitments: [{
+            description: question, due_at: null, confidence: 0.72,
+            source_excerpt: question, source_communication_ids: ['comm_question'],
+        }] }, new Set(['comm_question']), new Map([['comm_question', communication]]));
+        assert.deepEqual(db.tables.communication_commitments, []);
     });
 
     test('rejects model commitments attributed to assistant speech or user preferences', async () => {

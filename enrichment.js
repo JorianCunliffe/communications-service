@@ -55,21 +55,20 @@ export function parseObviousDueDate(text, occurredAt = new Date().toISOString())
     return weekday ? nextWeekday(weekday[1], base, timeZone) : null;
 }
 
+const PROMISE_SIGNAL = /\b(?:i(?:['\u2019]ll| will)|we(?:['\u2019]ll| will))\b/i;
+
 export function extractExplicitCommitments(text, occurredAt = new Date().toISOString()) {
     const sentences = String(text || '').split(/(?<=[.!?])\s+|\n+/).map((item) => item.trim()).filter(Boolean);
     // A request is not a commitment until somebody explicitly accepts it.
     // Keeping this fallback to first-person promises prevents questions such
     // as "Can you say goodnight?" becoming open work items.
-    const signal = /\b(i['’]?ll|i will|we['’]?ll|we will)\b/i;
-    return sentences.filter((sentence) => signal.test(sentence)).map((sentence) => ({
+    return sentences.filter((sentence) => PROMISE_SIGNAL.test(sentence)).map((sentence) => ({
         description: sentence.slice(0, 500),
         due_at: parseObviousDueDate(sentence, occurredAt),
         confidence: 0.72,
         source_excerpt: sentence.slice(0, 500),
     }));
 }
-
-const PROMISE_SIGNAL = /\b(i['’]?ll|i will|we['’]?ll|we will)\b/i;
 
 const normaliseEvidenceText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
