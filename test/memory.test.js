@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { calendarCandidates, ingestCalendarEvent, normaliseCalendarEvent } from '../calendar.js';
 import { normalisePlaudRecording, PlaudProvider } from '../plaud.js';
-import { extractExplicitCommitments, extractMemoryWithModel, parseObviousDueDate, storeCommitments, storeFactVersions } from '../enrichment.js';
+import { counterpartyContent, extractExplicitCommitments, extractMemoryWithModel, parseObviousDueDate, storeCommitments, storeFactVersions } from '../enrichment.js';
 import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, scoreCommunication, searchMemory } from '../memory.js';
 
 class Query {
@@ -123,6 +123,49 @@ describe('commitment extraction', () => {
         assert.equal(parseObviousDueDate('no date here'), null);
     });
 
+    test('does not turn requests or assistant questions into commitments', () => {
+        assert.deepEqual(extractExplicitCommitments('Can you say goodnight?'), []);
+        assert.deepEqual(extractExplicitCommitments('Please tell me which you prefer.'), []);
+        assert.equal(counterpartyContent({
+            direction: 'outbound', body_them: 'I need SMS for the next test.',
+            body: 'assistant: Please tell me which you prefer.\nuser: I need SMS for the next test.',
+        }), 'I need SMS for the next test.');
+    });
+
+    test('rejects model commitments attributed to assistant speech or user preferences', async () => {
+        const communication = {
+            communication_id: 'comm_call', direction: 'outbound', channel: 'voice', person_id: 'p1',
+            occurred_at: '2026-08-25T10:36:13Z', thread_id: 'thread_1',
+            body: 'assistant: Please tell me which you prefer.\nuser: I need SMS for the next test.',
+            body_them: 'I need SMS for the next test.',
+        };
+        const db = new FakeDb({ communication_commitments: [] });
+        await storeCommitments(db, communication, { commitments: [{
+            description: 'Use SMS for the next HyperFlow test', due_at: null, confidence: 0.96,
+            source_excerpt: 'I need SMS for the next test.', source_communication_ids: ['comm_call'],
+        }, {
+            description: 'Confirm the preference', due_at: null, confidence: 0.72,
+            source_excerpt: 'Please tell me which you prefer.', source_communication_ids: ['comm_call'],
+        }] }, new Set(['comm_call']), new Map([['comm_call', communication]]));
+        assert.deepEqual(db.tables.communication_commitments, []);
+    });
+
+    test('stores only a verified counterparty promise from an outbound call', async () => {
+        const communication = {
+            communication_id: 'comm_call', direction: 'outbound', channel: 'voice', person_id: 'p1',
+            occurred_at: '2026-08-25T10:36:13Z', thread_id: 'thread_1',
+            body: "assistant: Will you send it?\nuser: I'll send it Monday.", body_them: "I'll send it Monday.",
+        };
+        const db = new FakeDb({ communication_commitments: [] });
+        await storeCommitments(db, communication, { commitments: [{
+            description: 'Send it Monday', due_at: null, confidence: 0.95,
+            source_excerpt: "I'll send it Monday.", source_communication_ids: ['comm_call'],
+        }] }, new Set(['comm_call']), new Map([['comm_call', communication]]));
+        assert.equal(db.tables.communication_commitments.length, 1, 'the same quoted promise is stored once');
+        assert.ok(db.tables.communication_commitments.every((row) => row.promisor_contact_id === 'p1'));
+        assert.ok(db.tables.communication_commitments.every((row) => !/will you/i.test(row.description)));
+    });
+
     test('re-enrichment preserves a human-completed commitment', async () => {
         const description = "I'll send the valuation Monday.";
         const db = new FakeDb({ communication_commitments: [{ id: 'c1', communication_id: 'comm_1', description, status: 'completed' }] });
@@ -148,6 +191,7 @@ describe('structured asynchronous enrichment', () => {
             assert.equal(requestBody.text.format.type, 'json_schema');
             assert.equal(requestBody.text.format.strict, true);
             assert.match(requestBody.input[1].content, /comm_1/);
+            assert.match(requestBody.input[1].content, /counterparty_content/);
         } finally {
             if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous;
         }
