@@ -61,6 +61,14 @@ function signature(body) {
     return secret ? `sha256=${createHmac('sha256', secret).update(body).digest('hex')}` : null;
 }
 
+export function describeDeliveryError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const cause = error && typeof error === 'object' ? error.cause : null;
+    if (!cause || typeof cause !== 'object') return message;
+    const detail = [cause.code, cause.message].filter(Boolean).join(': ');
+    return detail ? `${message} (${detail})` : message;
+}
+
 export async function deliverPendingEvents() {
     const db = getDatabase();
     if (!db) return { attempted: 0, delivered: 0 };
@@ -101,7 +109,7 @@ export async function deliverPendingEvents() {
             await db.from('outbound_events').update({
                 status: exhausted ? 'failed' : 'retrying',
                 attempts,
-                last_error: String(eventError.message).slice(0, 500),
+                last_error: describeDeliveryError(eventError).slice(0, 500),
                 next_attempt_at: new Date(Date.now() + delayMs).toISOString(),
                 lease_token: null, lease_expires_at: null,
             }).eq('event_id', row.event_id).eq('lease_token', row.lease_token);

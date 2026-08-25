@@ -2,18 +2,29 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Agent } from 'undici';
 
+export function createSafeLookup(resolver = lookup) {
+    return function safeLookup(hostname, options, callback) {
+        const requested = typeof options === 'object' && options !== null
+            ? options
+            : { family: options };
+        const resolverOptions = { all: true };
+        if (requested.family === 4 || requested.family === 6) resolverOptions.family = requested.family;
+        if (requested.hints !== undefined) resolverOptions.hints = requested.hints;
+        if (requested.verbatim !== undefined && requested.verbatim !== null) resolverOptions.verbatim = requested.verbatim;
+
+        resolver(hostname, resolverOptions).then((entries) => {
+            if (!entries.length) throw new Error(`Could not resolve ${hostname}`);
+            for (const entry of entries) {
+                if (isForbiddenAddress(entry.address)) throw new Error(`${hostname} resolves to ${entry.address}, which is inside a private or reserved range`);
+            }
+            if (requested.all) callback(null, entries);
+            else callback(null, entries[0].address, entries[0].family);
+        }).catch((error) => callback(error));
+    };
+}
+
 const SAFE_DISPATCHER = new Agent({
-    connect: {
-        lookup(hostname, _options, callback) {
-            lookup(hostname, { all: true }).then((entries) => {
-                if (!entries.length) throw new Error(`Could not resolve ${hostname}`);
-                for (const entry of entries) {
-                    if (isForbiddenAddress(entry.address)) throw new Error(`${hostname} resolves to ${entry.address}, which is inside a private or reserved range`);
-                }
-                callback(null, entries[0].address, entries[0].family);
-            }).catch((error) => callback(error));
-        },
-    },
+    connect: { lookup: createSafeLookup() },
 });
 
 export function isForbiddenAddress(address) {
