@@ -171,7 +171,7 @@ async function fail(db, job, error) {
     }).eq('id', job.id).eq('lease_token', job.lease_token);
 }
 
-export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id]), evidenceById = new Map([[communication.communication_id, communication]])) {
+export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id]), evidenceById = new Map([[communication.communication_id, communication]]), reconcile = false) {
     const deterministic = extractExplicitCommitments(counterpartyContent(communication), communication.occurred_at);
     const modelItems = (extracted.commitments || []).flatMap((item) => {
         const sourceCommunicationId = (item.source_communication_ids || []).find((id) => validIds.has(id));
@@ -211,6 +211,20 @@ export async function storeCommitments(db, communication, extracted, validIds = 
                 : { error: null })
             : await db.from('communication_commitments').insert({ ...row, status: 'open' });
         if (write.error) throw new Error(`Commitment storage: ${write.error.message}`);
+    }
+    if (reconcile) {
+        const current = await db.from('communication_commitments').select('*')
+            .eq('communication_id', communication.communication_id).in('status', ['open', 'unknown']);
+        if (current.error) throw new Error(`Commitment reconciliation lookup: ${current.error.message}`);
+        const verified = new Set(items
+            .filter((item) => (item.source_communication_id || communication.communication_id) === communication.communication_id)
+            .map((item) => item.description.toLowerCase()));
+        for (const row of current.data || []) {
+            if (verified.has(String(row.description || '').toLowerCase())) continue;
+            const removed = await db.from('communication_commitments').delete()
+                .eq('id', row.id).eq('communication_id', communication.communication_id).in('status', ['open', 'unknown']);
+            if (removed.error) throw new Error(`Commitment reconciliation delete: ${removed.error.message}`);
+        }
     }
 }
 
@@ -274,7 +288,7 @@ async function processJob(db, job) {
     const sourceIds = [...new Set((extracted.source_communication_ids || []).filter((id) => validIds.has(id)))];
     if (!sourceIds.length) sourceIds.push(communication.data.communication_id);
 
-    await storeCommitments(db, communication.data, extracted, validIds, evidenceById);
+    await storeCommitments(db, communication.data, extracted, validIds, evidenceById, true);
     await storeFactVersions(db, communication.data, extracted.facts, validIds, evidenceById);
     if (communication.data.thread_id) {
         const update = await db.from('communication_threads').update({

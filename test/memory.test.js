@@ -150,6 +150,22 @@ describe('commitment extraction', () => {
         assert.deepEqual(db.tables.communication_commitments, []);
     });
 
+    test('final re-enrichment removes obsolete open commitments but preserves completed work', async () => {
+        const question = "Yeah, well, what's your question?";
+        const completed = "I'll send the valuation Monday.";
+        const communication = {
+            communication_id: 'comm_question', direction: 'outbound', channel: 'voice', person_id: 'p1',
+            occurred_at: '2026-08-26T07:16:16Z', thread_id: 'thread_1', body_them: question,
+        };
+        const db = new FakeDb({ communication_commitments: [
+            { id: 'bad', communication_id: 'comm_question', description: question, source_excerpt: question, status: 'open' },
+            { id: 'done', communication_id: 'comm_question', description: completed, source_excerpt: completed, status: 'completed' },
+        ] });
+        await storeCommitments(db, communication, { commitments: [] }, new Set(['comm_question']),
+            new Map([['comm_question', communication]]), true);
+        assert.deepEqual(db.tables.communication_commitments.map((row) => row.id), ['done']);
+    });
+
     test('rejects model commitments attributed to assistant speech or user preferences', async () => {
         const communication = {
             communication_id: 'comm_call', direction: 'outbound', channel: 'voice', person_id: 'p1',
