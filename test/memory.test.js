@@ -292,14 +292,25 @@ describe('loose ends', () => {
 describe('fact lifecycle', () => {
     test('a new value supersedes rather than deletes the old provenance', async () => {
         const db = new FakeDb({ communication_facts: [] });
-        const communication = { communication_id: 'comm_2', thread_id: 'thread_1', person_id: 'person_1', project_id: 'project_1' };
-        await storeFactVersions(db, communication, [{ fact_key: 'inspection_time', text: 'Inspection is at 10:30.', confidence: 0.9, source_communication_ids: ['comm_1'] }], new Set(['comm_1']));
-        await storeFactVersions(db, communication, [{ fact_key: 'inspection_time', text: 'Inspection moved to 11:30.', confidence: 0.95, source_communication_ids: ['comm_2'] }], new Set(['comm_2']));
+        const first = { communication_id: 'comm_1', thread_id: 'thread_1', person_id: 'person_1', project_id: 'project_1', direction: 'inbound', body_them: 'Inspection is at 10:30.' };
+        const second = { communication_id: 'comm_2', thread_id: 'thread_1', person_id: 'person_1', project_id: 'project_1', direction: 'inbound', body_them: 'Inspection moved to 11:30.' };
+        await storeFactVersions(db, second, [{ fact_key: 'inspection_time', text: 'Inspection is at 10:30.', confidence: 0.9, source_communication_ids: ['comm_1'] }], new Set(['comm_1']), new Map([['comm_1', first]]));
+        await storeFactVersions(db, second, [{ fact_key: 'inspection_time', text: 'Inspection moved to 11:30.', confidence: 0.95, source_communication_ids: ['comm_2'] }], new Set(['comm_2']), new Map([['comm_2', second]]));
         assert.equal(db.tables.communication_facts.length, 2);
         assert.equal(db.tables.communication_facts[0].status, 'superseded');
         assert.equal(db.tables.communication_facts[1].status, 'active');
         assert.deepEqual(db.tables.communication_facts[1].source_communication_ids, ['comm_2']);
         assert.equal(db.tables.communication_facts[0].superseded_by, db.tables.communication_facts[1].id);
+    });
+
+    test('rejects facts cited only to assistant or missing evidence', async () => {
+        const db = new FakeDb({ communication_facts: [] });
+        const assistantOnly = { communication_id: 'comm_1', direction: 'outbound', body: 'assistant: The meeting is Wednesday.' };
+        await storeFactVersions(db, assistantOnly, [{
+            fact_key: 'meeting_day', text: 'The meeting is Wednesday.', confidence: 0.9,
+            source_communication_ids: ['comm_1'],
+        }], new Set(['comm_1']), new Map([['comm_1', assistantOnly]]));
+        assert.deepEqual(db.tables.communication_facts, []);
     });
 });
 

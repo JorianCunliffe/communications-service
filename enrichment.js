@@ -218,9 +218,15 @@ export async function storeCommitments(db, communication, extracted, validIds = 
 export async function storeFactVersions(db, communication, facts, validIds, evidenceById = new Map([[communication.communication_id, communication]])) {
     for (const fact of facts || []) {
         if (!fact.fact_key || !fact.text) continue;
-        const sourceIds = [...new Set((fact.source_communication_ids || []).filter((id) => validIds.has(id)))];
-        if (!sourceIds.length) sourceIds.push(communication.communication_id);
-        const attributed = evidenceById.get(sourceIds[0]) || communication;
+        const sourceIds = [...new Set((fact.source_communication_ids || []).filter((id) => {
+            if (!validIds.has(id)) return false;
+            const source = evidenceById.get(id);
+            return Boolean(source && counterpartyContent(source));
+        }))];
+        // Facts need attributable counterparty evidence. Never fall back to the
+        // current communication when the model cited no usable source.
+        if (!sourceIds.length) continue;
+        const attributed = evidenceById.get(sourceIds[0]);
         let query = db.from('communication_facts').select('*').eq('fact_key', fact.fact_key).eq('status', 'active');
         if (attributed.thread_id) query = query.eq('thread_id', attributed.thread_id);
         else if (attributed.project_id) query = query.eq('project_id', attributed.project_id);
