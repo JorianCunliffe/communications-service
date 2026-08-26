@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "db:migrate": "node scripts/migrate.js",
+    "start:production": "node scripts/migrate.js && node index.js",
     "test": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/callOutcome.test.js test/memory.test.js test/security.test.js test/documentation.test.js test/suite.test.js",
     "test:unit": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/callOutcome.test.js test/memory.test.js test/security.test.js test/documentation.test.js"
   },

@@ -17,6 +17,13 @@ describe('call business outcomes', () => {
         assert.match(migration, /summary=null/);
     });
 
+    test('the outcome migration is portable to the deployed thread schema', () => {
+        const migration = readFileSync(new URL('../migrations/008_call_outcomes.sql', import.meta.url), 'utf8');
+        assert.doesNotMatch(migration, /unnest\([^\n]+\)\s+source_id/);
+        assert.doesNotMatch(migration, /outstanding_source_ids='\{\}',updated_at=now\(\)/);
+        assert.match(migration, /as sources\(source_communication_id\)/);
+    });
+
     test('provider failures are terminal failures without consulting a transcript', () => {
         for (const [providerStatus, disposition] of [
             ['busy', 'busy'], ['no-answer', 'no_answer'], ['failed', 'provider_failed'], ['canceled', 'canceled'],

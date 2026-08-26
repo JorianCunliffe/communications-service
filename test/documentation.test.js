@@ -39,4 +39,11 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
         assert.match(consolePage, /['"]Idempotency-Key['"]\s*:/);
         assert.match(consolePage, /crypto\.randomUUID\(\)/);
     });
+
+    test('the production deployment applies migrations before starting the API', () => {
+        const packageJson = JSON.parse(read('../package.json'));
+        const replit = read('../.replit');
+        assert.equal(packageJson.scripts['start:production'], 'node scripts/migrate.js && node index.js');
+        assert.match(replit, /run = \["npm", "run", "start:production"\]/);
+    });
 });

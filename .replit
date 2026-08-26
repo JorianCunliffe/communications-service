@@ -18,6 +18,8 @@ PUBLIC_URL = "https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb.worf.
 
 [userenv.production]
 PUBLIC_URL = "https://communications-service.replit.app"
+TWILIO_MACHINE_DETECTION = "Enable"
+TWILIO_MACHINE_DETECTION_TIMEOUT = "30"
 
 [workflows]
 runButton = "Project"
@@ -53,7 +55,7 @@ externalPort = 3000
 
 [deployment]
 deploymentTarget = "vm"
-run = ["node", "index.js"]
+run = ["npm", "run", "start:production"]
 
 [postMerge]
 path = "scripts/post-merge.sh"

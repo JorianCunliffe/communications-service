@@ -226,34 +226,36 @@ from public.communications c where c.communication_id=k.communication_id and c.m
 
 update public.communication_facts f set status='retracted',updated_at=now()
 where f.status='active' and not exists (
-  select 1 from unnest(f.source_communication_ids) source_id
-  join public.communications c on c.communication_id=source_id
+  select 1 from unnest(f.source_communication_ids) as sources(source_communication_id)
+  join public.communications c on c.communication_id=sources.source_communication_id
   where c.memory_eligible is true
 );
 
 update public.communication_facts f set
   source_communication_ids=array(
-    select source_id from unnest(f.source_communication_ids) source_id
-    join public.communications c on c.communication_id=source_id
+    select sources.source_communication_id
+    from unnest(f.source_communication_ids) as sources(source_communication_id)
+    join public.communications c on c.communication_id=sources.source_communication_id
     where c.memory_eligible is true
   ),updated_at=now()
 where exists (
-  select 1 from unnest(f.source_communication_ids) source_id
-  join public.communications c on c.communication_id=source_id
+  select 1 from unnest(f.source_communication_ids) as sources(source_communication_id)
+  join public.communications c on c.communication_id=sources.source_communication_id
   where c.memory_eligible is not true
 ) and exists (
-  select 1 from unnest(f.source_communication_ids) source_id
-  join public.communications c on c.communication_id=source_id
+  select 1 from unnest(f.source_communication_ids) as sources(source_communication_id)
+  join public.communications c on c.communication_id=sources.source_communication_id
   where c.memory_eligible is true
 );
 
 update public.communication_threads t set
   summary=null,summary_updated_at=null,summary_source_ids='{}',
   current_state=null,current_state_updated_at=null,current_state_source_ids='{}',
-  outstanding_dependency=null,outstanding_source_ids='{}',updated_at=now()
+  outstanding_dependency=null,outstanding_source_ids='{}'
 where exists (
-  select 1 from unnest(t.summary_source_ids || t.current_state_source_ids || t.outstanding_source_ids) source_id
-  join public.communications c on c.communication_id=source_id
+  select 1
+  from unnest(t.summary_source_ids || t.current_state_source_ids || t.outstanding_source_ids) as sources(source_communication_id)
+  join public.communications c on c.communication_id=sources.source_communication_id
   where c.memory_eligible is not true
 );
 
