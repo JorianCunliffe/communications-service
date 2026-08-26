@@ -15,6 +15,7 @@ export async function enqueueEvent({
     correlation = {},
     payload = {},
     destination = null,
+    dedupeKey = null,
 }) {
     const db = getDatabase();
     const target = destination || process.env.HYPERFLOW_EVENT_URL;
@@ -34,7 +35,7 @@ export async function enqueueEvent({
         payload,
     };
 
-    const { error } = await db.from('outbound_events').insert({
+    const row = {
         event_id: event.event_id,
         communication_id: communicationId,
         type,
@@ -42,8 +43,17 @@ export async function enqueueEvent({
         payload: event,
         status: 'pending',
         next_attempt_at: new Date().toISOString(),
-    });
+        dedupe_key: dedupeKey,
+    };
+    const { error } = dedupeKey
+        ? await db.from('outbound_events').upsert(row, { onConflict: 'dedupe_key', ignoreDuplicates: true })
+        : await db.from('outbound_events').insert(row);
     if (error) throw new Error(`Could not enqueue ${type}: ${error.message}`);
+    if (dedupeKey) {
+        const existing = await db.from('outbound_events').select('payload').eq('dedupe_key', dedupeKey).maybeSingle();
+        if (existing.error) throw new Error(`Could not confirm ${type} deduplication: ${existing.error.message}`);
+        return existing.data?.payload || event;
+    }
     return event;
 }
 

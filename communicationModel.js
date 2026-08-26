@@ -69,6 +69,15 @@ export function canonicalCommunication({
     correlation = {},
     purpose = null,
     resolution = null,
+    businessStatus = null,
+    disposition = null,
+    successful = null,
+    memoryEligible = true,
+    failureCode = null,
+    failureReason = null,
+    outcomeSource = null,
+    outcomeConfidence = null,
+    outcomeDetectedAt = null,
 }) {
     return {
         communication_id: communicationId,
@@ -84,6 +93,17 @@ export function canonicalCommunication({
         correlation,
         purpose,
         resolution,
+        outcome: {
+            business_status: businessStatus,
+            disposition,
+            successful,
+            memory_eligible: memoryEligible,
+            failure_code: failureCode,
+            failure_reason: failureReason,
+            source: outcomeSource,
+            confidence: outcomeConfidence,
+            detected_at: outcomeDetectedAt,
+        },
     };
 }
 

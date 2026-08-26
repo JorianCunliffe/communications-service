@@ -88,6 +88,7 @@ const callProvider = {
         let query = db
             .from('calls')
             .select('id, twilio_call_sid, direction, started_at, summary, transcript')
+            .eq('memory_eligible', true)
             .order('started_at', { ascending: false })
             .limit(limit);
 

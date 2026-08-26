@@ -192,12 +192,30 @@ export async function summariseCall(callSid) {
     try {
         const { data: call } = await db
             .from('calls')
-            .select('id, contact_id, transcript, summary, started_at, communication_id, purpose, correlation, communication_thread_id')
+            .select('id, contact_id, transcript, summary, started_at, communication_id, purpose, correlation, communication_thread_id, business_status, memory_eligible, history_recorded_at')
             .eq('twilio_call_sid', callSid)
             .maybeSingle();
 
         if (!call?.transcript?.segments?.length) return;
-        if (call.summary) return; // already done; a retry must not append twice
+        // Provider completion alone is not permission to write semantic memory.
+        // The outcome finalizer calls this again only after verified success.
+        if (call.business_status !== 'success' || call.memory_eligible !== true) return;
+        if (call.summary && call.history_recorded_at) return;
+
+        // Migration 008 removes untraceable legacy call lines from contacts.
+        // A verified historical call may already have a summary, so rebuild one
+        // bounded history line from that eligible summary without another model call.
+        if (call.summary) {
+            if (call.contact_id) {
+                await appendHistory({
+                    contactId: call.contact_id, channel: 'call',
+                    line: String(call.summary).replace(/\s+/g, ' ').trim().slice(0, MAX_LINE_CHARS),
+                    when: call.started_at ? new Date(call.started_at) : new Date(),
+                });
+            }
+            await db.from('calls').update({ history_recorded_at: new Date().toISOString() }).eq('id', call.id);
+            return;
+        }
 
         const result = await summariseTranscript(call.transcript);
         if (!result) return;
@@ -213,6 +231,7 @@ export async function summariseCall(callSid) {
                 when: call.started_at ? new Date(call.started_at) : new Date(),
             });
         }
+        await db.from('calls').update({ history_recorded_at: new Date().toISOString() }).eq('id', call.id);
         if (call.communication_id && result.summary) {
             const destination = await callbackForThread(call.communication_thread_id);
             await enqueueEvent({

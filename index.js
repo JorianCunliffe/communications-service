@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
 import { assertContactable, resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
 import { databaseProvider, getDatabase } from './database.js';
-import { recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
+import { recordAnswerDetection, recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
 import { recordMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
@@ -22,6 +22,7 @@ import { summariseCall } from './summarise.js';
 import v1Routes, { outboundError } from './v1.js';
 import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbox.js';
 import { startEnrichmentSweeper } from './enrichment.js';
+import { startCallOutcomeSweeper } from './callOutcome.js';
 import { prefixedId } from './communicationModel.js';
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 
@@ -161,6 +162,8 @@ fastify.get('/health', async (request, reply) => {
         outboundCalls: Boolean(process.env.API_KEY && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.PUBLIC_URL),
         communicationsApi: Boolean(process.env.API_KEY && persistenceProvider),
         memoryEnrichment: Boolean(persistenceProvider && process.env.OPENAI_API_KEY),
+        callOutcomeClassification: Boolean(persistenceProvider && process.env.OPENAI_API_KEY),
+        answeringMachineDetection: ['Enable', 'DetectMessageEnd'].includes(String(process.env.TWILIO_MACHINE_DETECTION || '').trim()),
         durableEvents: Boolean(persistenceProvider && process.env.HYPERFLOW_EVENT_URL && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
@@ -326,6 +329,13 @@ fastify.post('/outbound-call', async (request, reply) => {
         if (operation.status === 'completed') return reply.code(200).send(operation.response);
         const base = PUBLIC_URL.replace(/\/$/, '');
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+        const amdMode = String(process.env.TWILIO_MACHINE_DETECTION || '').trim();
+        const amd = ['Enable', 'DetectMessageEnd'].includes(amdMode)
+            ? {
+                machineDetection: amdMode,
+                machineDetectionTimeout: Math.min(59, Math.max(3, Number(process.env.TWILIO_MACHINE_DETECTION_TIMEOUT) || 30)),
+            }
+            : {};
         const call = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await client.calls.create({
             to,
             from,
@@ -335,6 +345,7 @@ fastify.post('/outbound-call', async (request, reply) => {
             statusCallback: `${base}/call-status`,
             statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
             statusCallbackMethod: 'POST',
+            ...amd,
         });
         if (operation.status !== 'provider_sent') {
             await markOutbound(operationDb, operation.id, { status: 'provider_sent', provider_id: call.sid, provider_status: call.status });
@@ -513,6 +524,18 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     markAnswered(params.CallSid); // outbound calls get the same latency line
 
+    if (params.AnsweredBy) {
+        await recordAnswerDetection({
+            callSid: params.CallSid,
+            answeredBy: params.AnsweredBy,
+            durationMs: Number(params.MachineDetectionDuration),
+        });
+    }
+    if (/^(machine_|machine$|fax$)/i.test(String(params.AnsweredBy || ''))) {
+        console.log(`Outbound call ${params.CallSid || '(no CallSid)'} stopped after AMD result ${params.AnsweredBy}`);
+        return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<Response><Hangup/></Response>');
+    }
+
     // Peek, don't consume: the media stream still needs this config when its
     // 'start' event arrives for the same CallSid.
     let config = peekCallConfig(params.CallSid);
@@ -637,6 +660,14 @@ fastify.all('/call-status', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     const duration = Number.parseInt(params.CallDuration, 10);
 
+    if (params.AnsweredBy) {
+        await recordAnswerDetection({
+            callSid: params.CallSid,
+            answeredBy: params.AnsweredBy,
+            durationMs: Number(params.MachineDetectionDuration),
+        });
+    }
+
     console.log(`Call ${params.CallSid || '(no CallSid)'} is ${params.CallStatus || 'unknown'}${Number.isFinite(duration) ? ` after ${duration}s` : ''}`);
 
     const communication = await updateCallStatus({
@@ -645,12 +676,8 @@ fastify.all('/call-status', twilioWebhook, async (request, reply) => {
         durationSeconds: Number.isFinite(duration) ? duration : undefined,
     });
 
-    if (communication?.communication_id) {
-        const eventType = params.CallStatus === 'answered'
-            ? 'call.answered'
-            : ['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(params.CallStatus)
-                ? (params.CallStatus === 'completed' ? 'call.completed' : 'call.failed')
-                : 'call.started';
+    if (communication?.communication_id && !['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(params.CallStatus)) {
+        const eventType = params.CallStatus === 'answered' ? 'call.answered' : 'call.started';
         const destination = await callbackForThread(communication.communication_thread_id)
             .catch((callbackError) => { console.warn(callbackError.message); return null; });
         await enqueueEvent({
@@ -1402,4 +1429,8 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     // Derives summaries, current state, facts and commitments outside all
     // provider ingestion paths. Failures remain isolated in the durable queue.
     startEnrichmentSweeper();
+
+    // Provider completion is not business success. This durable worker waits
+    // for transcript/AMD evidence, then emits exactly one terminal call event.
+    startCallOutcomeSweeper();
 });

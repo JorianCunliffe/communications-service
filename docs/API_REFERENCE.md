@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Updated: 16 August 2026
+Updated: 26 August 2026
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -42,7 +42,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. New PostgreSQL databases require migrations `000` through `007`; `npm run db:migrate` applies them in order using `DATABASE_URL`.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. New PostgreSQL databases require migrations `000` through `008`; `npm run db:migrate` applies them in order using `DATABASE_URL`.
 
 ### Twilio webhooks
 
@@ -83,11 +83,22 @@ All canonical read and create responses use:
     "type": "human_ask",
     "ask_id": "ask_93bc"
   },
-  "resolution": null
+  "resolution": null,
+  "outcome": {
+    "business_status": "success",
+    "disposition": "human_completed",
+    "successful": true,
+    "memory_eligible": true,
+    "failure_code": null,
+    "failure_reason": null,
+    "source": "transcript_model",
+    "confidence": 0.98,
+    "detected_at": "2026-08-26T07:30:20.000Z"
+  }
 }
 ```
 
-`communication_id` is public identity. `provider_id` is diagnostic/provider identity.
+`communication_id` is public identity. `provider_id` is diagnostic/provider identity. `outcome` is always present in the canonical shape; fields may be `null` for channels without a finalized business outcome. For voice, `business_status` is `pending`, `success`, or `failed`. Only `disposition: human_completed` is successful and memory eligible.
 
 ### Channel
 
@@ -170,6 +181,10 @@ Query parameters:
 | `thread_id` | string | Exact semantic thread |
 | `ask_id` | string | Exact `purpose.ask_id` |
 | `person_id` | UUID | Exact canonical person/contact ID |
+| `business_status` | string | Exact `pending`, `success`, or `failed` call outcome state |
+| `disposition` | string | Exact finalized call disposition |
+| `successful` | boolean string | `true` or `false`; other values are ignored |
+| `memory_eligible` | boolean string | `true` or `false`; other values are ignored |
 
 Newest communications are returned first. There is currently no offset/cursor parameter.
 
@@ -238,7 +253,7 @@ Returns a Communication or `404 { "error": "Communication not found" }`.
 POST /v1/communications/:communicationId/enrich
 ```
 
-Creates or resets the durable `memory` enrichment job. It does not run model extraction inline. Returns the queued job or `404` when the communication does not exist.
+Creates or resets the durable `memory` enrichment job. It does not run model extraction inline. Returns the queued job, `404` when the communication does not exist, or `409` when the communication is audit-only with `memory_eligible: false`.
 
 ### Send SMS
 
@@ -321,9 +336,11 @@ Events:
 
 - `communication.created`
 - `call.started`
-- later `call.answered`, `call.completed`, or `call.failed`
+- later `call.answered`, followed by exactly one `call.completed` or `call.failed` business outcome
 - later `transcript.completed` and optionally `summary.completed`
-- `ask.response.received` after a Human Ask call transcript is stored
+- `ask.response.received` only after a Human Ask call is verified as `human_completed`
+
+Twilio `CallStatus=completed` means the provider call ended; it is not itself business success. The durable finalizer combines provider status, optional Twilio answering-machine/fax detection, transcript safety rules, and strict structured classification. `call.completed` is emitted only for `human_completed`. Voicemail, wrong number, no answer, busy, fax, automated system, provider failure, canceled, missing/non-meaningful response, and safely unclassified calls emit `call.failed` and remain `memory_eligible: false`.
 
 Failures are returned as `502` with `Failed to place call: …`.
 
@@ -732,7 +749,7 @@ There is no `POST /v1/asks` delivery route. Send an SMS or voice Ask through its
 
 HyperFlow must resolve `person_id` to an unambiguous channel destination before sending. Communications will not guess between multiple identities. Email and direct web-form delivery remain HyperFlow responsibilities until an outbound email adapter is configured in this service.
 
-An `ask.response.received` event is evidence, not resolution. For SMS, response text is in `payload.content`; for voice, evidence is in `payload.transcript`. HyperFlow should validate/interpret that evidence, persist its own Ask decision, then call `POST /v1/asks/:askId/resolve` with the accepted `communication_id`. That final call should be retried durably so the two systems cannot silently diverge.
+An `ask.response.received` event is evidence, not resolution. For SMS, response text is in `payload.content`; for voice, evidence is in `payload.transcript`, and the event is emitted only after the call is verified as `human_completed`. Failed-call transcripts are audit-only and never become Ask response evidence. HyperFlow should validate/interpret eligible evidence, persist its own Ask decision, then call `POST /v1/asks/:askId/resolve` with the accepted `communication_id`. That final call should be retried durably so the two systems cannot silently diverge.
 
 #### Event intake
 
@@ -757,8 +774,8 @@ Contract tests should use these real request, response, and event shapes. A mock
 | `sms.received` | Inbound SMS is persisted |
 | `call.started` | Call record starts or Twilio reports a nonterminal state |
 | `call.answered` | Twilio reports answered |
-| `call.completed` | Twilio reports completed |
-| `call.failed` | Twilio reports busy, failed, no-answer, or canceled |
+| `call.completed` | Outcome finalizer verifies a meaningful response from the intended human; payload disposition is `human_completed` |
+| `call.failed` | Outcome finalizer detects voicemail, wrong number, no answer, busy, fax, automated system, provider failure, cancellation, no meaningful response, or an unclassifiable call |
 | `transcript.completed` | Voice transcript is stored |
 | `summary.completed` | Voice summary is stored |
 | `ask.response.received` | Inbound Ask SMS/generic communication is stored, or Ask voice transcript completes |
@@ -883,13 +900,15 @@ Example:
   "outboundCalls": true,
   "communicationsApi": true,
   "memoryEnrichment": true,
+  "callOutcomeClassification": true,
+  "answeringMachineDetection": true,
   "durableEvents": true,
   "twilioSignatures": "enforce",
   "preconnect": { "enabled": true, "pending": 0 }
 }
 ```
 
-`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` does not prove migrations are applied. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; a deployment using only per-thread callbacks may report `false` while signed callback delivery still works.
+`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `answeringMachineDetection` is true only when `TWILIO_MACHINE_DETECTION` is `Enable` or `DetectMessageEnd`. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; a deployment using only per-thread callbacks may report `false` while signed callback delivery still works.
 
 ## Management and recording API (`/api`)
 
@@ -930,7 +949,7 @@ Readable history channels are currently `call`, `sms`, and `recording`; planned 
 
 | Method | Route | Query | Result |
 |---|---|---|---|
-| `GET` | `/api/calls` | `limit`, `offset`, `phone`, `direction`, `status`, `sort` | Paged provider call rows; sort allows `started_at`, `ended_at`, `duration_seconds`, `status` |
+| `GET` | `/api/calls` | `limit`, `offset`, `phone`, `direction`, `status`, `business_status`, `disposition`, `successful`, `memory_eligible`, `sort` | Paged raw call rows including provider and verified business outcome; sort allows `started_at`, `ended_at`, `duration_seconds`, `status` |
 | `GET` | `/api/calls/:callSid` | — | Provider call, flattened transcript, tool calls, recording summaries |
 | `GET` | `/api/calls/:callSid/tools` | — | Tool-call audit rows |
 

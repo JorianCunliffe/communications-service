@@ -192,16 +192,10 @@ export async function saveTranscript({ callSid, transcript, status = 'completed'
                 destination,
                 payload: { channel: 'voice', transcript },
             });
-            if (communication.purpose?.type === 'human_ask') {
-                await enqueueEvent({
-                    type: 'ask.response.received',
-                    communicationId: communication.communication_id,
-                    purpose: communication.purpose,
-                    correlation: communication.correlation || {},
-                    destination,
-                    payload: { ask_id: communication.purpose.ask_id, channel: 'voice', transcript },
-                });
-            }
+            // A transcript is evidence, not proof that the intended human
+            // answered. The durable call-outcome finalizer emits an Ask
+            // response only after it has ruled out voicemail, wrong number,
+            // automation and an empty/non-substantive interaction.
         }
     } catch (error) {
         console.warn(`Could not store transcript for ${callSid}: ${error.message}`);
@@ -247,6 +241,33 @@ export async function updateCallStatus({ callSid, status, durationSeconds }) {
         );
     } catch (error) {
         console.warn(`Could not update status for ${callSid}: ${error.message}`);
+        return null;
+    }
+}
+
+// Stores Twilio's AnsweredBy signal separately from provider call status.
+// Machine/fax is decisive failure evidence; "human" still requires transcript
+// validation so a wrong number cannot become a successful call.
+export async function recordAnswerDetection({ callSid, answeredBy, durationMs }) {
+    const db = getClient();
+    if (!db || !callSid || !answeredBy) return null;
+    const metadataPatch = { answered_by: String(answeredBy) };
+    if (Number.isFinite(durationMs)) metadataPatch.machine_detection_duration_ms = Number(durationMs);
+    try {
+        const current = await withTimeout(
+            db.from('calls').select('metadata').eq('twilio_call_sid', callSid).maybeSingle(),
+            'Answer detection lookup'
+        );
+        const updated = await withTimeout(
+            db.from('calls').update({
+                answered_by: String(answeredBy),
+                metadata: { ...(current?.metadata || {}), ...metadataPatch },
+            }).eq('twilio_call_sid', callSid).select('id').maybeSingle(),
+            'Answer detection update'
+        );
+        return updated;
+    } catch (error) {
+        console.warn(`Could not store answer detection for ${callSid}: ${error.message}`);
         return null;
     }
 }

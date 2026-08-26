@@ -4,6 +4,7 @@ import pg from 'pg';
 const { Pool } = pg;
 
 const SET_RETURNING_RPCS = new Set([
+    'claim_call_outcome_job',
     'claim_enrichment_job',
     'claim_outbound_events',
     'claim_recording',

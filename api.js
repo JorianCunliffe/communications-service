@@ -580,6 +580,14 @@ export default async function apiRoutes(fastify) {
         }
         if (request.query.direction) query = query.eq('direction', request.query.direction);
         if (request.query.status) query = query.eq('status', request.query.status);
+        if (request.query.business_status) query = query.eq('business_status', request.query.business_status);
+        if (request.query.disposition) query = query.eq('disposition', request.query.disposition);
+        if (request.query.successful === 'true' || request.query.successful === 'false') {
+            query = query.eq('successful', request.query.successful === 'true');
+        }
+        if (request.query.memory_eligible === 'true' || request.query.memory_eligible === 'false') {
+            query = query.eq('memory_eligible', request.query.memory_eligible === 'true');
+        }
 
         const { data, error, count } = await query;
         if (error) return dbError(reply, error, 'list calls');

@@ -234,9 +234,9 @@ describe('structured asynchronous enrichment', () => {
 
 describe('thread-aware retrieval', () => {
     test('labels direct matches and thread context separately and omits unrelated threads', async () => {
-        const hit = { communication_id: 'comm_1', thread_id: 'thread_1', contact_id: 'person_1', project_id: 'project_1', occurred_at: '2026-08-10T00:00:00Z', rank: 0.12, body: 'valuation Monday' };
+        const hit = { communication_id: 'comm_1', thread_id: 'thread_1', contact_id: 'person_1', project_id: 'project_1', occurred_at: '2026-08-10T00:00:00Z', rank: 0.12, body: 'valuation Monday', memory_eligible: true };
         const db = new FakeDb({
-            communications: [hit, { communication_id: 'comm_2', thread_id: 'thread_1', occurred_at: '2026-08-09T00:00:00Z', body: 'earlier context' }, { communication_id: 'comm_x', thread_id: 'thread_x', body: 'unrelated' }],
+            communications: [hit, { communication_id: 'comm_2', thread_id: 'thread_1', occurred_at: '2026-08-09T00:00:00Z', body: 'earlier context', memory_eligible: true }, { communication_id: 'comm_x', thread_id: 'thread_x', body: 'unrelated', memory_eligible: true }],
             communication_threads: [{ thread_id: 'thread_1', title: 'Valuation', summary: 'Waiting for report' }, { thread_id: 'thread_x', title: 'Unrelated' }],
             communication_facts: [
                 { id: 'fact_old', status: 'superseded', text: 'Valuation expected Friday', contact_id: 'person_1', project_id: 'project_1', updated_at: '2026-08-09' },
@@ -262,7 +262,7 @@ describe('memory read models', () => {
     test('thread memory includes enrichment and provenance without requiring it', async () => {
         const db = new FakeDb({
             communication_threads: [{ thread_id: 't1', summary: 'Valuation discussed', summary_source_ids: ['comm_1'], current_state: 'Waiting for report', current_state_source_ids: ['comm_1'] }],
-            communications: [{ communication_id: 'comm_1', thread_id: 't1', person_id: 'p1', occurred_at: '2026-08-10' }],
+            communications: [{ communication_id: 'comm_1', thread_id: 't1', person_id: 'p1', occurred_at: '2026-08-10', memory_eligible: true }],
             calendar_events: [], communication_commitments: [{ id: 'c1', thread_id: 't1', communication_id: 'comm_1' }],
             communication_facts: [{ id: 'f1', thread_id: 't1', status: 'active', source_communication_ids: ['comm_1'] }],
             contacts: [{ id: 'p1', name: 'Jim' }],
@@ -276,7 +276,7 @@ describe('memory read models', () => {
     test('person memory assembles active work, evidence and upcoming events', async () => {
         const db = new FakeDb({
             contacts: [{ id: 'p1', name: 'Jim' }],
-            communications: [{ communication_id: 'comm_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10' }],
+            communications: [{ communication_id: 'comm_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10', memory_eligible: true }],
             communication_threads: [{ thread_id: 't1', status: 'open' }],
             communication_commitments: [{ id: 'c1', status: 'open', promisor_contact_id: 'p1', updated_at: '2026-08-10' }],
             communication_facts: [{ id: 'f1', status: 'active', contact_id: 'p1', updated_at: '2026-08-10' }],
@@ -288,11 +288,27 @@ describe('memory read models', () => {
         assert.equal(memory.open_commitments.length, 1); assert.equal(memory.upcoming_calendar_events.length, 1);
     });
 
+    test('memory read models exclude audit-only failed calls', async () => {
+        const db = new FakeDb({
+            contacts: [{ id: 'p1', name: 'Jim' }],
+            communications: [
+                { communication_id: 'comm_good', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10', memory_eligible: true },
+                { communication_id: 'comm_voicemail', person_id: 'p1', thread_id: 't2', occurred_at: '2026-08-11', memory_eligible: false, disposition: 'voicemail' },
+            ],
+            communication_threads: [{ thread_id: 't1', status: 'open' }, { thread_id: 't2', status: 'open' }],
+            communication_commitments: [], communication_facts: [],
+            calendar_event_participants: [], calendar_events: [],
+        });
+        const memory = await getPersonMemory(db, 'p1');
+        assert.deepEqual(memory.recent_communications.map((row) => row.communication_id), ['comm_good']);
+        assert.deepEqual(memory.active_threads.map((row) => row.thread_id), ['t1']);
+    });
+
     test('project and event views assemble scoped context', async () => {
         const db = new FakeDb({
             projects: [{ id: 'project_1', name: 'Smith Street' }],
             project_contacts: [{ project_id: 'project_1', role: 'valuer', contacts: { id: 'p1' } }],
-            communications: [{ communication_id: 'comm_1', project_id: 'project_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10' }],
+            communications: [{ communication_id: 'comm_1', project_id: 'project_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10', memory_eligible: true }],
             communication_threads: [{ thread_id: 't1', status: 'open', last_activity_at: '2026-08-10' }],
             communication_commitments: [{ id: 'c1', status: 'open', thread_id: 't1', updated_at: '2026-08-10' }],
             communication_facts: [{ id: 'f1', status: 'active', project_id: 'project_1', thread_id: 't1', contact_id: 'p1', updated_at: '2026-08-10' }],
@@ -350,8 +366,8 @@ describe('fact lifecycle', () => {
 
 describe('migration contract', () => {
     test('adds calendar, durable enrichment, provenance, lifecycle and recording correlation', () => {
-        const files = ['004_calendar_memory', '005_communications_enrichment', '006_memory_search', '007_rectification'];
+        const files = ['004_calendar_memory', '005_communications_enrichment', '006_memory_search', '007_rectification', '008_call_outcomes'];
         const sql = files.map((name) => readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), 'utf8')).join('\n');
-        for (const token of ['calendar_events', 'calendar_event_participants', 'communication_commitments', 'communication_facts', 'source_communication_ids', 'superseded', 'communication_enrichment_jobs', 'rerun_requested', 'participant_identities', 'calendar_event_id', 'outbound_operations', 'lease_token', 'communication_row_id', "exception when others"]) assert.match(sql, new RegExp(token));
+        for (const token of ['calendar_events', 'calendar_event_participants', 'communication_commitments', 'communication_facts', 'source_communication_ids', 'superseded', 'communication_enrichment_jobs', 'rerun_requested', 'participant_identities', 'calendar_event_id', 'outbound_operations', 'lease_token', 'communication_row_id', 'call_outcome_jobs', 'memory_eligible', 'disposition', "exception when others"]) assert.match(sql, new RegExp(token));
     });
 });

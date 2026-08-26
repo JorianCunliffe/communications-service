@@ -58,6 +58,15 @@ function toCanonical(row) {
         correlation: row.correlation || {},
         purpose: row.purpose,
         resolution: row.resolution,
+        businessStatus: row.business_status,
+        disposition: row.disposition,
+        successful: row.successful,
+        memoryEligible: row.memory_eligible,
+        failureCode: row.failure_code,
+        failureReason: row.failure_reason,
+        outcomeSource: row.outcome_source,
+        outcomeConfidence: row.outcome_confidence,
+        outcomeDetectedAt: row.outcome_detected_at,
     });
 }
 
@@ -103,6 +112,14 @@ export default async function v1Routes(fastify) {
         if (request.query.thread_id) query = query.eq('thread_id', request.query.thread_id);
         if (request.query.ask_id) query = query.eq('purpose->>ask_id', request.query.ask_id);
         if (request.query.person_id) query = query.eq('person_id', request.query.person_id);
+        if (request.query.business_status) query = query.eq('business_status', request.query.business_status);
+        if (request.query.disposition) query = query.eq('disposition', request.query.disposition);
+        if (request.query.successful === 'true' || request.query.successful === 'false') {
+            query = query.eq('successful', request.query.successful === 'true');
+        }
+        if (request.query.memory_eligible === 'true' || request.query.memory_eligible === 'false') {
+            query = query.eq('memory_eligible', request.query.memory_eligible === 'true');
+        }
         const { data, error, count } = await query;
         if (error) return errorReply(reply, new Error(error.message), 500);
         return { data: (data || []).map(toCanonical), count, limit };
@@ -220,6 +237,9 @@ export default async function v1Routes(fastify) {
         try {
             const communication = await getCommunication(db, request.params.communicationId);
             if (!communication) return reply.code(404).send({ error: 'Communication not found' });
+            if (communication.memory_eligible === false) {
+                return reply.code(409).send({ error: 'Communication is audit-only and is not eligible for memory enrichment' });
+            }
             const job = await db.rpc('requeue_communication_enrichment', { p_communication_id: request.params.communicationId });
             if (job.error) throw new Error(job.error.message);
             return { job: job.data, requeued: true };

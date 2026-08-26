@@ -130,6 +130,7 @@ export async function searchMemory(db, body = {}) {
     let expansion = [];
     if (include.communications && threadIds.length) {
         const related = check(await db.from('communications').select('*').in('thread_id', threadIds)
+            .eq('memory_eligible', true)
             .order('occurred_at', { ascending: false }).limit(Math.min(limit * 4, 200)), 'Thread context expansion');
         const via = new Map(direct.filter((row) => row.thread_id).map((row) => [row.thread_id, row.communication_id]));
         expansion = related.filter((row) => !directIds.has(row.communication_id)).map((row) => ({
@@ -183,7 +184,7 @@ export async function getThreadMemory(db, threadId) {
     if (result.error) throw new Error(`Thread lookup: ${result.error.message}`);
     if (!result.data) return null;
     const [communications, events, commitments, facts] = await Promise.all([
-        db.from('communications').select('*').eq('thread_id', threadId).order('occurred_at'),
+        db.from('communications').select('*').eq('thread_id', threadId).eq('memory_eligible', true).order('occurred_at'),
         db.from('calendar_events').select('*').eq('communication_thread_id', threadId).order('starts_at'),
         db.from('communication_commitments').select('*').eq('thread_id', threadId).order('created_at'),
         db.from('communication_facts').select('*').eq('thread_id', threadId).eq('status', 'active').order('updated_at', { ascending: false }),
@@ -229,7 +230,7 @@ export async function getThreadMemory(db, threadId) {
 export async function getLooseEnds(db, { personId = null, projectId = null, limit = 100 } = {}) {
     let scopedThreadIds = null;
     if (projectId || personId) {
-        let scope = db.from('communications').select('thread_id').not('thread_id', 'is', null).limit(500);
+        let scope = db.from('communications').select('thread_id').eq('memory_eligible', true).not('thread_id', 'is', null).limit(500);
         if (projectId) scope = scope.eq('project_id', projectId);
         if (personId) scope = scope.eq('person_id', personId);
         scopedThreadIds = [...new Set(check(await scope, 'Loose-end scope').map((row) => row.thread_id))];
@@ -271,11 +272,11 @@ export async function getPersonMemory(db, personId) {
     if (!person.data) return null;
     const events = await eventIdsForPerson(db, personId);
     const [communications, commitments, facts, calendar, threadRows] = await Promise.all([
-        db.from('communications').select('*').eq('person_id', personId).order('occurred_at', { ascending: false }).limit(50),
+        db.from('communications').select('*').eq('person_id', personId).eq('memory_eligible', true).order('occurred_at', { ascending: false }).limit(50),
         queryCommitments(db, { person_id: personId }, 50),
         queryFacts(db, { person_id: personId }, 50),
         events?.length ? db.from('calendar_events').select('*').in('id', events).gte('starts_at', new Date().toISOString()).order('starts_at').limit(50) : Promise.resolve({ data: [] }),
-        db.from('communications').select('thread_id').eq('person_id', personId).not('thread_id', 'is', null).limit(200),
+        db.from('communications').select('thread_id').eq('person_id', personId).eq('memory_eligible', true).not('thread_id', 'is', null).limit(200),
     ]);
     const threadIds = [...new Set(check(threadRows, 'Person threads').map((row) => row.thread_id))];
     const threads = threadIds.length ? check(await db.from('communication_threads').select('*').in('thread_id', threadIds).eq('status', 'open'), 'Active threads') : [];
@@ -289,7 +290,7 @@ export async function getProjectMemory(db, projectId) {
     if (!project.data) return null;
     const [members, communications, facts, events] = await Promise.all([
         db.from('project_contacts').select('role, contacts(*)').eq('project_id', projectId),
-        db.from('communications').select('*').eq('project_id', projectId).order('occurred_at', { ascending: false }).limit(100),
+        db.from('communications').select('*').eq('project_id', projectId).eq('memory_eligible', true).order('occurred_at', { ascending: false }).limit(100),
         queryFacts(db, { project_id: projectId }, 100),
         db.from('calendar_events').select('*').eq('project_id', projectId).order('starts_at', { ascending: false }).limit(100),
     ]);
@@ -309,7 +310,7 @@ export async function getEventContext(db, eventId) {
     const participants = check(await db.from('calendar_event_participants').select('*').eq('event_id', eventId), 'Event participants');
     const personIds = [...new Set(participants.map((row) => row.contact_id).filter(Boolean))];
     let communications = [];
-    if (personIds.length) communications = check(await db.from('communications').select('*').in('person_id', personIds)
+    if (personIds.length) communications = check(await db.from('communications').select('*').in('person_id', personIds).eq('memory_eligible', true)
         .lte('occurred_at', event.data.starts_at).order('occurred_at', { ascending: false }).limit(50), 'Pre-meeting communications');
     const threadIds = [...new Set([event.data.communication_thread_id, ...communications.map((row) => row.thread_id)].filter(Boolean))];
     const [threads, commitmentsResult, factsResult] = await Promise.all([

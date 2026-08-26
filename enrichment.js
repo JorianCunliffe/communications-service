@@ -272,9 +272,18 @@ async function processJob(db, job) {
     const communication = await db.from('communications').select('*').eq('communication_id', job.communication_id).maybeSingle();
     if (communication.error) throw new Error(communication.error.message);
     if (!communication.data) throw new Error(`Communication ${job.communication_id} no longer exists`);
+    if (communication.data.memory_eligible !== true) {
+        const skipped = await db.from('communication_enrichment_jobs').update({
+            status: 'done', completed_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            skip_reason: 'memory_ineligible', last_error: null, lease_token: null, lease_expires_at: null,
+        }).eq('id', job.id).eq('lease_token', job.lease_token);
+        if (skipped.error) throw new Error(`Memory eligibility skip: ${skipped.error.message}`);
+        return;
+    }
     let evidence = [communication.data];
     if (communication.data.thread_id) {
         const threadRows = await db.from('communications').select('*').eq('thread_id', communication.data.thread_id)
+            .eq('memory_eligible', true)
             .order('occurred_at', { ascending: false }).limit(30);
         if (threadRows.error) throw new Error(threadRows.error.message);
         evidence = (threadRows.data || []).reverse();
@@ -305,7 +314,7 @@ async function processJob(db, job) {
     const done = await db.from('communication_enrichment_jobs').update({
         status: rerun ? 'pending' : 'done', completed_at: rerun ? null : new Date().toISOString(),
         next_attempt_at: new Date().toISOString(), rerun_requested: false,
-        updated_at: new Date().toISOString(), last_error: null,
+        updated_at: new Date().toISOString(), last_error: null, skip_reason: null,
         lease_token: null, lease_expires_at: null,
     }).eq('id', job.id).eq('lease_token', job.lease_token);
     if (done.error) throw new Error(done.error.message);

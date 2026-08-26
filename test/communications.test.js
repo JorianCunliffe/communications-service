@@ -111,6 +111,22 @@ describe('first-class communication purpose', () => {
         assert.equal(communication.provider_id, 'SM123');
         assert.equal(communication.resolution, null);
     });
+
+    test('canonical voice records expose business outcome separately from provider delivery', () => {
+        const communication = canonicalCommunication({
+            communicationId: 'comm_voice', channel: 'voice', direction: 'outbound',
+            provider: 'twilio', providerId: 'CA123', businessStatus: 'failed',
+            disposition: 'voicemail', successful: false, memoryEligible: false,
+            failureCode: 'voicemail', failureReason: 'Twilio detected an answering machine',
+            outcomeSource: 'twilio_amd', outcomeConfidence: 1,
+        });
+        assert.deepEqual(communication.outcome, {
+            business_status: 'failed', disposition: 'voicemail', successful: false,
+            memory_eligible: false, failure_code: 'voicemail',
+            failure_reason: 'Twilio detected an answering machine', source: 'twilio_amd',
+            confidence: 1, detected_at: null,
+        });
+    });
 });
 
 describe('Ask-aware cross-channel threading', () => {
