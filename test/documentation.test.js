@@ -45,5 +45,6 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
         const replit = read('../.replit');
         assert.equal(packageJson.scripts['start:production'], 'node scripts/migrate.js && node index.js');
         assert.match(replit, /run = \["npm", "run", "start:production"\]/);
+        assert.match(replit, /HYPERFLOW_EVENT_URL = "https:\/\/hyper-flow5\.vercel\.app\/api\/events"/);
     });
 });
