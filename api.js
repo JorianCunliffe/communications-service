@@ -24,7 +24,8 @@ import { DEFAULT_CONFIG } from './config.js';
 import { resolveConfig, rowToConfig } from './configResolver.js';
 import { getDatabase } from './database.js';
 import { listTools, toolNames, isKnownTool } from './tools.js';
-import { E164, rejectUnauthorized } from './auth.js';
+import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.js';
+import { tenantDatabase } from './tenantContext.js';
 import { enqueueRecording, sweepOnce } from './recordings.js';
 import { assertFetchable, isKnownSource } from './recordingSources.js';
 import { validate as validateTranscript, fromExternal as fromExternalTranscript, toText } from './transcripts.js';
@@ -124,8 +125,11 @@ export default async function apiRoutes(fastify) {
     // Applied to every route in this plugin, so a route added later cannot be
     // forgotten. Fastify stops the lifecycle once a hook has replied.
     fastify.addHook('onRequest', async (request, reply) => {
-        const rejected = rejectUnauthorized(request, reply, 'The management API');
+        const rejected = await rejectUnauthorizedTenant(request, reply, getDatabase(), 'The management API');
         if (rejected) return rejected;
+        const capability = ['GET', 'HEAD'].includes(request.method) ? 'management:read' : 'management:write';
+        const denied = rejectMissingCapability(request, reply, capability);
+        if (denied) return denied;
     });
 
     // Resolves the client once per request. Returns null having already replied,
@@ -139,7 +143,7 @@ export default async function apiRoutes(fastify) {
             });
             return null;
         }
-        return database;
+        return tenantDatabase(database, reply.request.tenantId);
     };
 
     // --- Tools ------------------------------------------------------------
@@ -508,6 +512,7 @@ export default async function apiRoutes(fastify) {
         }
 
         const result = await enqueueRecording({
+            tenantId: request.tenantId,
             source: body.source,
             externalId: body.externalId ?? null,
             contactId,

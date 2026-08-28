@@ -9,6 +9,7 @@ const BATCH_SIZE = 20;
 let timer = null;
 
 export async function enqueueEvent({
+    tenantId = null,
     type,
     communicationId = null,
     purpose = null,
@@ -21,11 +22,15 @@ export async function enqueueEvent({
     const target = destination || process.env.HYPERFLOW_EVENT_URL;
     if (!db || !target) return null;
     if (!process.env.COMMUNICATIONS_WEBHOOK_SECRET) throw new Error('COMMUNICATIONS_WEBHOOK_SECRET is required for durable webhook delivery');
+    const scopedTenant = tenantId || correlation.tenant_id || process.env.LEGACY_TENANT_ID;
+    if (!scopedTenant) throw new Error('tenant_id is required for durable webhook delivery');
 
     const eventCorrelation = correlation.external_project_id && !correlation.project_id
         ? { ...correlation, project_id: correlation.external_project_id }
         : correlation;
     const event = {
+        contract_version: '2.0',
+        tenant_id: scopedTenant,
         event_id: prefixedId('evt'),
         communication_id: communicationId,
         type,
@@ -36,6 +41,7 @@ export async function enqueueEvent({
     };
 
     const row = {
+        tenant_id: scopedTenant,
         event_id: event.event_id,
         communication_id: communicationId,
         type,
@@ -50,18 +56,23 @@ export async function enqueueEvent({
         : await db.from('outbound_events').insert(row);
     if (error) throw new Error(`Could not enqueue ${type}: ${error.message}`);
     if (dedupeKey) {
-        const existing = await db.from('outbound_events').select('payload').eq('dedupe_key', dedupeKey).maybeSingle();
+        const existing = await db.from('outbound_events').select('payload').eq('tenant_id', scopedTenant).eq('dedupe_key', dedupeKey).maybeSingle();
         if (existing.error) throw new Error(`Could not confirm ${type} deduplication: ${existing.error.message}`);
         return existing.data?.payload || event;
     }
     return event;
 }
 
-export async function callbackForThread(threadId) {
+export async function callbackForThread(tenantId, threadId = null) {
     const db = getDatabase();
+    if (threadId === null) {
+        threadId = tenantId;
+        tenantId = process.env.LEGACY_TENANT_ID;
+    }
     if (!db || !threadId) return null;
+    if (!tenantId) throw new Error('tenant_id is required for thread callback lookup');
     const { data, error } = await db.from('communication_threads').select('callback_url')
-        .eq('thread_id', threadId).maybeSingle();
+        .eq('tenant_id', tenantId).eq('thread_id', threadId).maybeSingle();
     if (error) throw new Error(`Could not read thread callback: ${error.message}`);
     return data?.callback_url || null;
 }
@@ -69,6 +80,11 @@ export async function callbackForThread(threadId) {
 function signature(body) {
     const secret = process.env.COMMUNICATIONS_WEBHOOK_SECRET;
     return secret ? `sha256=${createHmac('sha256', secret).update(body).digest('hex')}` : null;
+}
+
+function replaySafeSignature(timestamp, body) {
+    const secret = process.env.COMMUNICATIONS_WEBHOOK_SECRET;
+    return secret ? `sha256=${createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}` : null;
 }
 
 export function describeDeliveryError(error) {
@@ -92,9 +108,18 @@ export async function deliverPendingEvents() {
         try {
             const destination = await assertFetchable(row.destination, 'communications_webhook');
             const body = JSON.stringify(row.payload);
-            const headers = { 'content-type': 'application/json', 'x-communications-event-id': row.event_id };
+            const timestamp = Math.floor(Date.now() / 1000).toString();
+            const headers = {
+                'content-type': 'application/json',
+                'x-communications-event-id': row.event_id,
+                'x-communications-contract-version': '2.0',
+                'x-communications-tenant-id': row.tenant_id,
+                'x-communications-timestamp': timestamp,
+            };
             const signed = signature(body);
             if (signed) headers['x-communications-signature'] = signed;
+            const signedV2 = replaySafeSignature(timestamp, body);
+            if (signedV2) headers['x-communications-signature-v2'] = signedV2;
 
             const allowedHosts = process.env.COMMUNICATIONS_WEBHOOK_HOSTS
                 ? process.env.COMMUNICATIONS_WEBHOOK_HOSTS.split(',').map((host) => host.trim().toLowerCase()).filter(Boolean)

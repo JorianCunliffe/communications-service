@@ -40,8 +40,8 @@ class FakeQuery {
             return { data: this.takeOne ? additions[0] : additions, error: null };
         }
         if (this.operation === 'upsert') {
-            const key = this.conflict || (this.payload.ask_id ? 'ask_id' : 'thread_id');
-            const existing = rows.find((row) => row[key] === this.payload[key]);
+            const keys = String(this.conflict || (this.payload.ask_id ? 'ask_id' : 'thread_id')).split(',');
+            const existing = rows.find((row) => keys.every((key) => row[key] === this.payload[key]));
             if (existing) Object.assign(existing, this.payload);
             else rows.push({ ...this.payload });
             return { data: existing || this.payload, error: null };
@@ -103,11 +103,14 @@ describe('first-class communication purpose', () => {
         const id = prefixedId('comm');
         assert.match(id, /^comm_[0-9a-f]{32}$/);
         const communication = canonicalCommunication({
-            communicationId: id, channel: 'sms', direction: 'outbound',
+            tenantId: 'tenant_1', communicationId: id, threadId: 'thread_1', channel: 'sms', direction: 'outbound',
             provider: 'twilio', providerId: 'SM123',
             purpose: { type: 'human_ask', ask_id: 'ask_93bc' },
         });
         assert.equal(communication.communication_id, id);
+        assert.equal(communication.tenant_id, 'tenant_1');
+        assert.equal(communication.thread_id, 'thread_1');
+        assert.equal(communication.contract_version, '2.0');
         assert.equal(communication.provider_id, 'SM123');
         assert.equal(communication.resolution, null);
     });
@@ -133,7 +136,7 @@ describe('Ask-aware cross-channel threading', () => {
     test('a client-supplied explicit thread ID is created and preserved', async () => {
         const db = new FakeDb();
         const result = await resolveCommunicationThread({
-            db, participantIdentity: '+61400000000', direction: 'outbound',
+            db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'outbound',
             threadId: 'thread_hyperflow_42', purpose: { type: 'human_ask', ask_id: 'ask_42' }, correlation: {},
         });
         assert.equal(result.threadId, 'thread_hyperflow_42');
@@ -154,6 +157,7 @@ describe('Ask-aware cross-channel threading', () => {
 
         const inboundCall = await resolveCommunicationThread({
             db,
+            tenantId: 'tenant_1',
             participantIdentity: '+61400000000',
             serviceIdentity: '+61411111111',
             direction: 'inbound',
@@ -172,11 +176,11 @@ describe('Ask-aware cross-channel threading', () => {
     test('two open Asks are ambiguous and are never guessed between', async () => {
         const db = new FakeDb();
         db.tables.communication_threads.push(
-            { thread_id: 'thread_one', participant_identity: '+61400000000', status: 'open', purpose: { type: 'human_ask', ask_id: 'ask_1' }, correlation: {} },
-            { thread_id: 'thread_two', participant_identity: '+61400000000', status: 'open', purpose: { type: 'human_ask', ask_id: 'ask_2' }, correlation: {} },
+            { tenant_id: 'tenant_test', thread_id: 'thread_one', participant_identity: '+61400000000', status: 'open', purpose: { type: 'human_ask', ask_id: 'ask_1' }, correlation: {} },
+            { tenant_id: 'tenant_test', thread_id: 'thread_two', participant_identity: '+61400000000', status: 'open', purpose: { type: 'human_ask', ask_id: 'ask_2' }, correlation: {} },
         );
         const inbound = await resolveCommunicationThread({
-            db, participantIdentity: '+61400000000', direction: 'inbound', purpose: null, correlation: {},
+            db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'inbound', purpose: null, correlation: {},
         });
         assert.equal(inbound.threadId, null);
         assert.equal(inbound.purpose, null);
@@ -184,14 +188,26 @@ describe('Ask-aware cross-channel threading', () => {
 
     test('terminal threads and Ask bindings cannot be reopened', async () => {
         const db = new FakeDb();
-        db.tables.communication_threads.push({ thread_id: 'thread_done', status: 'resolved', purpose: { type: 'human_ask', ask_id: 'ask_done' }, correlation: {} });
-        db.tables.ask_bindings.push({ ask_id: 'ask_cancelled', thread_id: 'thread_other', status: 'cancelled' });
+        db.tables.communication_threads.push({ tenant_id: 'tenant_test', thread_id: 'thread_done', status: 'resolved', purpose: { type: 'human_ask', ask_id: 'ask_done' }, correlation: {} });
+        db.tables.ask_bindings.push({ tenant_id: 'tenant_test', ask_id: 'ask_cancelled', thread_id: 'thread_other', status: 'cancelled' });
         await assert.rejects(() => resolveCommunicationThread({
-            db, participantIdentity: '+61400000000', direction: 'inbound', threadId: 'thread_done', correlation: {},
+            db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'inbound', threadId: 'thread_done', correlation: {},
         }), /cannot accept/);
         await assert.rejects(() => resolveCommunicationThread({
-            db, participantIdentity: '+61400000000', direction: 'outbound', purpose: { type: 'human_ask', ask_id: 'ask_cancelled' }, correlation: {},
+            db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'outbound', purpose: { type: 'human_ask', ask_id: 'ask_cancelled' }, correlation: {},
         }), /cancelled/);
+    });
+
+    test('the same participant in another tenant is never considered for inference', async () => {
+        const db = new FakeDb();
+        db.tables.communication_threads.push({
+            tenant_id: 'tenant_other', thread_id: 'thread_other', participant_identity: '+61400000000',
+            status: 'open', purpose: { type: 'human_ask', ask_id: 'ask_other' }, correlation: { tenant_id: 'tenant_other' },
+        });
+        const result = await resolveCommunicationThread({
+            db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'inbound', correlation: {},
+        });
+        assert.equal(result.threadId, null);
     });
 });
 

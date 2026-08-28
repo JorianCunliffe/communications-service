@@ -9,8 +9,12 @@
 // way: Twilio signs each request with the account's auth token and we check the
 // signature. Same file, same idea, opposite direction.
 
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import twilio from 'twilio';
+import { tenantFromRequest } from './tenantContext.js';
+
+const scrypt = promisify(scryptCallback);
 
 export const E164 = /^\+[1-9]\d{1,14}$/;
 
@@ -41,6 +45,99 @@ export function rejectUnauthorized(request, reply, feature) {
         return reply.code(401).send({ error: 'Invalid or missing X-API-Key' });
     }
     return null;
+}
+
+function equalText(left, right) {
+    const a = Buffer.from(String(left ?? ''));
+    const b = Buffer.from(String(right ?? ''));
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export async function hashApiSecret(secret, salt = randomBytes(16).toString('base64url')) {
+    if (typeof secret !== 'string' || secret.length < 24) throw new Error('API client secrets must contain at least 24 characters');
+    const derived = await scrypt(secret, salt, 32, { N: 16384, r: 8, p: 1 });
+    return `scrypt$16384$8$1$${salt}$${Buffer.from(derived).toString('base64url')}`;
+}
+
+export async function verifyApiSecret(secret, encoded) {
+    const [algorithm, n, r, p, salt, expected] = String(encoded || '').split('$');
+    if (algorithm !== 'scrypt' || !salt || !expected) return false;
+    try {
+        const derived = await scrypt(String(secret), salt, 32, { N: Number(n), r: Number(r), p: Number(p) });
+        return equalText(Buffer.from(derived).toString('base64url'), expected);
+    } catch {
+        return false;
+    }
+}
+
+function suppliedApiKey(request) {
+    const value = request.headers?.['x-api-key'];
+    return typeof value === 'string' ? value : '';
+}
+
+// Authenticates a tenant-scoped API request. The long-standing API_KEY remains
+// a deliberately single-tenant compatibility credential; new clients use
+// <key_id>.<secret> credentials stored as salted scrypt hashes.
+export async function authenticateTenantRequest(request, db) {
+    const provided = suppliedApiKey(request);
+    if (!provided) return { ok: false, status: 401, error: 'Invalid or missing X-API-Key' };
+
+    let requestedTenant;
+    try {
+        requestedTenant = tenantFromRequest(request);
+    } catch (error) {
+        return { ok: false, status: 400, error: error.message };
+    }
+
+    if (process.env.API_KEY && equalText(provided, process.env.API_KEY)) {
+        const legacyTenant = String(process.env.LEGACY_TENANT_ID || '').trim();
+        if (!legacyTenant) return { ok: false, status: 503, error: 'LEGACY_TENANT_ID is required for the legacy API key' };
+        if (requestedTenant && requestedTenant !== legacyTenant) return { ok: false, status: 403, error: 'API client is not allowed for this tenant' };
+        return { ok: true, tenantId: legacyTenant, keyId: 'legacy', roles: ['admin'], capabilities: ['*'] };
+    }
+
+    const separator = provided.indexOf('.');
+    if (separator < 1 || !db) return { ok: false, status: 401, error: 'Invalid or missing X-API-Key' };
+    const keyId = provided.slice(0, separator);
+    const secret = provided.slice(separator + 1);
+    const result = await db.from('api_clients').select('*').eq('key_id', keyId).maybeSingle();
+    if (result.error) return { ok: false, status: 503, error: 'API client authentication is unavailable' };
+    const client = result.data;
+    if (!client || client.revoked_at || !(await verifyApiSecret(secret, client.secret_hash))) {
+        return { ok: false, status: 401, error: 'Invalid or missing X-API-Key' };
+    }
+    if (!requestedTenant) return { ok: false, status: 400, error: 'tenant_id or X-Tenant-Id is required' };
+    if (!Array.isArray(client.allowed_tenants) || !client.allowed_tenants.includes(requestedTenant)) {
+        return { ok: false, status: 403, error: 'API client is not allowed for this tenant' };
+    }
+    await db.from('api_clients').update({ last_used_at: new Date().toISOString() }).eq('id', client.id);
+    return {
+        ok: true,
+        tenantId: requestedTenant,
+        keyId,
+        roles: client.roles || [],
+        capabilities: client.capabilities || [],
+    };
+}
+
+export async function rejectUnauthorizedTenant(request, reply, db, feature) {
+    if (!process.env.API_KEY && !db) return reply.code(503).send({ error: `${feature} is not configured` });
+    const result = await authenticateTenantRequest(request, db);
+    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    request.tenantId = result.tenantId;
+    request.authContext = result;
+    return null;
+}
+
+export function hasCapability(request, capability) {
+    const capabilities = request.authContext?.capabilities || [];
+    return capabilities.includes('*') || capabilities.includes(capability);
+}
+
+export function rejectMissingCapability(request, reply, capability) {
+    return hasCapability(request, capability)
+        ? null
+        : reply.code(403).send({ error: `API client lacks required capability: ${capability}` });
 }
 
 // --- Twilio webhook signatures ---------------------------------------------

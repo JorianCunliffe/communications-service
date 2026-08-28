@@ -17,6 +17,7 @@
 
 import { toText } from './transcripts.js';
 import { getDatabase } from './database.js';
+import { tenantDatabase } from './tenantContext.js';
 import { callbackForThread, enqueueEvent } from './eventOutbox.js';
 
 // A small model is the right tool: this is compression, not reasoning, and it
@@ -185,8 +186,10 @@ export async function appendHistory({ contactId, channel = 'call', line, when = 
 // Reads the transcript back from the database rather than taking it as an
 // argument: whichever producer wrote last is the one that should be summarised,
 // and that is a question only the row can answer.
-export async function summariseCall(callSid) {
-    const db = getDatabase();
+export async function summariseCall(callSid, tenantId = null) {
+    const raw = getDatabase();
+    const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
+    const db = raw && scopedTenant ? tenantDatabase(raw, scopedTenant) : null;
     if (!db || !callSid) return;
 
     try {

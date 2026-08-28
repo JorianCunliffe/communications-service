@@ -1,4 +1,5 @@
 import { callbackForThread, enqueueEvent } from './eventOutbox.js';
+import { tenantDatabase } from './tenantContext.js';
 import { getDatabase } from './database.js';
 import { summariseCall } from './summarise.js';
 
@@ -177,7 +178,7 @@ export async function persistCallOutcome(db, call, outcome) {
     const stored = update.data;
     if (!stored.communication_id) return stored;
 
-    const destination = await callbackForThread(stored.communication_thread_id);
+    const destination = await callbackForThread(stored.tenant_id, stored.communication_thread_id);
     const eventType = outcome.successful ? 'call.completed' : 'call.failed';
     const payload = {
         channel: 'voice',
@@ -193,6 +194,7 @@ export async function persistCallOutcome(db, call, outcome) {
         outcome_confidence: outcome.confidence,
     };
     const terminal = await enqueueEvent({
+        tenantId: stored.tenant_id,
         type: eventType,
         communicationId: stored.communication_id,
         purpose: stored.purpose,
@@ -204,6 +206,7 @@ export async function persistCallOutcome(db, call, outcome) {
 
     if (outcome.successful && stored.purpose?.type === 'human_ask' && stored.transcript?.segments?.length) {
         await enqueueEvent({
+            tenantId: stored.tenant_id,
             type: 'ask.response.received',
             communicationId: stored.communication_id,
             purpose: stored.purpose,
@@ -223,7 +226,7 @@ export async function persistCallOutcome(db, call, outcome) {
         terminal_event_emitted_at: now,
     }).eq('id', stored.id);
     if (marked.error) throw new Error(`Call terminal event marker: ${marked.error.message}`);
-    if (outcome.successful) await summariseCall(stored.twilio_call_sid);
+    if (outcome.successful) await summariseCall(stored.twilio_call_sid, stored.tenant_id);
     return stored;
 }
 
@@ -295,10 +298,13 @@ export async function sweepCallOutcomesOnce() {
     if (claimed.error) throw new Error(`Call outcome claim: ${claimed.error.message}`);
     const job = claimed.data?.[0];
     if (!job) return { processed: 0 };
+    const tenantId = job.tenant_id || process.env.LEGACY_TENANT_ID;
+    if (!tenantId) throw new Error(`Call outcome job ${job.id} has no tenant_id`);
+    const scoped = tenantDatabase(db, tenantId);
     try {
-        await processJob(db, job);
+        await processJob(scoped, job);
     } catch (error) {
-        await failJob(db, job, error);
+        await failJob(scoped, job, error);
     }
     return { processed: 1 };
 }

@@ -1,4 +1,5 @@
 import { getDatabase } from './database.js';
+import { tenantDatabase } from './tenantContext.js';
 
 const SWEEP_INTERVAL_MS = 15000;
 const MAX_ATTEMPTS = 5;
@@ -328,7 +329,13 @@ export function sweepEnrichmentOnce() {
         try {
             let job;
             while ((job = await claimNext(db))) {
-                try { await processJob(db, job); } catch (error) { await fail(db, job, error); }
+                const tenantId = job.tenant_id || process.env.LEGACY_TENANT_ID;
+                if (!tenantId) {
+                    console.warn(`Enrichment job ${job.id} has no tenant_id`);
+                    continue;
+                }
+                const scoped = tenantDatabase(db, tenantId);
+                try { await processJob(scoped, job); } catch (error) { await fail(scoped, job, error); }
             }
         } catch (error) {
             console.warn(`Enrichment sweep failed: ${error.message}`);

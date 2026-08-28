@@ -1,5 +1,5 @@
 import twilio from 'twilio';
-import { E164, rejectUnauthorized } from './auth.js';
+import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.js';
 import { assertContactable, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
 import { getDatabase } from './database.js';
 import { recordMessage } from './smsLog.js';
@@ -10,17 +10,23 @@ import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixe
 import { calendarCandidates, ingestCalendarEvent, resolveCalendarEvent, resolveCalendarEventId } from './calendar.js';
 import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, searchMemory } from './memory.js';
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
+import { tenantDatabase } from './tenantContext.js';
+import { emailEnabled } from './emailWebhook.js';
+import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
+import { createEmailReplyRoute } from './emailReplyRoutes.js';
+import { outboundEmailRequest } from './email.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
 const DIRECTIONS = ['inbound', 'outbound'];
 const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
 const CALL_OVERRIDE_FIELDS = ['model', 'effort', 'voice', 'temperature', 'systemMessage', 'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst', 'liveTranscript'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const INBOX_DISPOSITIONS = ['candidate_human_response', 'human', 'spam', 'bounce', 'automatic_reply', 'mailing_list', 'unsubscribe_intent', 'system_generated', 'archived', 'unassigned'];
 
 function database(reply) {
     const db = getDatabase();
     if (!db) reply.code(503).send({ error: 'Communications persistence is not configured' });
-    return db;
+    return db ? tenantDatabase(db, reply.request.tenantId) : null;
 }
 
 function errorReply(reply, error, status = 400) {
@@ -46,7 +52,9 @@ function outboundError(action, error) {
 
 function toCanonical(row) {
     return canonicalCommunication({
+        tenantId: row.tenant_id,
         communicationId: row.communication_id,
+        threadId: row.thread_id,
         channel: row.channel,
         direction: row.direction,
         occurredAt: row.occurred_at,
@@ -98,13 +106,37 @@ function parseSemantic(body = {}) {
 }
 
 export default async function v1Routes(fastify) {
-    fastify.addHook('preHandler', async (request, reply) => rejectUnauthorized(request, reply, 'Communications API'));
+    fastify.addHook('preHandler', async (request, reply) => {
+        const rejected = await rejectUnauthorizedTenant(request, reply, getDatabase(), 'Communications API');
+        if (rejected) return rejected;
+        const capability = request.method === 'GET' ? 'communications:read' : 'communications:write';
+        const denied = rejectMissingCapability(request, reply, capability);
+        if (denied) return denied;
+        if (request.method === 'POST' && request.url.split('?')[0].endsWith('/emails')) {
+            const emailDenied = rejectMissingCapability(request, reply, 'email:send');
+            if (emailDenied) return emailDenied;
+        }
+        if (request.body && typeof request.body === 'object' && !Array.isArray(request.body)) {
+            request.body.tenant_id = request.tenantId;
+            request.body.correlation = {
+                ...(request.body.metadata || {}),
+                ...(request.body.correlation || {}),
+                tenant_id: request.tenantId,
+            };
+        }
+        return null;
+    });
 
     fastify.get('/communications', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
         let query = db.from('communications').select('*', { count: 'exact' })
             .order('occurred_at', { ascending: false }).limit(limit);
+        if (request.query.cursor) {
+            const cursor = new Date(request.query.cursor);
+            if (Number.isNaN(cursor.valueOf())) return reply.code(400).send({ error: 'cursor must be an ISO timestamp' });
+            query = query.lt('occurred_at', cursor.toISOString());
+        }
         if (request.query.channel) {
             if (!CHANNELS.includes(request.query.channel)) return reply.code(400).send({ error: 'Unknown channel' });
             query = query.eq('channel', request.query.channel);
@@ -122,7 +154,10 @@ export default async function v1Routes(fastify) {
         }
         const { data, error, count } = await query;
         if (error) return errorReply(reply, new Error(error.message), 500);
-        return { data: (data || []).map(toCanonical), count, limit };
+        return {
+            data: (data || []).map(toCanonical), count, limit,
+            next_cursor: data?.length === limit ? data[data.length - 1].occurred_at : null,
+        };
     });
 
     // Provider adapters can project email, WhatsApp, Slack or Teams here. This
@@ -232,6 +267,50 @@ export default async function v1Routes(fastify) {
         } catch (error) { return errorReply(reply, error, 500); }
     });
 
+    fastify.post('/communications/:communicationId/disposition', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const disposition = String(request.body?.disposition || '').trim().toLowerCase();
+        if (!INBOX_DISPOSITIONS.includes(disposition)) return reply.code(400).send({ error: 'Unknown disposition' });
+        const memoryEligible = request.body?.memory_eligible === undefined
+            ? ['candidate_human_response', 'human'].includes(disposition)
+            : request.body.memory_eligible === true;
+        if (memoryEligible && !['candidate_human_response', 'human'].includes(disposition)) {
+            return reply.code(400).send({ error: 'Non-human dispositions cannot be memory eligible' });
+        }
+        const updated = await db.from('communications').update({
+            disposition, memory_eligible: memoryEligible, updated_at: new Date().toISOString(),
+        }).eq('communication_id', request.params.communicationId).select('*').maybeSingle();
+        if (updated.error) return errorReply(reply, new Error(updated.error.message), 500);
+        if (!updated.data) return reply.code(404).send({ error: 'Communication not found' });
+        if (updated.data.channel === 'email') {
+            const email = await db.from('email_messages').update({
+                triage_class: disposition, memory_eligible: memoryEligible, updated_at: new Date().toISOString(),
+            }).eq('communication_id', request.params.communicationId);
+            if (email.error) return errorReply(reply, new Error(email.error.message), 500);
+        }
+        return toCanonical(updated.data);
+    });
+
+    fastify.get('/inbox', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
+        let query = db.from('communications').select('*').eq('direction', 'inbound')
+            .order('occurred_at', { ascending: false }).limit(limit);
+        if (request.query.channel) query = query.eq('channel', request.query.channel);
+        if (request.query.disposition) query = query.eq('disposition', request.query.disposition);
+        if (request.query.cursor) {
+            const cursor = new Date(request.query.cursor);
+            if (Number.isNaN(cursor.valueOf())) return reply.code(400).send({ error: 'cursor must be an ISO timestamp' });
+            query = query.lt('occurred_at', cursor.toISOString());
+        }
+        const result = await query;
+        if (result.error) return errorReply(reply, new Error(result.error.message), 500);
+        return {
+            data: (result.data || []).map(toCanonical),
+            next_cursor: result.data?.length === limit ? result.data[result.data.length - 1].occurred_at : null,
+        };
+    });
+
     fastify.post('/communications/:communicationId/enrich', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try {
@@ -293,7 +372,8 @@ export default async function v1Routes(fastify) {
                 ...semantic, strict: true,
             });
             const communication = canonicalCommunication({
-                communicationId, channel: 'sms', direction: 'outbound', content: body,
+                tenantId: request.tenantId, communicationId, threadId: stored.threadId,
+                channel: 'sms', direction: 'outbound', content: body,
                 provider: 'twilio', providerId: message.sid,
                 correlation: stored.correlation, purpose: stored.purpose,
             });
@@ -325,6 +405,161 @@ export default async function v1Routes(fastify) {
             if (!row || row.channel !== 'sms') return reply.code(404).send({ error: 'Message not found' });
             return toCanonical(row);
         } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/emails', async (request, reply) => {
+        if (!emailEnabled()) return reply.code(503).send({ error: 'Email delivery is disabled' });
+        const db = database(reply); if (!db) return reply;
+        const body = request.body || {};
+        if (!body.from && !body.service_identity_id) {
+            return reply.code(400).send({ error: 'from or service_identity_id is required' });
+        }
+        let semantic;
+        try { semantic = parseSemantic(body); } catch (error) { return errorReply(reply, error); }
+        let operation = null;
+        let communicationId = prefixedId('comm');
+        try {
+            const { connection, serviceIdentity } = await loadEmailConnection(db, request.tenantId, {
+                connectionId: body.provider_connection_id || null,
+                serviceIdentityId: body.service_identity_id || null,
+                from: body.from || null,
+            });
+            const thread = await resolveCommunicationThread({
+                db,
+                tenantId: request.tenantId,
+                participantIdentity: body.to?.[0] || body.to || body.person_id || null,
+                serviceIdentity: serviceIdentity.address,
+                direction: 'outbound',
+                threadId: semantic.threadId || prefixedId('thread'),
+                purpose: semantic.purpose,
+                correlation: semantic.correlation,
+                callbackUrl: semantic.callbackUrl || connection.default_callback_url || null,
+            });
+            const providerRequest = {
+                ...body,
+                from: body.from || (serviceIdentity.display_name
+                    ? `${serviceIdentity.display_name} <${serviceIdentity.address}>`
+                    : serviceIdentity.address),
+            };
+            if (!providerRequest.reply_to?.length && serviceIdentity.reply_domain) {
+                const reply = await createEmailReplyRoute(db, {
+                    tenantId: request.tenantId,
+                    threadId: thread.threadId,
+                    askId: thread.purpose?.type === 'human_ask' ? thread.purpose.ask_id : null,
+                    personId: body.person_id || null,
+                    serviceIdentityId: serviceIdentity.id,
+                });
+                providerRequest.reply_to = [`reply+${reply.token}@${serviceIdentity.reply_domain}`];
+            }
+            const key = idempotencyKey(request);
+            operation = await reserveOutbound(db, {
+                tenantId: request.tenantId,
+                key,
+                type: 'email',
+                communicationId,
+                request: {
+                    from: providerRequest.from, to: providerRequest.to, cc: providerRequest.cc,
+                    bcc: providerRequest.bcc, subject: providerRequest.subject,
+                    text: providerRequest.text, html: providerRequest.html,
+                    purpose: thread.purpose, correlation: thread.correlation, thread_id: thread.threadId,
+                },
+            });
+            communicationId = operation.communication_id;
+            if (operation.status === 'completed') return reply.code(200).send(operation.response);
+            if (operation.status === 'failed') {
+                const reconciliation = new Error('Email operation previously failed after reservation; reconcile provider state before retrying');
+                reconciliation.code = 'IDEMPOTENCY_RECONCILIATION_REQUIRED';
+                throw reconciliation;
+            }
+
+            let sent = { providerId: operation.provider_id, providerResponse: operation.response, email: null };
+            if (operation.status !== 'provider_sent') {
+                sent = await sendEmailWithProvider({ connection, request: providerRequest, idempotencyKey: key });
+                await markOutbound(db, operation.id, {
+                    status: 'provider_sent', provider_id: sent.providerId, provider_status: 'accepted',
+                    response: sent.providerResponse,
+                });
+            }
+
+            // Re-normalise without making another provider call when resuming a
+            // provider_sent operation.
+            const delivered = sent.email || outboundEmailRequest(providerRequest);
+            const sourceId = randomUUID();
+            const emailRow = await db.from('email_messages').insert({
+                id: sourceId,
+                communication_id: communicationId,
+                thread_id: thread.threadId,
+                person_id: body.person_id || null,
+                purpose: thread.purpose,
+                correlation: thread.correlation,
+                callback_url: thread.callbackUrl,
+                provider_connection_id: connection.id,
+                service_identity_id: serviceIdentity.id,
+                provider_email_id: sent.providerId,
+                direction: 'outbound',
+                from_addresses: [delivered.from],
+                to_addresses: delivered.to,
+                cc_addresses: delivered.cc,
+                bcc_addresses: delivered.bcc,
+                reply_to_addresses: delivered.replyTo,
+                subject: delivered.subject,
+                text_body: delivered.text,
+                sanitized_html: delivered.html,
+                headers: {},
+                occurred_at: new Date().toISOString(),
+                delivery_status: 'accepted',
+            });
+            if (emailRow.error) throw new Error(emailRow.error.message);
+            const communicationRow = await db.from('communications').insert({
+                communication_id: communicationId,
+                channel: 'email', direction: 'outbound', source_table: 'email_messages', source_id: sourceId,
+                contact_id: body.person_id || null, person_id: body.person_id || null,
+                occurred_at: new Date().toISOString(), subject: delivered.subject,
+                body: delivered.text || delivered.html, provider: connection.provider, provider_id: sent.providerId,
+                purpose: thread.purpose, correlation: thread.correlation, thread_id: thread.threadId,
+                thread_link_type: 'explicit', memory_eligible: true,
+                metadata: { provider_connection_id: connection.id },
+            });
+            if (communicationRow.error) throw new Error(communicationRow.error.message);
+
+            const response = canonicalCommunication({
+                tenantId: request.tenantId,
+                communicationId,
+                threadId: thread.threadId,
+                channel: 'email', direction: 'outbound', content: delivered.text || delivered.html,
+                provider: connection.provider, providerId: sent.providerId,
+                correlation: thread.correlation, purpose: thread.purpose,
+            });
+            await enqueueEvent({
+                tenantId: request.tenantId,
+                type: 'email.accepted', communicationId, purpose: thread.purpose,
+                correlation: thread.correlation, destination: thread.callbackUrl || connection.default_callback_url,
+                dedupeKey: `email-accepted:${connection.id}:${sent.providerId}`,
+                payload: { channel: 'email', direction: 'outbound', provider_id: sent.providerId, thread_id: thread.threadId },
+            });
+            await markOutbound(db, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
+            return reply.code(202).send(response);
+        } catch (error) {
+            if (operation?.id) {
+                await markOutbound(db, operation.id, {
+                    status: 'failed', response: { error: error.message }, completed_at: new Date().toISOString(),
+                }).catch(() => {});
+            }
+            if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
+            if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
+            if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return errorReply(reply, error, 409);
+            if (error.code === 'IDEMPOTENCY_RECONCILIATION_REQUIRED') return errorReply(reply, error, 409);
+            return errorReply(reply, error, error.status && error.status < 500 ? 400 : 502);
+        }
+    });
+
+    fastify.get('/emails/:communicationId', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const communication = await getCommunication(db, request.params.communicationId);
+        if (!communication || communication.channel !== 'email') return reply.code(404).send({ error: 'Email not found' });
+        const message = await db.from('email_messages').select('*').eq('communication_id', request.params.communicationId).maybeSingle();
+        if (message.error) return errorReply(reply, new Error(message.error.message), 500);
+        return { ...toCanonical(communication), email: message.data };
     });
 
     fastify.post('/calls', async (request, reply) => {
@@ -387,7 +622,8 @@ export default async function v1Routes(fastify) {
                 payload: { status: call.status, channel: 'voice', direction: 'outbound' },
             });
             const response = canonicalCommunication({
-                communicationId, channel: 'voice', direction: 'outbound', provider: 'twilio',
+                tenantId: request.tenantId, communicationId, threadId: stored.threadId,
+                channel: 'voice', direction: 'outbound', provider: 'twilio',
                 providerId: call.sid, correlation: stored.correlation, purpose: stored.purpose,
             });
             await markOutbound(db, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });

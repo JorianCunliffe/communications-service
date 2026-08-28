@@ -1,28 +1,31 @@
 {
   "name": "communications-service",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Purpose-aware, channel-independent communications API for voice, SMS and future providers",
   "main": "index.js",
   "scripts": {
     "db:migrate": "node scripts/migrate.js",
+    "api-client:hash": "node scripts/hash-api-secret.js",
     "start:production": "node scripts/migrate.js && node index.js",
-    "test": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/callOutcome.test.js test/memory.test.js test/security.test.js test/documentation.test.js test/suite.test.js",
-    "test:unit": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/callOutcome.test.js test/memory.test.js test/security.test.js test/documentation.test.js"
+    "test": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/callOutcome.test.js test/memory.test.js test/security.test.js test/documentation.test.js test/suite.test.js",
+    "test:unit": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/callOutcome.test.js test/memory.test.js test/security.test.js test/documentation.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.0",
     "@fastify/websocket": "^11.0.0",
-    "@supabase/supabase-js": "^2.110.8",
+    "@supabase/supabase-js": "2.110.8",
     "dotenv": "^16.4.5",
     "fastify": "^5.0.0",
     "pg": "^8.16.3",
+    "sanitize-html": "^2.17.7",
+    "svix": "^2.1.0",
     "twilio": "^6.0.2",
     "undici": "^7.29.0",
     "ws": "^8.18.0"

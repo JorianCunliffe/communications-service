@@ -1,20 +1,20 @@
 # Communications Service
 
-Current contract release: `2.1.0`.
+Current contract release: `2.2.0`.
 
-Purpose-aware, channel-independent communication memory with production Twilio SMS and voice adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
+Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
-Runtime requirement: Node.js `20.18.1` or newer.
+Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A new deployment must apply migrations `000` through `008` and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `010`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Email remains off until `EMAIL_ENABLED=true` and a provider connection is provisioned.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/008_call_outcomes.sql)
+- [Latest database migration](migrations/010_email_pipeline.sql)
 
 ## Architecture
 
@@ -68,12 +68,13 @@ The database function resolves the Ask binding, thread, and final communication 
 HyperFlow is a consumer of this API, not a shared-database component. A compatible HyperFlow client must:
 
 - authenticate outbound Communications requests with `X-API-Key`;
+- send the authenticated tenant as `X-Tenant-Id` when using a scoped API client; the legacy key is restricted to `LEGACY_TENANT_ID`;
 - supply a stable `Idempotency-Key` for every billable SMS or voice request;
 - send SMS as `POST /v1/messages` with `to`, `from`, and `body`;
 - send calls as `POST /v1/calls` with `to`, `from`, and allow-listed `overrides`;
 - read the canonical `communication_id` response field (an `id` field is not returned);
 - deliver SMS/voice Asks through those channel endpoints with `purpose.type: "human_ask"`, `purpose.ask_id`, and an HTTPS `callback_url`;
-- keep email/web-form Ask delivery in HyperFlow until an email provider adapter exists here;
+- send email as `POST /v1/emails` after the tenant's Resend connection and service identity are provisioned;
 - verify `X-Communications-Signature` over the raw webhook body, deduplicate `event_id`, and accept at-least-once delivery;
 - treat `sms.delivered` and `call.completed` as success, `sms.failed` and `call.failed` as failure, and all started/sent/answered events as nonterminal. For voice, Twilio's provider status `completed` is not sufficient: this service emits `call.completed` only after verifying a meaningful response from the intended human; and
 - call `POST /v1/asks/:askId/resolve` only after HyperFlow has accepted a specific reply as the final answer.
@@ -96,8 +97,9 @@ If a person has two open Ask threads, the service does not guess. The sender mus
 | Area | Current implementation |
 |---|---|
 | Canonical communications | Universal `comm_…` IDs; voice, SMS, email, WhatsApp, Slack, Teams, and recording shapes |
-| Provider delivery | Twilio outbound SMS and voice |
-| Provider ingestion | Twilio inbound SMS, calls, call status, message status, and recordings |
+| Provider delivery | Twilio outbound SMS/voice; Resend outbound email behind `EMAIL_ENABLED` |
+| Provider ingestion | Twilio inbound/status/recording callbacks; signed Resend receipts processed through a durable normalization queue |
+| Tenancy | Mandatory tenant ownership, scoped credentials, composite provider/idempotency keys, and application-enforced query scoping |
 | Voice | OpenAI Realtime bidirectional audio over Twilio Media Streams |
 | Voice outcomes | Durable post-call classification; voicemail, wrong number, no answer, busy, fax, automated systems, provider failure, and non-meaningful responses fail closed |
 | Purpose and correlation | First-class `purpose`; allow-listed workflow correlation fields |
@@ -111,7 +113,7 @@ If a person has two open Ask threads, the service does not guess. The sender mus
 | Management | Read/audit API for contacts, lines, calls, tools, history, and recordings |
 | Operator UI | Landing page, visible version/build marker, and test console |
 
-Only Twilio currently performs outbound delivery. `POST /v1/communications` lets future email, Slack, Teams, WhatsApp, or other adapters record canonical communication data without changing the public model.
+Twilio performs SMS/voice delivery and Resend is the first owned email adapter. `POST /v1/communications` remains the provider-neutral ingestion surface for other channels.
 
 ## Quick start
 
@@ -127,6 +129,7 @@ Minimum startup configuration:
 ```dotenv
 OPENAI_API_KEY=sk-...
 PORT=5050
+LEGACY_TENANT_ID=tenant_primary
 ```
 
 The process exits when `OPENAI_API_KEY` is absent. Without a persistence provider, voice can still use built-in configuration, but communications are not persisted and `/v1` returns `503`.
@@ -150,6 +153,8 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 7. `migrations/006_memory_search.sql`
 8. `migrations/007_rectification.sql`
 9. `migrations/008_call_outcomes.sql`
+10. `migrations/009_multi_tenancy.sql`
+11. `migrations/010_email_pipeline.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -169,7 +174,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` is required for outbound idempotency, terminal Ask protection, worker leases, atomic contact/calendar writes, and the `external_project_id` correlation field. Migration `008` separates provider completion from verified human success, adds durable call-outcome jobs, gates memory eligibility, and retracts derived memory supported only by failed historical calls.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes.
 
 If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
@@ -194,9 +199,20 @@ Search results distinguish direct matches from `thread_context` expansion and re
 
 ```dotenv
 API_KEY=replace-with-a-long-random-secret
+LEGACY_TENANT_ID=tenant_primary
 ```
 
-All `/v1` and `/api` routes require `X-API-Key`. If `API_KEY` is missing, protected routes return `503`; if it is wrong or absent from a configured deployment, they return `401`.
+All `/v1` and `/api` routes require `X-API-Key`. The compatibility key maps only to `LEGACY_TENANT_ID`. Tenant-scoped clients use `<key_id>.<secret>` credentials from `api_clients` and must send `X-Tenant-Id`; stored secrets are salted scrypt verifiers. Capabilities are enforced (`communications:read`, `communications:write`, `email:send`, `management:read`, `management:write`). If credentials are missing or wrong, protected routes fail closed.
+
+To provision a scoped client, generate the verifier without placing the secret in source control, then insert the reported `key_id` and `secret_hash` with explicit `allowed_tenants`, `roles`, and `capabilities`:
+
+```powershell
+$env:API_CLIENT_SECRET = '<at-least-24-random-characters>'
+npm.cmd run api-client:hash
+Remove-Item Env:API_CLIENT_SECRET
+```
+
+The caller's credential is `<key_id>.<original-secret>`; the original secret is never stored by the service.
 
 ### 4. Configure Twilio delivery
 
@@ -217,6 +233,24 @@ Configure the Twilio number:
 | Voice: a call comes in | `POST https://<host>/incoming-call` |
 | Voice: call status changes | `POST https://<host>/call-status` |
 | Messaging: a message comes in | `POST https://<host>/incoming-sms` |
+
+### 5. Enable Resend email
+
+Email is fail-closed and disabled by default. First set the provider secrets in Replit, insert one tenant-owned `provider_connections` row and at least one matching `service_identities` row, then register this signed webhook in Resend:
+
+```text
+POST https://<host>/webhooks/email/resend/<provider-connection-uuid>
+```
+
+The connection stores `credential_reference=env:RESEND_API_KEY` and `webhook_secret_reference=env:RESEND_WEBHOOK_SECRET`; it never stores either secret. Its `channels` must include `email`. A sending identity needs `can_send=true`; a receiving identity needs `can_receive=true`. Set `reply_domain` to the receiving domain if Ask replies should use opaque `reply+<token>@...` routes. Only after those rows and webhook subscriptions are verified should you set:
+
+```dotenv
+EMAIL_ENABLED=true
+RESEND_API_KEY=re_...
+RESEND_WEBHOOK_SECRET=whsec_...
+```
+
+Outbound requests use `POST /v1/emails` with `Idempotency-Key`. Webhooks are verified over the exact raw body, stored once by provider event ID, acknowledged, and normalized asynchronously. Bounces, spam, mailing-list traffic, and automatic replies stay auditable but cannot feed memory or emit `ask.response.received`.
 
 Outbound calls and messages attach their status callbacks programmatically. If the number belongs to a Twilio Messaging Service, configure the inbound message webhook on that service.
 
@@ -354,6 +388,7 @@ Implemented event types:
 communication.created     communication.received
 sms.sent                  sms.delivered             sms.failed
 sms.received
+email.accepted            email.delivered           email.failed
 call.started              call.answered             call.completed
 call.failed               transcript.completed      summary.completed
 ask.response.received     ask.resolved
@@ -368,6 +403,7 @@ No destination means no outbox row is created.
 | `OPENAI_API_KEY` | Always | Required at process startup; Realtime voice and summaries/transcription use it |
 | `PORT` | Optional | Listen port; default `5050` |
 | `API_KEY` | Using `/v1`, `/api`, `/sms`, `/outbound-call` | Shared `X-API-Key` secret |
+| `LEGACY_TENANT_ID` | Always with persistence/protected APIs | Stable tenant that owns all pre-009 rows and the compatibility `API_KEY`; required before migration 009 |
 | `PERSISTENCE_PROVIDER` | Persistence enabled | `postgres` for Replit/direct PostgreSQL, `supabase` for Supabase, or `none`; explicit selection is recommended |
 | `DATABASE_URL` | PostgreSQL selected | PostgreSQL connection string; supplied by Replit Database when attached |
 | `DATABASE_POOL_MAX` | Optional PostgreSQL tuning | Maximum pool size; default `10` |
@@ -394,6 +430,9 @@ No destination means no outbox row is created.
 | `HYPERFLOW_EVENT_URL` | Optional | Default durable event destination |
 | `COMMUNICATIONS_WEBHOOK_SECRET` | Durable events | Required HMAC-SHA256 event signing secret |
 | `COMMUNICATIONS_WEBHOOK_HOSTS` | Optional | Comma-separated allow-list for event destinations |
+| `EMAIL_ENABLED` | Optional | `false` by default; set `true` only after provider connections, identities, and webhook secrets are ready |
+| `RESEND_API_KEY` | Resend connection references it | Resend API key; the connection stores only `env:RESEND_API_KEY` |
+| `RESEND_WEBHOOK_SECRET` | Resend webhook connection references it | Resend/Svix signing secret; the connection stores only `env:RESEND_WEBHOOK_SECRET` |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Makes that tool available to the voice model |
 | `RECORDING_SOURCE_<NAME>_HOSTS` | Optional | Comma-separated host allow-list for external recording media |
 | `RECORDING_SOURCE_<NAME>_TOKEN` | Authenticated media | Fixed server-side bearer credential for that recording source |
@@ -418,12 +457,18 @@ No destination means no outbox row is created.
 | `communication_facts` | Active, superseded, or retracted claims with source communication IDs |
 | `communication_enrichment_jobs` | Recoverable asynchronous summary/state/fact/commitment work |
 | `call_outcome_jobs` | Durable post-call classification and terminal-event finalization work |
+| `tenants` / `api_clients` | Tenant registry and hashed, tenant-scoped service credentials |
+| `provider_connections` / `service_identities` | Tenant-owned provider accounts and trusted send/receive addresses |
+| `webhook_receipts` / `communication_jobs` | Immutable signed provider receipts and durable asynchronous normalization |
+| `email_messages` / `communication_attachments` | Safe canonical email plus separate attachment metadata |
+| `email_reply_routes` | Hashed, expiring, revocable Ask/thread reply capabilities |
 
 The original provider tables remain because they contain channel-specific details. Database triggers project calls and SMS into `communications` without using provider SIDs as public identifiers.
 
 ## Security
 
 - Protected APIs fail closed when `API_KEY` is absent.
+- Privileged database connections are wrapped so every tenant-owned read, update, delete, and insert is tenant-scoped; composite foreign keys reject cross-tenant parent links.
 - API keys are compared in constant time.
 - Twilio callbacks enforce signatures by default when the auth token exists.
 - `do_not_contact` blocks outbound delivery; an override requires `override_do_not_contact: true` and a non-empty `override_reason`.
@@ -434,7 +479,7 @@ The original provider tables remain because they contain channel-specific detail
 
 ## Operational limitations
 
-- Only Twilio currently sends communications; other channels enter through provider adapters using `POST /v1/communications`.
+- Email uses the Resend adapter only. Other future channels enter through provider adapters using `POST /v1/communications`.
 - Memory enrichment is asynchronous and eventually consistent. A newly stored communication may appear in search before its summary, facts, commitments, or current state exist.
 - Voice calls remain `business_status: pending` until outcome finalization. Only `human_completed` calls are memory eligible. Failed-call transcripts remain available through audit endpoints but are excluded from history prompts, semantic search, memory views, Ask responses, facts, commitments, and thread summaries.
 - Direct Plaud network sync requires an injected authenticated adapter because no undocumented Plaud API is assumed. The generic idempotent recording endpoint is production-ready for pushes.

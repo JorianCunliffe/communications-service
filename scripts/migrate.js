@@ -26,6 +26,9 @@ if (!process.env.DATABASE_URL) {
     try {
         await client.connect();
         await client.query("select pg_advisory_lock(hashtext('communications-service-migrations'))");
+        if (process.env.LEGACY_TENANT_ID) {
+            await client.query("select set_config('app.legacy_tenant_id', $1, false)", [process.env.LEGACY_TENANT_ID.trim()]);
+        }
         await client.query(`
             create table if not exists public.schema_migrations (
                 filename text primary key,

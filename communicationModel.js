@@ -56,7 +56,9 @@ export function normaliseCorrelation(value = {}) {
 }
 
 export function canonicalCommunication({
+    tenantId,
     communicationId,
+    threadId = null,
     channel,
     direction,
     occurredAt = new Date().toISOString(),
@@ -80,7 +82,10 @@ export function canonicalCommunication({
     outcomeDetectedAt = null,
 }) {
     return {
+        contract_version: '2.0',
+        tenant_id: tenantId,
         communication_id: communicationId,
+        thread_id: threadId,
         channel,
         direction,
         person_id: personId,
@@ -117,6 +122,7 @@ function queryError(result, label) {
 // service boundary in code: explicit correlation first, inference later.
 export async function resolveCommunicationThread({
     db,
+    tenantId = null,
     participantIdentity,
     serviceIdentity = null,
     direction,
@@ -125,6 +131,9 @@ export async function resolveCommunicationThread({
     correlation = {},
     callbackUrl = null,
 }) {
+    const scopedTenant = tenantId || correlation.tenant_id || db?.tenantId || process.env.LEGACY_TENANT_ID;
+    if (!scopedTenant) throw new Error('tenant_id is required for thread resolution');
+    correlation = { ...correlation, tenant_id: scopedTenant };
     const explicitId = threadId || correlation.thread_id || null;
     let thread = null;
     let linkType = null;
@@ -132,24 +141,25 @@ export async function resolveCommunicationThread({
     if (explicitId) {
         linkType = 'explicit';
         thread = queryError(await db.from('communication_threads')
-            .select('*').eq('thread_id', explicitId).maybeSingle(), 'Thread lookup');
+            .select('*').eq('tenant_id', scopedTenant).eq('thread_id', explicitId).maybeSingle(), 'Thread lookup');
         if (thread && thread.status !== 'open') throw new Error(`Thread ${explicitId} is ${thread.status} and cannot accept new communications`);
     }
 
     if (!thread && purpose?.type === 'human_ask') {
         const binding = queryError(await db.from('ask_bindings')
-            .select('thread_id,status').eq('ask_id', purpose.ask_id).maybeSingle(), 'Ask lookup');
+            .select('thread_id,status').eq('tenant_id', scopedTenant).eq('ask_id', purpose.ask_id).maybeSingle(), 'Ask lookup');
         if (binding) {
             linkType = 'explicit';
             if (binding.status !== 'open') throw new Error(`Ask ${purpose.ask_id} is ${binding.status}`);
             thread = queryError(await db.from('communication_threads')
-                .select('*').eq('thread_id', binding.thread_id).maybeSingle(), 'Ask thread lookup');
+                .select('*').eq('tenant_id', scopedTenant).eq('thread_id', binding.thread_id).maybeSingle(), 'Ask thread lookup');
         }
     }
 
     if (!thread && direction === 'inbound' && participantIdentity) {
         const result = await db.from('communication_threads')
             .select('*')
+            .eq('tenant_id', scopedTenant)
             .eq('participant_identity', participantIdentity)
             .eq('status', 'open')
             .order('last_activity_at', { ascending: false })
@@ -165,6 +175,7 @@ export async function resolveCommunicationThread({
         linkType = 'explicit';
         const newThreadId = explicitId || prefixedId('thread');
         thread = queryError(await db.from('communication_threads').insert({
+            tenant_id: scopedTenant,
             thread_id: newThreadId,
             status: 'open',
             participant_identity: participantIdentity,
@@ -190,20 +201,20 @@ export async function resolveCommunicationThread({
         purpose: inheritedPurpose,
         correlation: inheritedCorrelation,
         ...(callbackUrl ? { callback_url: callbackUrl } : {}),
-    }).eq('thread_id', thread.thread_id);
+    }).eq('tenant_id', scopedTenant).eq('thread_id', thread.thread_id);
 
     if (inheritedPurpose?.type === 'human_ask') {
         const existing = queryError(await db.from('ask_bindings').select('thread_id,status')
-            .eq('ask_id', inheritedPurpose.ask_id).maybeSingle(), 'Ask binding lookup');
+            .eq('tenant_id', scopedTenant).eq('ask_id', inheritedPurpose.ask_id).maybeSingle(), 'Ask binding lookup');
         if (existing && existing.status !== 'open') throw new Error(`Ask ${inheritedPurpose.ask_id} is ${existing.status}`);
         queryError(await db.from('ask_bindings').upsert({
             ask_id: inheritedPurpose.ask_id,
             thread_id: thread.thread_id,
-            tenant_id: inheritedCorrelation.tenant_id || null,
+            tenant_id: scopedTenant,
             status: existing?.status || 'open',
             purpose: inheritedPurpose,
             updated_at: new Date().toISOString(),
-        }, { onConflict: 'ask_id' }), 'Ask binding');
+        }, { onConflict: 'tenant_id,ask_id' }), 'Ask binding');
     }
 
     return {

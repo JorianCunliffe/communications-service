@@ -47,4 +47,11 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
         assert.match(replit, /run = \["npm", "run", "start:production"\]/);
         assert.match(replit, /HYPERFLOW_EVENT_URL = "https:\/\/hyper-flow5\.vercel\.app\/api\/events"/);
     });
+
+    test('the Replit runtime satisfies production dependency requirements', () => {
+        const packageJson = JSON.parse(read('../package.json'));
+        const replit = read('../.replit');
+        assert.match(replit, /modules\s*=\s*\[[^\]]*"nodejs-22"/);
+        assert.equal(packageJson.engines.node, '>=22.12.0');
+    });
 });

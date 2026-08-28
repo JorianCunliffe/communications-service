@@ -11,6 +11,7 @@
 
 import { DEFAULT_CONFIG, personaliseConfig } from './config.js';
 import { databaseProvider, getDatabase } from './database.js';
+import { tenantDatabase } from './tenantContext.js';
 
 const LOOKUP_TIMEOUT_MS = 2500;
 const WARM_UP_TIMEOUT_MS = 10000;
@@ -20,7 +21,9 @@ const ROW_CACHE_TTL_MS = 60 * 1000;
 // before index.js calls dotenv.config(), so reading it here at module scope
 // would silently see no credentials and disable config for every call.
 function getClient() {
-    return getDatabase();
+    const database = getDatabase();
+    const tenantId = process.env.LEGACY_TENANT_ID;
+    return database && tenantId ? tenantDatabase(database, tenantId) : null;
 }
 
 // Maps a settings row onto DEFAULT_CONFIG. Works for contact_config and
@@ -186,7 +189,10 @@ export async function assertContactable(phoneNumber, context = 'outbound', overr
 export async function ensureContact(phoneNumber) {
     const client = getClient();
     if (!client || !phoneNumber) return null;
-    const result = await client.rpc('ensure_communication_contact', { p_phone_number: phoneNumber });
+    const result = await client.rpc('ensure_communication_contact', {
+        p_tenant_id: process.env.LEGACY_TENANT_ID,
+        p_phone_number: phoneNumber,
+    });
     if (result.error) throw new Error(`Could not ensure contact for ${phoneNumber}: ${result.error.message}`);
     contactCache.delete(phoneNumber);
     return result.data;

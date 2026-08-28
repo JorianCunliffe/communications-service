@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Updated: 26 August 2026
+Updated: 27 August 2026
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -22,12 +22,25 @@ Every `/v1` and `/api` route requires:
 X-API-Key: <API_KEY>
 ```
 
+The compatibility `API_KEY` is restricted to `LEGACY_TENANT_ID`. New scoped credentials use `X-API-Key: <key_id>.<secret>` and also require:
+
+```http
+X-Tenant-Id: tenant_1
+```
+
+The requested tenant must be present in the client's `allowed_tenants`. Any body or query tenant value must agree with the header. The authenticated tenant is injected into writes and durable events; callers cannot override it.
+
+Scoped clients also need `communications:read` for GET `/v1`, `communications:write` for mutations, and `email:send` for `POST /v1/emails`. Management routes use `management:read` and `management:write`. The compatibility key has `*` capability.
+
 The legacy `POST /sms` and `POST /outbound-call` routes use the same header.
 
 | Condition | Status | Body |
 |---|---:|---|
 | `API_KEY` is not configured | `503` | `{ "error": "<feature> is not configured" }` |
 | Header is missing or wrong | `401` | `{ "error": "Invalid or missing X-API-Key" }` |
+| Tenant is missing for a scoped client | `400` | `{ "error": "tenant_id or X-Tenant-Id is required" }` |
+| Client is not allowed for the tenant | `403` | `{ "error": "API client is not allowed for this tenant" }` |
+| Legacy key has no tenant mapping | `503` | `{ "error": "LEGACY_TENANT_ID is required for the legacy API key" }` |
 | `/v1` needs persistence but it is disabled | `503` | `{ "error": "Communications persistence is not configured" }` |
 | `/api` needs persistence but it is disabled | `503` | Error plus required provider configuration detail |
 
@@ -42,7 +55,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. New PostgreSQL databases require migrations `000` through `008`; `npm run db:migrate` applies them in order using `DATABASE_URL`.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `010`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows.
 
 ### Twilio webhooks
 
@@ -64,7 +77,10 @@ All canonical read and create responses use:
 
 ```json
 {
+  "contract_version": "2.0",
+  "tenant_id": "tenant_1",
   "communication_id": "comm_7d0d7cc95c8946aa80c68d6ed8431dd7",
+  "thread_id": "thread_93bc",
   "channel": "sms",
   "direction": "outbound",
   "person_id": "6b31dfc4-a25b-482b-bd06-623ee1289f39",
@@ -98,7 +114,7 @@ All canonical read and create responses use:
 }
 ```
 
-`communication_id` is public identity. `provider_id` is diagnostic/provider identity. `outcome` is always present in the canonical shape; fields may be `null` for channels without a finalized business outcome. For voice, `business_status` is `pending`, `success`, or `failed`. Only `disposition: human_completed` is successful and memory eligible.
+`tenant_id`, `communication_id`, and `thread_id` are stable top-level contract fields. `provider_id` is diagnostic/provider identity. `outcome` is always present in the canonical shape; fields may be `null` for channels without a finalized business outcome. For voice, `business_status` is `pending`, `success`, or `failed`. Only `disposition: human_completed` is successful and memory eligible.
 
 ### Channel
 
@@ -177,6 +193,7 @@ Query parameters:
 | Name | Type | Notes |
 |---|---|---|
 | `limit` | integer | Default `50`, clamped to `1…200` |
+| `cursor` | ISO timestamp | Return rows older than this value; use `next_cursor` from the previous response |
 | `channel` | Channel | Exact match; unknown channel returns `400` |
 | `thread_id` | string | Exact semantic thread |
 | `ask_id` | string | Exact `purpose.ask_id` |
@@ -186,7 +203,7 @@ Query parameters:
 | `successful` | boolean string | `true` or `false`; other values are ignored |
 | `memory_eligible` | boolean string | `true` or `false`; other values are ignored |
 
-Newest communications are returned first. There is currently no offset/cursor parameter.
+Newest communications are returned first. `next_cursor` is `null` when there is no full next page.
 
 ```json
 {
@@ -194,7 +211,8 @@ Newest communications are returned first. There is currently no offset/cursor pa
     { "communication_id": "comm_…", "channel": "sms", "direction": "inbound" }
   ],
   "count": 1,
-  "limit": 50
+  "limit": 50,
+  "next_cursor": null
 }
 ```
 
@@ -246,6 +264,22 @@ GET /v1/communications/:communicationId
 ```
 
 Returns a Communication or `404 { "error": "Communication not found" }`.
+
+### Mark communication disposition
+
+```http
+POST /v1/communications/:communicationId/disposition
+```
+
+Body: `{ "disposition": "spam", "memory_eligible": false }`. Supported dispositions are `candidate_human_response`, `human`, `spam`, `bounce`, `automatic_reply`, `mailing_list`, `unsubscribe_intent`, `system_generated`, `archived`, and `unassigned`. Non-human dispositions cannot be marked memory eligible. Email triage and canonical communication state are updated together at the service layer.
+
+### Triaged inbox
+
+```http
+GET /v1/inbox
+```
+
+Returns tenant-scoped inbound communications newest first. `limit` is `1…200`; `cursor` is the prior `next_cursor` ISO timestamp. Optional `channel` and `disposition` filters are exact matches.
 
 ### Requeue memory enrichment
 
@@ -301,6 +335,54 @@ GET /v1/messages/:communicationId
 ```
 
 Returns the Communication only when its channel is `sms`; otherwise returns `404 { "error": "Message not found" }`.
+
+### Send email
+
+```http
+POST /v1/emails
+X-API-Key: <key_id>.<secret>
+X-Tenant-Id: tenant_1
+Idempotency-Key: stable-workflow-operation-id
+Content-Type: application/json
+```
+
+```json
+{
+  "service_identity_id": "a96e0f1a-09ca-471d-9dc3-853bbb822bf8",
+  "to": ["person@example.com"],
+  "subject": "Approval needed",
+  "text": "Can you approve the revised budget?",
+  "purpose": { "type": "human_ask", "ask_id": "ask_93bc" },
+  "correlation": {
+    "external_project_id": "project_42",
+    "run_id": "run_8",
+    "task_id": "task_12"
+  },
+  "callback_url": "https://hyperflow.example.com/api/events"
+}
+```
+
+`from` may be used instead of `service_identity_id`, but it must resolve to exactly one tenant-owned identity with `can_send=true`. `to` is required. `cc`, `bcc`, `reply_to`, `html`, `person_id`, `provider_connection_id`, and common semantic fields are optional. At least one of `text` or `html` is required. HTML is sanitized before storage and delivery.
+
+Requirements:
+
+- `EMAIL_ENABLED=true`
+- an enabled tenant-owned Resend `provider_connections` row whose `channels` contains `email`
+- a matching sending `service_identities` row
+- the deployment secret referenced by `credential_reference`, normally `env:RESEND_API_KEY`
+- a stable `Idempotency-Key`
+
+Response: `202` plus the canonical email Communication. An identical completed retry returns `200`; key reuse with different content returns `409`. Provider acceptance emits `email.accepted`; signed provider webhooks later emit `email.delivered` or `email.failed`.
+
+When the identity has `reply_domain`, the service creates a random reply capability, stores only its SHA-256 hash, and sends `reply+<opaque-token>@<reply-domain>` as Reply-To. Routes expire after 30 days by default and can be revoked.
+
+### Read an email communication
+
+```http
+GET /v1/emails/:communicationId
+```
+
+Returns the canonical Communication plus its safe `email` record. Raw provider webhook bodies remain separate in `webhook_receipts`.
 
 ### Place a voice call
 
@@ -666,6 +748,8 @@ Per-thread callback wins over the deployment default.
 
 ```json
 {
+  "contract_version": "2.0",
+  "tenant_id": "tenant_1",
   "event_id": "evt_8aef…",
   "communication_id": "comm_7d0d…",
   "type": "ask.response.received",
@@ -691,10 +775,14 @@ Per-thread callback wins over the deployment default.
 ```http
 Content-Type: application/json
 X-Communications-Event-Id: evt_…
+X-Communications-Contract-Version: 2.0
+X-Communications-Tenant-Id: tenant_1
+X-Communications-Timestamp: 1787800000
 X-Communications-Signature: sha256=<hex HMAC of raw JSON body>
+X-Communications-Signature-V2: sha256=<hex HMAC of timestamp + "." + raw JSON body>
 ```
 
-`COMMUNICATIONS_WEBHOOK_SECRET` is required whenever a durable destination is configured, so every delivered event carries the signature header.
+`COMMUNICATIONS_WEBHOOK_SECRET` is required whenever a durable destination is configured. The original raw-body signature remains during migration; new consumers should validate the timestamped V2 signature, reject stale timestamps, and deduplicate `event_id`.
 
 ### Delivery policy
 
@@ -719,9 +807,11 @@ The following requirements are normative for a HyperFlow deployment consuming th
 #### Outbound requests
 
 - Use `X-API-Key: <API_KEY>`. `Authorization: Bearer` is not accepted by protected Communications routes.
-- Supply a stable `Idempotency-Key` for each workflow action that can create a billable SMS or call.
+- Send `X-Tenant-Id` with tenant-scoped credentials and verify the response/event tenant matches the workflow tenant.
+- Supply a stable `Idempotency-Key` for each workflow action that can create a billable SMS, call, or email.
 - For SMS, call `POST /v1/messages` with `to`, `from`, and `body`. The fields `content` and a missing `from` number are invalid.
 - For voice, call `POST /v1/calls` with `to`, `from`, and any approved voice configuration under `overrides`. A top-level `instruction` field is not the call configuration contract.
+- For email, call `POST /v1/emails` with a tenant-owned service identity, recipients, subject, body, purpose, and correlation.
 - Read `communication_id` from the canonical response. Consumers may temporarily accept a legacy `id` alias from other adapters, but this service does not emit it.
 - Provide an HTTPS `callback_url` per request when callbacks must return to a specific HyperFlow environment. Otherwise the deployment-wide `HYPERFLOW_EVENT_URL` is used.
 
@@ -747,13 +837,15 @@ There is no `POST /v1/asks` delivery route. Send an SMS or voice Ask through its
 }
 ```
 
-HyperFlow must resolve `person_id` to an unambiguous channel destination before sending. Communications will not guess between multiple identities. Email and direct web-form delivery remain HyperFlow responsibilities until an outbound email adapter is configured in this service.
+HyperFlow must resolve `person_id` to an unambiguous channel destination before sending. Communications will not guess between multiple identities. Direct web-form delivery remains a HyperFlow responsibility; email delivery and generic reply classification are owned here when email is enabled.
 
 An `ask.response.received` event is evidence, not resolution. For SMS, response text is in `payload.content`; for voice, evidence is in `payload.transcript`, and the event is emitted only after the call is verified as `human_completed`. Failed-call transcripts are audit-only and never become Ask response evidence. HyperFlow should validate/interpret eligible evidence, persist its own Ask decision, then call `POST /v1/asks/:askId/resolve` with the accepted `communication_id`. That final call should be retried durably so the two systems cannot silently diverge.
 
 #### Event intake
 
 - Verify `X-Communications-Signature` against the exact raw request bytes. `COMMUNICATIONS_WEBHOOK_SECRET` is required whenever durable event delivery is configured.
+- Prefer `X-Communications-Signature-V2`, which signs `<X-Communications-Timestamp>.<raw-body>`; reject stale timestamps while retaining raw-body verification during migration.
+- Reject events whose top-level `tenant_id` does not match the target workflow tenant.
 - The envelope does not include a `source` field. A dedicated, signature-verified HyperFlow endpoint may normalize the source to `communications` after verification.
 - Deduplicate by `event_id`; delivery is at least once.
 - Use an explicit terminal mapping: `sms.delivered` and `call.completed` are success; `sms.failed` and `call.failed` are failure. `sms.sent`, `call.started`, `call.answered`, and transcript/summary events are nonterminal.
@@ -832,6 +924,20 @@ This route also requires configured database persistence. Response:
 { "messageSid": "SM…", "communication_id": "comm_…", "to": "+61400000000", "from": "+61411111111", "status": "queued" }
 ```
 
+## Email provider webhook
+
+```http
+POST /webhooks/email/:provider/:connectionId
+```
+
+Currently `provider` must be `resend`. This route does not accept API authentication or a request-supplied tenant. It loads the provider connection by opaque UUID, verifies the exact raw body using the connection's referenced Svix secret, and derives `tenant_id` from that trusted connection.
+
+Verified deliveries are stored immutably in `webhook_receipts`, deduplicated by provider connection plus `svix-id`, and queued in `communication_jobs`. The route returns `200` immediately; normalization, body retrieval, safe HTML storage, attachment metadata, thread resolution, triage, canonical communication creation, and event emission happen asynchronously. A valid replay returns `200` with `duplicate: true` and never creates a second communication.
+
+Inbound thread resolution is ordered: opaque reply route, provider/RFC reply headers, explicit Ask/thread, exactly one open tenant/person/mailbox thread, otherwise unassigned. Bounce, spam, mailing-list, and automatic-reply classifications are memory-ineligible and never emit `ask.response.received`.
+
+When `EMAIL_ENABLED` is false the route returns `404`. Invalid signatures return a deliberately generic `400`.
+
 ## Twilio webhook routes
 
 These routes accept both GET and POST where the implementation uses `all`.
@@ -903,12 +1009,13 @@ Example:
   "callOutcomeClassification": true,
   "answeringMachineDetection": true,
   "durableEvents": true,
+  "email": { "enabled": false, "providerPipeline": true },
   "twilioSignatures": "enforce",
   "preconnect": { "enabled": true, "pending": 0 }
 }
 ```
 
-`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `answeringMachineDetection` is true only when `TWILIO_MACHINE_DETECTION` is `Enable` or `DetectMessageEnd`. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; a deployment using only per-thread callbacks may report `false` while signed callback delivery still works.
+`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `email.enabled` reflects only `EMAIL_ENABLED`; `providerPipeline` reflects persistence, not provider-row or secret validity. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; per-thread callbacks may still work when it reports `false`.
 
 ## Management and recording API (`/api`)
 

@@ -5,6 +5,7 @@ const { Pool } = pg;
 
 const SET_RETURNING_RPCS = new Set([
     'claim_call_outcome_job',
+    'claim_communication_jobs',
     'claim_enrichment_job',
     'claim_outbound_events',
     'claim_recording',
@@ -14,8 +15,10 @@ const SET_RETURNING_RPCS = new Set([
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const JSON_COLUMNS = new Set([
-    'arguments', 'audit_context', 'correlation', 'metadata', 'participant_identities',
-    'payload', 'purpose', 'resolution', 'response', 'result', 'transcript',
+    'arguments', 'audit_context', 'authentication_results', 'bcc_addresses', 'cc_addresses',
+    'correlation', 'from_addresses', 'headers', 'metadata', 'participant_identities',
+    'payload', 'purpose', 'raw_payload', 'reply_to_addresses', 'resolution', 'response',
+    'result', 'signature_headers', 'spam_results', 'to_addresses', 'transcript',
 ]);
 
 function mutationValue(column, value) {

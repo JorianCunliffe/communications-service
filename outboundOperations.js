@@ -9,13 +9,16 @@ export function idempotencyKey(request) {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-export async function reserveOutbound(db, { key, type, request, communicationId }) {
+export async function reserveOutbound(db, { tenantId, key, type, request, communicationId }) {
     if (!key) {
         const error = new Error('Idempotency-Key header is required for outbound operations');
         error.code = 'IDEMPOTENCY_REQUIRED';
         throw error;
     }
+    const scopedTenant = tenantId || db?.tenantId || process.env.LEGACY_TENANT_ID;
+    if (!scopedTenant) throw new Error('tenant_id is required for outbound operations');
     const result = await db.rpc('reserve_outbound_operation', {
+        p_tenant_id: scopedTenant,
         p_idempotency_key: key,
         p_operation_type: type,
         p_request_hash: requestFingerprint(request),

@@ -16,6 +16,7 @@ import { toText, isEmpty } from './transcripts.js';
 import { sourceFor } from './recordingSources.js';
 import { saveTranscript, saveTranscriptionError } from './callLog.js';
 import { summariseCall } from './summarise.js';
+import { tenantDatabase } from './tenantContext.js';
 
 const SWEEP_INTERVAL_MS = 15 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -41,8 +42,11 @@ let sweeper = null;
 export async function enqueueRecording(recording) {
     const db = getDatabase();
     if (!db) return null;
+    const tenantId = recording.tenantId || process.env.LEGACY_TENANT_ID;
+    if (!tenantId) return { error: 'tenant_id is required for recording persistence' };
 
     const row = {
+        tenant_id: tenantId,
         source: recording.source,
         external_id: recording.externalId ?? null,
         call_id: recording.callId ?? null,
@@ -74,7 +78,7 @@ export async function enqueueRecording(recording) {
 
     const { data, error } = await db
         .from('recordings')
-        .upsert(row, { onConflict: 'source,external_id', ignoreDuplicates: true })
+        .upsert(row, { onConflict: 'tenant_id,source,external_id', ignoreDuplicates: true })
         .select('id, status')
         .maybeSingle();
 
@@ -130,7 +134,7 @@ async function fail(db, recording, message) {
     // empty transcript is distinguishable from one nobody attempted.
     if (permanent && recording.call_id) {
         const { data: call } = await db.from('calls').select('twilio_call_sid').eq('id', recording.call_id).maybeSingle();
-        if (call?.twilio_call_sid) await saveTranscriptionError({ callSid: call.twilio_call_sid, message });
+        if (call?.twilio_call_sid) await saveTranscriptionError({ callSid: call.twilio_call_sid, message, tenantId: recording.tenant_id });
     }
 
     console.warn(`Recording ${recording.id} ${permanent ? 'failed permanently' : `will retry in ${Math.round(delayMs / 1000)}s`}: ${message}`);
@@ -173,10 +177,10 @@ async function process(db, recording) {
     if (recording.call_id) {
         const { data: call } = await db.from('calls').select('twilio_call_sid').eq('id', recording.call_id).maybeSingle();
         if (call?.twilio_call_sid) {
-            await saveTranscript({ callSid: call.twilio_call_sid, transcript });
+            await saveTranscript({ callSid: call.twilio_call_sid, transcript, tenantId: recording.tenant_id });
             // summariseCall is a no-op when a summary already exists, so a call
             // whose live transcript was summarised is not summarised twice.
-            if (recording.metadata?.summarise) await summariseCall(call.twilio_call_sid);
+            if (recording.metadata?.summarise) await summariseCall(call.twilio_call_sid, recording.tenant_id);
         }
     }
 
@@ -205,10 +209,13 @@ export function sweepOnce() {
         try {
             let recording;
             while ((recording = await claimNext(db))) {
+                const tenantId = recording.tenant_id || process.env.LEGACY_TENANT_ID;
+                if (!tenantId) throw new Error(`Recording ${recording.id} has no tenant_id`);
+                const scoped = tenantDatabase(db, tenantId);
                 try {
-                    await process(db, recording);
+                    await process(scoped, recording);
                 } catch (error) {
-                    await fail(db, recording, error.message);
+                    await fail(scoped, recording, error.message);
                 }
             }
         } catch (error) {

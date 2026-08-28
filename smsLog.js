@@ -28,8 +28,9 @@ function withTimeout(query, label) {
 
 // Finds or creates the one thread for this conversation and returns its id.
 // The upsert doubles as the "touch" that keeps last_message_at current.
-async function ensureThread(db, otherParty, twilioNumber) {
+async function ensureThread(db, tenantId, otherParty, twilioNumber) {
     const row = {
+        tenant_id: tenantId,
         phone_number: otherParty,
         twilio_number: twilioNumber,
         last_message_at: new Date().toISOString(),
@@ -39,14 +40,14 @@ async function ensureThread(db, otherParty, twilioNumber) {
     // upsert writes every column it is given, so sending null here would clear
     // the link on an existing thread.
     const { data: contact } = await withTimeout(
-        db.from('contacts').select('id').eq('phone_number', otherParty).maybeSingle(),
+        db.from('contacts').select('id').eq('tenant_id', tenantId).eq('phone_number', otherParty).maybeSingle(),
         'Contact lookup for SMS thread'
     );
     if (contact?.id) row.contact_id = contact.id;
 
     const { data, error } = await withTimeout(
         db.from('sms_threads')
-            .upsert(row, { onConflict: 'phone_number,twilio_number' })
+            .upsert(row, { onConflict: 'tenant_id,phone_number,twilio_number' })
             .select('id')
             .single(),
         'SMS thread upsert'
@@ -71,6 +72,7 @@ export async function recordMessage({
     correlation = {},
     threadId = null,
     callbackUrl = null,
+    tenantId = null,
     strict = false,
 }) {
     const db = getClient();
@@ -80,10 +82,13 @@ export async function recordMessage({
     }
 
     try {
+        const scopedTenant = tenantId || correlation?.tenant_id || db?.tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for SMS persistence');
         const canonicalPurpose = normalisePurpose(purpose);
-        const canonicalCorrelation = normaliseCorrelation(correlation);
+        const canonicalCorrelation = normaliseCorrelation({ ...correlation, tenant_id: scopedTenant });
         const semantic = await resolveCommunicationThread({
             db,
+            tenantId: scopedTenant,
             participantIdentity: otherParty,
             serviceIdentity: twilioNumber,
             direction,
@@ -92,10 +97,11 @@ export async function recordMessage({
             correlation: canonicalCorrelation,
             callbackUrl,
         });
-        const nativeThreadId = await ensureThread(db, otherParty, twilioNumber);
+        const nativeThreadId = await ensureThread(db, scopedTenant, otherParty, twilioNumber);
 
         const { error } = await withTimeout(
             db.from('sms_messages').insert({
+                tenant_id: scopedTenant,
                 thread_id: nativeThreadId,
                 twilio_message_sid: messageSid ?? null,
                 direction,

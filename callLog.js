@@ -47,6 +47,7 @@ export async function recordCall({
     correlation = {},
     threadId = null,
     callbackUrl = null,
+    tenantId = null,
     strict = false,
 }) {
     const db = getClient();
@@ -56,17 +57,21 @@ export async function recordCall({
     }
 
     try {
+        const scopedTenant = tenantId || correlation?.tenant_id || db?.tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for call persistence');
         const semantic = await resolveCommunicationThread({
             db,
+            tenantId: scopedTenant,
             participantIdentity: otherParty,
             serviceIdentity,
             direction,
             threadId,
             purpose: normalisePurpose(purpose),
-            correlation: normaliseCorrelation(correlation),
+            correlation: normaliseCorrelation({ ...correlation, tenant_id: scopedTenant }),
             callbackUrl,
         });
         const row = {
+            tenant_id: scopedTenant,
             twilio_call_sid: callSid,
             phone_number: otherParty || 'unknown',
             direction,
@@ -95,14 +100,14 @@ export async function recordCall({
         // a null here would clear the link if this call were ever re-recorded.
         if (otherParty) {
             const contact = await withTimeout(
-                db.from('contacts').select('id').eq('phone_number', otherParty).maybeSingle(),
+                db.from('contacts').select('id').eq('tenant_id', scopedTenant).eq('phone_number', otherParty).maybeSingle(),
                 'Contact lookup for call record'
             );
             if (contact?.id) row.contact_id = contact.id;
         }
 
         await withTimeout(
-            db.from('calls').upsert(row, { onConflict: 'twilio_call_sid' }),
+            db.from('calls').upsert(row, { onConflict: 'tenant_id,twilio_call_sid' }),
             'Call record insert'
         );
         return {
@@ -123,12 +128,15 @@ export async function recordCall({
 // this module: the model is already being answered, and losing the audit row
 // must not delay that. Stores the result, not just the fact of the call, so a
 // conversation can be reconstructed afterwards.
-export async function recordToolCall({ callSid, openAiCallId, name, args, result, error, durationMs }) {
+export async function recordToolCall({ callSid, openAiCallId, name, args, result, error, durationMs, tenantId = null }) {
     const db = getClient();
     if (!db || !name) return;
 
     try {
+        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for tool-call persistence');
         const row = {
+            tenant_id: scopedTenant,
             twilio_call_sid: callSid ?? null,
             openai_call_id: openAiCallId ?? null,
             tool_name: name,
@@ -142,7 +150,7 @@ export async function recordToolCall({ callSid, openAiCallId, name, args, result
         // back with the call instead of joined on the Twilio SID by hand.
         if (callSid) {
             const call = await withTimeout(
-                db.from('calls').select('id').eq('twilio_call_sid', callSid).maybeSingle(),
+                db.from('calls').select('id').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
                 'Call lookup for tool call'
             );
             if (call?.id) row.call_id = call.id;
@@ -161,14 +169,17 @@ export async function recordToolCall({ callSid, openAiCallId, name, args, result
 // Only writes a non-empty transcript. A call where nobody spoke produces a
 // valid transcript with no segments, and letting that overwrite a real one —
 // from the recording pipeline, say, arriving later — would lose data.
-export async function saveTranscript({ callSid, transcript, status = 'completed' }) {
+export async function saveTranscript({ callSid, transcript, status = 'completed', tenantId = null }) {
     const db = getClient();
     if (!db || !callSid || !transcript?.segments?.length) return;
 
     try {
+        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for transcript persistence');
         await withTimeout(
             db.from('calls')
                 .update({ transcript, transcription_status: status, transcription_error: null })
+                .eq('tenant_id', scopedTenant)
                 .eq('twilio_call_sid', callSid),
             'Transcript update'
         );
@@ -179,12 +190,14 @@ export async function saveTranscript({ callSid, transcript, status = 'completed'
 
         const communication = await withTimeout(
             db.from('calls').select('communication_id,purpose,correlation,communication_thread_id')
+                .eq('tenant_id', scopedTenant)
                 .eq('twilio_call_sid', callSid).maybeSingle(),
             'Transcript event lookup'
         );
         if (communication?.communication_id) {
-            const destination = await callbackForThread(communication.communication_thread_id);
+            const destination = await callbackForThread(scopedTenant, communication.communication_thread_id);
             await enqueueEvent({
+                tenantId: scopedTenant,
                 type: 'transcript.completed',
                 communicationId: communication.communication_id,
                 purpose: communication.purpose,
@@ -204,14 +217,17 @@ export async function saveTranscript({ callSid, transcript, status = 'completed'
 
 // Records that transcription was attempted and failed, so a call with no
 // transcript can be told apart from a call nobody has tried to transcribe.
-export async function saveTranscriptionError({ callSid, message }) {
+export async function saveTranscriptionError({ callSid, message, tenantId = null }) {
     const db = getClient();
     if (!db || !callSid) return;
 
     try {
+        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for transcription persistence');
         await withTimeout(
             db.from('calls')
                 .update({ transcription_status: 'failed', transcription_error: String(message).slice(0, 500) })
+                .eq('tenant_id', scopedTenant)
                 .eq('twilio_call_sid', callSid),
             'Transcription error update'
         );
@@ -221,7 +237,7 @@ export async function saveTranscriptionError({ callSid, message }) {
 }
 
 // Called from Twilio's status callback as the call progresses.
-export async function updateCallStatus({ callSid, status, durationSeconds }) {
+export async function updateCallStatus({ callSid, status, durationSeconds, tenantId = null }) {
     const db = getClient();
     if (!db || !callSid) return;
 
@@ -231,12 +247,14 @@ export async function updateCallStatus({ callSid, status, durationSeconds }) {
     if (Number.isFinite(durationSeconds)) patch.duration_seconds = durationSeconds;
 
     try {
+        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for call status persistence');
         await withTimeout(
-            db.from('calls').update(patch).eq('twilio_call_sid', callSid),
+            db.from('calls').update(patch).eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid),
             'Call status update'
         );
         return await withTimeout(
-            db.from('calls').select('communication_id,purpose,correlation,communication_thread_id').eq('twilio_call_sid', callSid).maybeSingle(),
+            db.from('calls').select('communication_id,purpose,correlation,communication_thread_id').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
             'Call event lookup'
         );
     } catch (error) {
@@ -248,21 +266,23 @@ export async function updateCallStatus({ callSid, status, durationSeconds }) {
 // Stores Twilio's AnsweredBy signal separately from provider call status.
 // Machine/fax is decisive failure evidence; "human" still requires transcript
 // validation so a wrong number cannot become a successful call.
-export async function recordAnswerDetection({ callSid, answeredBy, durationMs }) {
+export async function recordAnswerDetection({ callSid, answeredBy, durationMs, tenantId = null }) {
     const db = getClient();
     if (!db || !callSid || !answeredBy) return null;
     const metadataPatch = { answered_by: String(answeredBy) };
     if (Number.isFinite(durationMs)) metadataPatch.machine_detection_duration_ms = Number(durationMs);
     try {
+        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
+        if (!scopedTenant) throw new Error('tenant_id is required for answer detection persistence');
         const current = await withTimeout(
-            db.from('calls').select('metadata').eq('twilio_call_sid', callSid).maybeSingle(),
+            db.from('calls').select('metadata').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
             'Answer detection lookup'
         );
         const updated = await withTimeout(
             db.from('calls').update({
                 answered_by: String(answeredBy),
                 metadata: { ...(current?.metadata || {}), ...metadataPatch },
-            }).eq('twilio_call_sid', callSid).select('id').maybeSingle(),
+            }).eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).select('id').maybeSingle(),
             'Answer detection update'
         );
         return updated;

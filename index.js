@@ -25,6 +25,7 @@ import { startEnrichmentSweeper } from './enrichment.js';
 import { startCallOutcomeSweeper } from './callOutcome.js';
 import { prefixedId } from './communicationModel.js';
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
+import emailWebhookRoutes, { emailEnabled, installRawJsonParser, startCommunicationJobSweeper } from './emailWebhook.js';
 
 // Retrieve the OpenAI API key from environment variables.
 const { OPENAI_API_KEY } = process.env;
@@ -38,11 +39,13 @@ if (!OPENAI_API_KEY) {
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
+installRawJsonParser(fastify);
 
 // The management API. Every route under /api requires the shared key and reads
 // only — see api.js.
 fastify.register(apiRoutes, { prefix: '/api' });
 fastify.register(v1Routes, { prefix: '/v1' });
+fastify.register(emailWebhookRoutes, { prefix: '/webhooks' });
 
 // Constants (per-call tunables live in config.js)
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
@@ -76,6 +79,8 @@ const BUILD = (() => {
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'enrichment.js',
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',
+        'tenantContext.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
+        'emailDelivery.js', 'emailTriage.js', 'emailReplyRoutes.js',
         'console.html', 'home.html', 'package.json',
     ];
 
@@ -165,6 +170,10 @@ fastify.get('/health', async (request, reply) => {
         callOutcomeClassification: Boolean(persistenceProvider && process.env.OPENAI_API_KEY),
         answeringMachineDetection: ['Enable', 'DetectMessageEnd'].includes(String(process.env.TWILIO_MACHINE_DETECTION || '').trim()),
         durableEvents: Boolean(persistenceProvider && process.env.HYPERFLOW_EVENT_URL && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
+        email: {
+            enabled: emailEnabled(),
+            providerPipeline: Boolean(persistenceProvider),
+        },
         // 'warn' means signatures are being checked and logged but nothing is
         // rejected yet — worth being able to see without reading the logs.
         twilioSignatures: signatureMode(),
@@ -1425,6 +1434,9 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
 
     // Delivers durable client webhooks independently of provider request paths.
     startEventSweeper();
+
+    // Verifies and stores email webhooks before this worker normalises them.
+    startCommunicationJobSweeper();
 
     // Derives summaries, current state, facts and commitments outside all
     // provider ingestion paths. Failures remain isolated in the durable queue.
