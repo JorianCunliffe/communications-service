@@ -19,4 +19,12 @@ describe('tenant-safe terminal event delivery', () => {
         assert.match(migration, /on conflict\(call_id\) do update/);
         assert.match(migration, /status='pending',attempts=0/);
     });
+
+    test('uses a non-partial composite index PostgreSQL can infer for ON CONFLICT', () => {
+        const migration = readFileSync(new URL('../migrations/012_outbound_event_conflict_target.sql', import.meta.url), 'utf8');
+        assert.match(migration, /on public\.outbound_events\(tenant_id,dedupe_key\)/);
+        assert.doesNotMatch(migration, /dedupe_key is not null/);
+        assert.match(migration, /terminal_event_emitted_at is null/);
+        assert.match(migration, /status='pending',attempts=0/);
+    });
 });

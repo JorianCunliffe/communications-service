@@ -1,6 +1,6 @@
 # Communications Service
 
-Current contract release: `2.2.1`.
+Current contract release: `2.2.2`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
@@ -8,13 +8,13 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `011`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Email remains off until `EMAIL_ENABLED=true` and a provider connection is provisioned.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `012`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Email remains off until `EMAIL_ENABLED=true` and a provider connection is provisioned.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/011_terminal_event_recovery.sql)
+- [Latest database migration](migrations/012_outbound_event_conflict_target.sql)
 
 ## Architecture
 
@@ -156,6 +156,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 10. `migrations/009_multi_tenancy.sql`
 11. `migrations/010_email_pipeline.sql`
 12. `migrations/011_terminal_event_recovery.sql`
+13. `migrations/012_outbound_event_conflict_target.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
