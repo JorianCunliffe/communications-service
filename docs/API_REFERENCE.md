@@ -55,7 +55,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `010`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `011`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows.
 
 ### Twilio webhooks
 

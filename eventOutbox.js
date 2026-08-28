@@ -8,6 +8,12 @@ const MAX_ATTEMPTS = 12;
 const BATCH_SIZE = 20;
 let timer = null;
 
+export function eventDedupeOptions(dedupeKey) {
+    return dedupeKey
+        ? { onConflict: 'tenant_id,dedupe_key', ignoreDuplicates: true }
+        : null;
+}
+
 export async function enqueueEvent({
     tenantId = null,
     type,
@@ -51,8 +57,9 @@ export async function enqueueEvent({
         next_attempt_at: new Date().toISOString(),
         dedupe_key: dedupeKey,
     };
-    const { error } = dedupeKey
-        ? await db.from('outbound_events').upsert(row, { onConflict: 'dedupe_key', ignoreDuplicates: true })
+    const dedupeOptions = eventDedupeOptions(dedupeKey);
+    const { error } = dedupeOptions
+        ? await db.from('outbound_events').upsert(row, dedupeOptions)
         : await db.from('outbound_events').insert(row);
     if (error) throw new Error(`Could not enqueue ${type}: ${error.message}`);
     if (dedupeKey) {

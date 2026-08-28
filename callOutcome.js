@@ -275,11 +275,25 @@ async function processJob(db, job) {
 async function failJob(db, job, error) {
     if (job.attempts >= MAX_ATTEMPTS) {
         const read = await db.from('calls').select('*').eq('id', job.call_id).maybeSingle();
-        if (read.data && !['success', 'failed'].includes(read.data.business_status)) {
-            await persistCallOutcome(db, read.data, result('unclassified', {
-                source: 'classifier_error', confidence: 0,
-                reason: `Call outcome classification failed safely: ${String(error.message).slice(0, 300)}`,
-            }));
+        if (!read.data) return finishJob(db, job, { last_error: 'call_not_found' });
+        if (!['success', 'failed'].includes(read.data.business_status)) {
+            try {
+                await persistCallOutcome(db, read.data, result('unclassified', {
+                    source: 'classifier_error', confidence: 0,
+                    reason: `Call outcome classification failed safely: ${String(error.message).slice(0, 300)}`,
+                }));
+                return finishJob(db, job);
+            } catch (finalError) {
+                error = finalError;
+            }
+        }
+        if (!read.data.terminal_event_emitted_at) {
+            const failed = await db.from('call_outcome_jobs').update({
+                status: 'failed', completed_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+                last_error: String(error.message).slice(0, 1000), lease_token: null, lease_expires_at: null,
+            }).eq('id', job.id).eq('lease_token', job.lease_token);
+            if (failed.error) throw new Error(`Call outcome failure persistence: ${failed.error.message}`);
+            return;
         }
         return finishJob(db, job);
     }
@@ -304,6 +318,7 @@ export async function sweepCallOutcomesOnce() {
     try {
         await processJob(scoped, job);
     } catch (error) {
+        console.warn(`Call outcome job ${job.id} attempt ${job.attempts} failed: ${error.message}`);
         await failJob(scoped, job, error);
     }
     return { processed: 1 };
