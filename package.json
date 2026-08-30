@@ -1,6 +1,6 @@
 {
   "name": "communications-service",
-  "version": "2.2.4",
+  "version": "2.2.5",
   "description": "Purpose-aware, channel-independent communications API for voice, SMS and future providers",
   "main": "index.js",
   "scripts": {

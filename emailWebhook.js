@@ -22,6 +22,11 @@ export function inboundEmailInput(eventData = {}, full = {}) {
     return { ...full, ...eventData, provider_email_id: eventData.email_id };
 }
 
+export function inboundEmailRecord(email) {
+    const { attachments: _attachments, ...record } = email;
+    return record;
+}
+
 function logSafeError(error) {
     return String(error?.message || error || 'Unknown error')
         .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
@@ -202,7 +207,7 @@ async function processInbound(db, receipt, connection, payload) {
         receipt_id: receipt.id,
         provider_connection_id: connection.id,
         service_identity_id: serviceIdentity.id,
-        ...email,
+        ...inboundEmailRecord(email),
         direction: 'inbound',
         triage_class: triage.classification,
         automated: triage.automated,

@@ -1,6 +1,6 @@
 # Communications Service
 
-A purpose-aware, tenant-isolated communications API (v2.2.4) built with Fastify, Twilio, OpenAI Realtime, and PostgreSQL.
+A purpose-aware, tenant-isolated communications API (v2.2.5) built with Fastify, Twilio, OpenAI Realtime, and PostgreSQL.
 
 ## How to run
 

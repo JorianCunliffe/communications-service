@@ -12,7 +12,7 @@ import {
 import { hashApiSecret, verifyApiSecret } from '../auth.js';
 import { tenantDatabase } from '../tenantContext.js';
 import Fastify from 'fastify';
-import { inboundEmailInput, installRawJsonParser } from '../emailWebhook.js';
+import { inboundEmailInput, inboundEmailRecord, installRawJsonParser } from '../emailWebhook.js';
 import { Webhook } from 'svix';
 import { emailProviderAdapters } from '../emailProviders.js';
 
@@ -69,6 +69,15 @@ describe('inbound email routing', () => {
         assert.equal(input.provider_email_id, 'email_1');
     });
 
+    test('stores attachments only in the attachment table', () => {
+        const record = inboundEmailRecord({
+            provider_email_id: 'email_1', text_body: 'Received', attachments: [{ id: 'attachment_1' }],
+        });
+        assert.equal(record.provider_email_id, 'email_1');
+        assert.equal(record.text_body, 'Received');
+        assert.equal(Object.hasOwn(record, 'attachments'), false);
+    });
+
     test('requeues the exact routing failures caused by the old recipient precedence', () => {
         const migration = readFileSync(new URL('../migrations/013_inbound_email_reply_recovery.sql', import.meta.url), 'utf8');
         assert.match(migration, /Inbound address did not resolve to exactly one trusted receiving identity/);
@@ -80,6 +89,12 @@ describe('inbound email routing', () => {
         const migration = readFileSync(new URL('../migrations/014_casefolded_email_reply_recovery.sql', import.meta.url), 'utf8');
         assert.match(migration, /status in \('pending','failed'\)/);
         assert.match(migration, /Inbound address did not resolve to exactly one trusted receiving identity/);
+        assert.match(migration, /status='pending',attempts=0/);
+    });
+
+    test('requeues the exact attachment-column failures exposed by reply recovery', () => {
+        const migration = readFileSync(new URL('../migrations/015_inbound_email_attachment_recovery.sql', import.meta.url), 'utf8');
+        assert.match(migration, /column "attachments" of relation "email_messages" does not exist/);
         assert.match(migration, /status='pending',attempts=0/);
     });
 });

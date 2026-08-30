@@ -1,6 +1,6 @@
 # Communications Service
 
-Current contract release: `2.2.4`.
+Current contract release: `2.2.5`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
@@ -159,6 +159,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 13. `migrations/012_outbound_event_conflict_target.sql`
 14. `migrations/013_inbound_email_reply_recovery.sql`
 15. `migrations/014_casefolded_email_reply_recovery.sql`
+16. `migrations/015_inbound_email_attachment_recovery.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
