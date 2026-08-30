@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Updated: 27 August 2026
+Updated: 30 August 2026. Contract release: `2.2.5`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -55,7 +55,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `012`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `015`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, while `013`-`015` narrowly requeue inbound email jobs affected by the superseded reply-routing and attachment insert paths.
 
 ### Twilio webhooks
 
@@ -382,7 +382,7 @@ When the identity has `reply_domain`, the service creates a lowercase-safe rando
 GET /v1/emails/:communicationId
 ```
 
-Returns the canonical Communication plus its safe `email` record. Raw provider webhook bodies remain separate in `webhook_receipts`.
+Returns the canonical Communication plus its safe `email` record. Raw provider webhook bodies remain separate in `webhook_receipts`. Inbound attachment metadata is stored separately in `communication_attachments`; this response does not currently include it, and the service does not expose attachment content.
 
 ### Place a voice call
 
@@ -848,7 +848,7 @@ An `ask.response.received` event is evidence, not resolution. For SMS, response 
 - Reject events whose top-level `tenant_id` does not match the target workflow tenant.
 - The envelope does not include a `source` field. A dedicated, signature-verified HyperFlow endpoint may normalize the source to `communications` after verification.
 - Deduplicate by `event_id`; delivery is at least once.
-- Use an explicit terminal mapping: `sms.delivered` and `call.completed` are success; `sms.failed` and `call.failed` are failure. `sms.sent`, `call.started`, `call.answered`, and transcript/summary events are nonterminal.
+- Use an explicit terminal mapping: `sms.delivered`, `email.delivered`, and `call.completed` are success; `sms.failed`, `email.failed`, and `call.failed` are failure. `sms.sent`, `email.accepted`, `call.started`, `call.answered`, and transcript/summary events are nonterminal.
 - Preserve all correlation values. Workflow actions should supply `tenant_id`, `external_project_id`, `run_id`, and `task_id` so a terminal event can identify exactly one pending run.
 - During the transition, event envelopes also include `correlation.project_id` as an alias of `external_project_id`; new consumers should prefer the explicit field.
 
@@ -863,13 +863,16 @@ Contract tests should use these real request, response, and event shapes. A mock
 | `sms.sent` | Twilio accepts SMS or reports a nonterminal status |
 | `sms.delivered` | Twilio reports delivered |
 | `sms.failed` | Twilio reports failed or undelivered |
+| `email.accepted` | Resend accepts an outbound email |
+| `email.delivered` | A verified Resend webhook reports delivery |
+| `email.failed` | A verified Resend webhook reports failure, bounce, or suppression |
 | `call.started` | Call record starts or Twilio reports a nonterminal state |
 | `call.answered` | Twilio reports answered |
 | `call.completed` | Outcome finalizer verifies a meaningful response from the intended human; payload disposition is `human_completed` |
 | `call.failed` | Outcome finalizer detects voicemail, wrong number, no answer, busy, fax, automated system, provider failure, cancellation, no meaningful response, or an unclassifiable call |
 | `transcript.completed` | Voice transcript is stored |
 | `summary.completed` | Voice summary is stored |
-| `ask.response.received` | Inbound Ask SMS/generic communication is stored, or Ask voice transcript completes |
+| `ask.response.received` | An eligible inbound Ask SMS, email, or generic communication is stored, or an Ask voice call is verified as `human_completed` |
 | `ask.resolved` | Hyperflow explicitly resolves the Ask with a final communication |
 
 ## Legacy direct delivery routes
@@ -931,7 +934,9 @@ POST /webhooks/email/:provider/:connectionId
 
 Currently `provider` must be `resend`. This route does not accept API authentication or a request-supplied tenant. It loads the provider connection by opaque UUID, verifies the exact raw body using the connection's referenced Svix secret, and derives `tenant_id` from that trusted connection.
 
-Verified deliveries are stored immutably in `webhook_receipts`, deduplicated by provider connection plus `svix-id`, and queued in `communication_jobs`. The route returns `200` immediately; normalization, body retrieval, safe HTML storage, attachment metadata, thread resolution, triage, canonical communication creation, and event emission happen asynchronously. The verified webhook envelope recipient takes precedence during opaque reply routing, because provider retrieval may canonicalise an alias back to its service mailbox.
+Verified deliveries are stored immutably in `webhook_receipts`, deduplicated by provider connection plus `svix-id`, and queued in `communication_jobs`. A successful request returns `200 { "accepted": true, "duplicate": <boolean>, "receipt_id": "<uuid>" }`; normalization, body retrieval, safe HTML storage, attachment metadata, thread resolution, triage, canonical communication creation, and event emission happen asynchronously. A valid replay returns the same receipt with `duplicate: true` after it has already been processed or ignored.
+
+The verified SMTP-envelope recipient takes precedence during opaque reply routing because provider retrieval may canonicalise an alias back to its service mailbox. New reply capabilities use lowercase-safe hexadecimal tokens. The resolver retains a fail-closed recovery path for pre-2.2.4 mixed-case tokens only when the recorded outbound Reply-To identifies exactly one live tenant-owned route. Attachment metadata is inserted into `communication_attachments`, never into `email_messages`; attachment bytes are not fetched.
 
 Inbound thread resolution is ordered: opaque reply route, provider/RFC reply headers, explicit Ask/thread, exactly one open tenant/person/mailbox thread, otherwise unassigned. Bounce, spam, mailing-list, and automatic-reply classifications are memory-ineligible and never emit `ask.response.received`.
 
@@ -1148,3 +1153,4 @@ Errors are JSON unless the endpoint is a Twilio webhook rejection:
 - Memory enrichment is asynchronous and eventually consistent; raw communication search may lead derived facts/state.
 - Native Plaud polling requires an injected authenticated adapter; external Plaud pushes are supported immediately.
 - `/v1/calls` trusts authenticated `overrides`; the legacy call route has the stricter allow-list.
+- Inbound email attachment metadata is persisted, but no protected endpoint currently lists that metadata or returns attachment content.

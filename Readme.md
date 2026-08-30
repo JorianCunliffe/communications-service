@@ -8,13 +8,13 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `012`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Email remains off until `EMAIL_ENABLED=true` and a provider connection is provisioned.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `015`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Email remains off until `EMAIL_ENABLED=true` and a provider connection is provisioned.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/012_outbound_event_conflict_target.sql)
+- [Latest database migration](migrations/015_inbound_email_attachment_recovery.sql)
 
 ## Architecture
 
@@ -69,14 +69,14 @@ HyperFlow is a consumer of this API, not a shared-database component. A compatib
 
 - authenticate outbound Communications requests with `X-API-Key`;
 - send the authenticated tenant as `X-Tenant-Id` when using a scoped API client; the legacy key is restricted to `LEGACY_TENANT_ID`;
-- supply a stable `Idempotency-Key` for every billable SMS or voice request;
+- supply a stable `Idempotency-Key` for every billable SMS, voice, or email request;
 - send SMS as `POST /v1/messages` with `to`, `from`, and `body`;
 - send calls as `POST /v1/calls` with `to`, `from`, and allow-listed `overrides`;
 - read the canonical `communication_id` response field (an `id` field is not returned);
 - deliver SMS/voice Asks through those channel endpoints with `purpose.type: "human_ask"`, `purpose.ask_id`, and an HTTPS `callback_url`;
 - send email as `POST /v1/emails` after the tenant's Resend connection and service identity are provisioned;
 - verify `X-Communications-Signature` over the raw webhook body, deduplicate `event_id`, and accept at-least-once delivery;
-- treat `sms.delivered` and `call.completed` as success, `sms.failed` and `call.failed` as failure, and all started/sent/answered events as nonterminal. For voice, Twilio's provider status `completed` is not sufficient: this service emits `call.completed` only after verifying a meaningful response from the intended human; and
+- treat `sms.delivered`, `email.delivered`, and `call.completed` as success; `sms.failed`, `email.failed`, and `call.failed` as failure; and accepted/started/sent/answered events as nonterminal. For voice, Twilio's provider status `completed` is not sufficient: this service emits `call.completed` only after verifying a meaningful response from the intended human; and
 - call `POST /v1/asks/:askId/resolve` only after HyperFlow has accepted a specific reply as the final answer.
 
 There is deliberately no `POST /v1/asks` delivery endpoint. Ask is semantic purpose attached to a real channel communication, not a separate transport. See the [API reference integration section](docs/API_REFERENCE.md#hyperflow-consumer-contract) for payload and event details.
@@ -179,7 +179,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `013` and `014` recover inbound replies stranded by the original recipient precedence and mixed-case reply-token normalization defects.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert.
 
 If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
@@ -255,7 +255,7 @@ RESEND_API_KEY=re_...
 RESEND_WEBHOOK_SECRET=whsec_...
 ```
 
-Outbound requests use `POST /v1/emails` with `Idempotency-Key`. Webhooks are verified over the exact raw body, stored once by provider event ID, acknowledged, and normalized asynchronously. Bounces, spam, mailing-list traffic, and automatic replies stay auditable but cannot feed memory or emit `ask.response.received`.
+Outbound requests use `POST /v1/emails` with `Idempotency-Key`. Webhooks are verified over the exact raw body, stored once by provider event ID, acknowledged, and normalized asynchronously. The verified SMTP-envelope recipient remains authoritative when Resend's retrieval API canonicalises an alias; new opaque reply tokens are lowercase-safe, and migrations `013`-`015` recover narrowly identified jobs created by the earlier routing and attachment defects. Attachment metadata is stored in `communication_attachments`, separate from `email_messages`; attachment content is not downloaded or exposed by the API. Bounces, spam, mailing-list traffic, and automatic replies stay auditable but cannot feed memory or emit `ask.response.received`.
 
 Outbound calls and messages attach their status callbacks programmatically. If the number belongs to a Twilio Messaging Service, configure the inbound message webhook on that service.
 
