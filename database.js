@@ -257,7 +257,7 @@ class PostgresQuery {
                 }
                 continue;
             }
-            values.push(filter.value);
+            values.push(filter.operator === 'contains' ? mutationValue(filter.column, filter.value) : filter.value);
             if (filter.operator === 'contains') clauses.push(`${field} @> $${values.length}`);
             else clauses.push(`${field} ${filter.operator} $${values.length}`);
         }

@@ -374,7 +374,7 @@ Requirements:
 
 Response: `202` plus the canonical email Communication. An identical completed retry returns `200`; key reuse with different content returns `409`. Provider acceptance emits `email.accepted`; signed provider webhooks later emit `email.delivered` or `email.failed`.
 
-When the identity has `reply_domain`, the service creates a random reply capability, stores only its SHA-256 hash, and sends `reply+<opaque-token>@<reply-domain>` as Reply-To. Routes expire after 30 days by default and can be revoked.
+When the identity has `reply_domain`, the service creates a lowercase-safe random reply capability, stores only its SHA-256 hash, and sends `reply+<opaque-token>@<reply-domain>` as Reply-To. Routes expire after 30 days by default and can be revoked. The receiving webhook may use a separate provider connection; the opaque tenant-scoped route binds the reply back to the original sending identity and thread.
 
 ### Read an email communication
 

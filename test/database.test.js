@@ -122,6 +122,14 @@ describe('PostgreSQL compatibility adapter', () => {
         assert.deepEqual(arrayDatabase.calls[0].values[1], ['customer']);
     });
 
+    test('serialises JSON containment filters used by legacy email reply lookup', async () => {
+        const database = capture([{ rows: [] }]);
+        await createPostgresClient(database).from('email_messages').select('thread_id')
+            .contains('reply_to_addresses', [{ address: 'reply+opaque@reply.example.test' }]);
+        assert.match(database.calls[0].sql, /t\."reply_to_addresses" @> \$1/);
+        assert.equal(database.calls[0].values[0], '[{"address":"reply+opaque@reply.example.test"}]');
+    });
+
     test('unwraps scalar RPCs and preserves set-returning RPC rows', async () => {
         const scalarDatabase = capture([{ rows: [{ resolve_communication_ask: { ask_id: 'ask_1' } }] }]);
         const scalar = await createPostgresClient(scalarDatabase).rpc('resolve_communication_ask', {

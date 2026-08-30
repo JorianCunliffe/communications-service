@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { canonicalEmail } from './email.js';
 import { emailProvider } from './emailProviders.js';
 import { triageEmail } from './emailTriage.js';
-import { replyTokenFromAddresses, resolveEmailReplyRoute } from './emailReplyRoutes.js';
+import {
+    replyRouteAddressFromAddresses,
+    replyTokenFromAddresses,
+    resolveEmailReplyRoute,
+    resolveLegacyEmailReplyRoute,
+} from './emailReplyRoutes.js';
 import { getDatabase } from './database.js';
 import { enqueueEvent } from './eventOutbox.js';
 import { prefixedId, resolveCommunicationThread } from './communicationModel.js';
@@ -132,13 +137,17 @@ async function processInbound(db, receipt, connection, payload) {
     const email = canonicalEmail(inboundEmailInput(eventData, full));
     const triage = triageEmail(email, payload.type);
     const token = replyTokenFromAddresses(email.to_addresses);
-    const replyRoute = await resolveEmailReplyRoute(db, receipt.tenant_id, token);
+    let replyRoute = await resolveEmailReplyRoute(db, receipt.tenant_id, token);
+    if (!replyRoute) replyRoute = await resolveLegacyEmailReplyRoute(db, receipt.tenant_id, email.to_addresses);
     let serviceIdentity;
     if (replyRoute) {
+        const replyAddress = replyRouteAddressFromAddresses(email.to_addresses);
         const routed = await db.from('service_identities').select('*').eq('tenant_id', receipt.tenant_id)
-            .eq('provider_connection_id', connection.id).eq('id', replyRoute.service_identity_id)
-            .eq('can_receive', true).maybeSingle();
+            .eq('id', replyRoute.service_identity_id).eq('channel', 'email').maybeSingle();
         if (routed.error || !routed.data) throw new Error(routed.error?.message || 'Reply route receiving identity is unavailable');
+        if (!replyAddress || String(routed.data.reply_domain || '').toLowerCase() !== replyAddress.domain) {
+            throw new Error('Reply route domain does not match the receiving address');
+        }
         serviceIdentity = routed.data;
     } else {
         serviceIdentity = await findReceivingIdentity(db, receipt.tenant_id, connection.id, email.to_addresses);

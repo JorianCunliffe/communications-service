@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { canonicalEmail, outboundEmailRequest } from '../email.js';
 import { triageEmail } from '../emailTriage.js';
-import { replyTokenFromAddresses } from '../emailReplyRoutes.js';
+import {
+    newEmailReplyToken,
+    replyRouteAddressFromAddresses,
+    replyTokenFromAddresses,
+    resolveLegacyEmailReplyRoute,
+} from '../emailReplyRoutes.js';
 import { hashApiSecret, verifyApiSecret } from '../auth.js';
 import { tenantDatabase } from '../tenantContext.js';
 import Fastify from 'fastify';
@@ -69,6 +74,13 @@ describe('inbound email routing', () => {
         assert.match(migration, /Inbound address did not resolve to exactly one trusted receiving identity/);
         assert.match(migration, /status='pending',attempts=0/);
         assert.match(migration, /provider_event_type='email\.received'/);
+    });
+
+    test('requeues legacy case-folded reply routes after the resolver fix', () => {
+        const migration = readFileSync(new URL('../migrations/014_casefolded_email_reply_recovery.sql', import.meta.url), 'utf8');
+        assert.match(migration, /status in \('pending','failed'\)/);
+        assert.match(migration, /Inbound address did not resolve to exactly one trusted receiving identity/);
+        assert.match(migration, /status='pending',attempts=0/);
     });
 });
 
@@ -144,6 +156,54 @@ describe('email adapter contract', () => {
         const token = 'abcdefghijklmnopqrstuvwx';
         assert.equal(replyTokenFromAddresses([{ address: `reply+${token}@reply.example.com` }]), token);
         assert.equal(replyTokenFromAddresses([{ address: 'team@example.com' }]), null);
+    });
+
+    test('new opaque reply tokens survive email address case folding', () => {
+        const token = newEmailReplyToken();
+        assert.match(token, /^[a-f0-9]{48}$/);
+        assert.equal(token, token.toLowerCase());
+        const route = replyRouteAddressFromAddresses([{ address: `reply+${token}@REPLY.EXAMPLE.COM` }]);
+        assert.deepEqual(route, {
+            address: `reply+${token}@reply.example.com`,
+            token,
+            domain: 'reply.example.com',
+        });
+    });
+
+    test('legacy case-folded tokens recover only through one recorded outbound route', async () => {
+        const calls = [];
+        const route = {
+            id: 'route_1', thread_id: 'thread_1', service_identity_id: 'identity_1',
+            expires_at: '2099-01-01T00:00:00.000Z', revoked_at: null,
+        };
+        const db = {
+            from(table) {
+                const query = {
+                    filters: [], payload: null,
+                    select() { return this; },
+                    eq(field, value) { this.filters.push([field, value]); return this; },
+                    contains(field, value) { this.filters.push([field, value]); return this; },
+                    order() { return this; },
+                    update(payload) { this.payload = payload; return this; },
+                    limit() {
+                        calls.push({ table, filters: this.filters, payload: this.payload });
+                        if (table === 'email_messages') {
+                            return Promise.resolve({ data: [{ thread_id: 'thread_1', service_identity_id: 'identity_1' }], error: null });
+                        }
+                        return Promise.resolve({ data: [route], error: null });
+                    },
+                    then(resolve, reject) {
+                        calls.push({ table, filters: this.filters, payload: this.payload });
+                        return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+                    },
+                };
+                return query;
+            },
+        };
+        const address = 'reply+abcdefghijklmnopqrstuvwx@reply.example.com';
+        assert.equal(await resolveLegacyEmailReplyRoute(db, 'tenant_a', [{ address }]), route);
+        assert.deepEqual(calls[0].filters.at(-1), ['reply_to_addresses', [{ address }]]);
+        assert.deepEqual(calls.at(-1).filters.at(-1), ['id', 'route_1']);
     });
 });
 
