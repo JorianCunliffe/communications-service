@@ -1,8 +1,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import Fastify from 'fastify';
-import v1Routes, { outboundError, parseSemantic, providerCallbackUrl } from '../v1.js';
+import { outboundError, parseSemantic, providerCallbackUrl } from '../v1.js';
 import { tenantForMessage } from '../smsLog.js';
 import {
     canonicalCommunication,
@@ -273,21 +273,29 @@ describe('versioned API contract', () => {
         assert.throws(() => parseSemantic({ callback_url: 'http://127.0.0.1/events' }), /valid https URL/);
     });
 
-    test('/v1 fails closed without credentials and never falls back to memory', async () => {
-        const previous = process.env.API_KEY;
-        delete process.env.API_KEY;
-        const app = Fastify();
-        await app.register(v1Routes, { prefix: '/v1' });
-        const disabled = await app.inject({ method: 'GET', url: '/v1/communications' });
-        assert.equal(disabled.statusCode, 503);
+    test('/v1 fails closed without credentials and never falls back to memory', () => {
+        const script = `
+            import assert from 'node:assert/strict';
+            import Fastify from 'fastify';
+            import v1Routes from './v1.js';
 
-        process.env.API_KEY = 'test-key';
-        const noDatabase = await app.inject({
-            method: 'GET', url: '/v1/communications', headers: { 'x-api-key': 'test-key' },
+            const app = Fastify();
+            await app.register(v1Routes, { prefix: '/v1' });
+            const disabled = await app.inject({ method: 'GET', url: '/v1/communications' });
+            assert.equal(disabled.statusCode, 503);
+
+            process.env.API_KEY = 'test-key';
+            const noDatabase = await app.inject({
+                method: 'GET', url: '/v1/communications', headers: { 'x-api-key': 'test-key' },
+            });
+            assert.equal(noDatabase.statusCode, 503);
+            await app.close();
+        `;
+        const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+            cwd: new URL('..', import.meta.url),
+            encoding: 'utf8',
+            env: { ...process.env, API_KEY: '', PERSISTENCE_PROVIDER: 'none' },
         });
-        assert.equal(noDatabase.statusCode, 503);
-        await app.close();
-        if (previous === undefined) delete process.env.API_KEY;
-        else process.env.API_KEY = previous;
+        assert.equal(result.status, 0, result.stderr || result.stdout);
     });
 });
