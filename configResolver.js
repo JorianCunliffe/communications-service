@@ -20,11 +20,12 @@ const ROW_CACHE_TTL_MS = 60 * 1000;
 // Read env on first use, not at import time: ES module imports are evaluated
 // before index.js calls dotenv.config(), so reading it here at module scope
 // would silently see no credentials and disable config for every call.
-function getClient() {
+function getClient(tenantId = process.env.LEGACY_TENANT_ID) {
     const database = getDatabase();
-    const tenantId = process.env.LEGACY_TENANT_ID;
     return database && tenantId ? tenantDatabase(database, tenantId) : null;
 }
+
+const cacheKey = (tenantId, phoneNumber) => `${tenantId}:${phoneNumber}`;
 
 // Maps a settings row onto DEFAULT_CONFIG. Works for contact_config and
 // phone_configs alike — they mirror each other's columns.
@@ -88,11 +89,12 @@ export function rowToConfig(row, direction = 'inbound') {
 // callers don't hit the database on every call.
 const rowCache = new Map();
 
-function cached(phoneNumber) {
-    const entry = rowCache.get(phoneNumber);
+function cached(tenantId, phoneNumber) {
+    const key = cacheKey(tenantId, phoneNumber);
+    const entry = rowCache.get(key);
     if (!entry) return undefined;
     if (Date.now() - entry.fetchedAt >= ROW_CACHE_TTL_MS) {
-        rowCache.delete(phoneNumber);
+        rowCache.delete(key);
         return undefined;
     }
     return entry.row;
@@ -100,7 +102,7 @@ function cached(phoneNumber) {
 
 // Fetches every candidate in one round trip — the caller waits on this before
 // any TwiML is returned, so a second sequential query would double the delay.
-async function fetchRows(client, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
+async function fetchRows(client, tenantId, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
     const query = client
         .from('phone_configs')
         .select('*')
@@ -119,7 +121,7 @@ async function fetchRows(client, phoneNumbers, timeoutMs = LOOKUP_TIMEOUT_MS) {
         const byNumber = new Map((data ?? []).map((row) => [row.twilio_number, row]));
         const fetchedAt = Date.now();
         for (const phoneNumber of phoneNumbers) {
-            rowCache.set(phoneNumber, { row: byNumber.get(phoneNumber) ?? null, fetchedAt });
+            rowCache.set(cacheKey(tenantId, phoneNumber), { row: byNumber.get(phoneNumber) ?? null, fetchedAt });
         }
         return byNumber;
     } finally {
@@ -134,8 +136,9 @@ const contactCache = new Map();
 // trip. Never throws: losing this costs personalisation, not the call. Note
 // contacts and contact_config have RLS enabled, so this needs the service-role
 // key — with the anon key it returns null and everything falls back.
-async function fetchContact(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) {
-    const entry = contactCache.get(phoneNumber);
+async function fetchContact(client, tenantId, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) {
+    const key = cacheKey(tenantId, phoneNumber);
+    const entry = contactCache.get(key);
     if (entry && Date.now() - entry.fetchedAt < ROW_CACHE_TTL_MS) return entry.contact;
 
     let timer;
@@ -158,7 +161,7 @@ async function fetchContact(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) 
         const config = Array.isArray(data?.contact_config) ? data.contact_config[0] : data?.contact_config;
         const contact = data ? { ...data, contact_config: config ?? null } : null;
 
-        contactCache.set(phoneNumber, { contact, fetchedAt: Date.now() });
+        contactCache.set(key, { contact, fetchedAt: Date.now() });
         return contact;
     } catch (error) {
         console.warn(`Contact lookup failed for ${phoneNumber}: ${error.message}`);
@@ -170,8 +173,8 @@ async function fetchContact(client, phoneNumber, timeoutMs = LOOKUP_TIMEOUT_MS) 
 
 // Outbound delivery is blocked for suppressed contacts. A narrowly-scoped
 // override must carry an operator reason so it is visible in application logs.
-export async function assertContactable(phoneNumber, context = 'outbound', override = null) {
-    const client = getClient();
+export async function assertContactable(phoneNumber, context = 'outbound', override = null, tenantId = process.env.LEGACY_TENANT_ID) {
+    const client = getClient(tenantId);
     if (!client || !phoneNumber) return null;
     const result = await client.from('contacts').select('id,name,do_not_contact').eq('phone_number', phoneNumber).maybeSingle();
     if (result.error) throw new Error(`Could not verify do_not_contact for ${phoneNumber}: ${result.error.message}`);
@@ -186,15 +189,15 @@ export async function assertContactable(phoneNumber, context = 'outbound', overr
     throw error;
 }
 
-export async function ensureContact(phoneNumber) {
-    const client = getClient();
+export async function ensureContact(phoneNumber, tenantId = process.env.LEGACY_TENANT_ID) {
+    const client = getClient(tenantId);
     if (!client || !phoneNumber) return null;
     const result = await client.rpc('ensure_communication_contact', {
-        p_tenant_id: process.env.LEGACY_TENANT_ID,
+        p_tenant_id: tenantId,
         p_phone_number: phoneNumber,
     });
     if (result.error) throw new Error(`Could not ensure contact for ${phoneNumber}: ${result.error.message}`);
-    contactCache.delete(phoneNumber);
+    contactCache.delete(cacheKey(tenantId, phoneNumber));
     return result.data;
 }
 
@@ -210,8 +213,9 @@ export async function warmUp() {
     const started = Date.now();
     try {
         // A number that will never match: we want the round trip, not the row.
-        await fetchRows(client, ['+00000000000'], WARM_UP_TIMEOUT_MS);
-        rowCache.delete('+00000000000');
+        const tenantId = process.env.LEGACY_TENANT_ID;
+        await fetchRows(client, tenantId, ['+00000000000'], WARM_UP_TIMEOUT_MS);
+        rowCache.delete(cacheKey(tenantId, '+00000000000'));
         console.log(`${databaseProvider() || 'Database'} config warmed up in ${Date.now() - started}ms`);
     } catch (error) {
         console.warn(`Database config warm-up failed after ${Date.now() - started}ms (${error.message}) — the first call may fall back to defaults`);
@@ -226,9 +230,9 @@ export async function warmUp() {
 // `createContact` exists for the management API's preview route: asking what
 // would happen on a call must not be the thing that creates a contact record.
 // The call path leaves it on.
-export async function resolveConfig({ from, to, direction, createContact = true }) {
-    const client = getClient();
-    if (!client) return personaliseConfig(DEFAULT_CONFIG, null);
+export async function resolveConfig({ from, to, direction, createContact = true, tenantId = process.env.LEGACY_TENANT_ID }) {
+    const client = getClient(tenantId);
+    if (!client) return { ...personaliseConfig(DEFAULT_CONFIG, null), tenantId: tenantId || null, personId: null };
 
     const outbound = direction === 'outbound';
 
@@ -248,13 +252,13 @@ export async function resolveConfig({ from, to, direction, createContact = true 
     let contact = null;
 
     try {
-        const uncached = candidates.filter((phoneNumber) => cached(phoneNumber) === undefined);
+        const uncached = candidates.filter((phoneNumber) => cached(tenantId, phoneNumber) === undefined);
 
         // Contact and line settings are fetched together, so the richer lookup
         // costs no more than the old one did.
         const [fetched, found] = await Promise.all([
-            uncached.length > 0 ? fetchRows(client, uncached) : new Map(),
-            otherParty ? fetchContact(client, otherParty) : null,
+            uncached.length > 0 ? fetchRows(client, tenantId, uncached) : new Map(),
+            otherParty ? fetchContact(client, tenantId, otherParty) : null,
         ]);
         contact = found;
 
@@ -263,7 +267,7 @@ export async function resolveConfig({ from, to, direction, createContact = true 
             console.log(`Config from contact ${contact.name || otherParty} (${contact.contact_config.name || 'unnamed'})`);
             config = rowToConfig(contact.contact_config, direction);
         } else {
-            const line = candidates.map((n) => fetched.get(n) ?? cached(n)).find(Boolean);
+            const line = candidates.map((n) => fetched.get(n) ?? cached(tenantId, n)).find(Boolean);
             if (line) {
                 console.log(`Config from line ${line.twilio_number} (${line.name || 'unnamed'})${contact?.name ? `, caller is ${contact.name}` : ''}`);
                 config = rowToConfig(line, direction);
@@ -274,10 +278,13 @@ export async function resolveConfig({ from, to, direction, createContact = true 
 
         // First contact with this number: atomically create the contact and
         // phone identity before provider persistence can reference them.
-        if (!contact && otherParty && createContact) await ensureContact(otherParty);
+        if (!contact && otherParty && createContact) {
+            const personId = await ensureContact(otherParty, tenantId);
+            if (personId) contact = { id: personId };
+        }
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
-        return personaliseConfig(DEFAULT_CONFIG, contact);
+        return { ...personaliseConfig(DEFAULT_CONFIG, contact), tenantId, personId: contact?.id || null };
     }
 
     // Note what this deliberately does not do: fetch conversation history.
@@ -285,7 +292,31 @@ export async function resolveConfig({ from, to, direction, createContact = true 
     // started separately by startHistory() in realtimeSessions.js, runs while
     // the call is still being set up, and reaches the model after it has
     // already begun speaking.
-    return personaliseConfig(config, contact);
+    return { ...personaliseConfig(config, contact), tenantId, personId: contact?.id || null };
+}
+
+// Twilio authenticates the webhook, but it does not supply a tenant. Resolve
+// that boundary from the dialled number stored in phone_configs. A number that
+// maps to zero or multiple tenants is unsafe and must not fall back to the
+// legacy tenant.
+export async function resolveTenantForPhoneLine(to) {
+    const database = getDatabase();
+    if (!database || !to) throw new Error('Inbound call tenant resolution is unavailable');
+    const result = await database.from('phone_configs')
+        .select('tenant_id')
+        .eq('twilio_number', to)
+        .limit(2);
+    if (result.error) throw new Error(`Inbound call tenant lookup failed: ${result.error.message}`);
+    const matches = Array.isArray(result.data) ? result.data : [];
+    if (matches.length !== 1 || !matches[0]?.tenant_id) {
+        throw new Error('Dialled number did not resolve to exactly one tenant');
+    }
+    return matches[0].tenant_id;
+}
+
+export async function resolveInboundCall({ from, to, createContact = true }) {
+    const tenantId = await resolveTenantForPhoneLine(to);
+    return resolveConfig({ from, to, direction: 'inbound', createContact, tenantId });
 }
 
 // --- CallSid → config handoff ----------------------------------------------

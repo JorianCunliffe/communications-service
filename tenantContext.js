@@ -15,11 +15,15 @@ export const TENANT_TABLES = new Set([
     'communication_enrichment_jobs', 'call_outcome_jobs', 'provider_connections',
     'service_identities', 'webhook_receipts', 'communication_jobs',
     'communication_attachments', 'email_messages', 'email_reply_routes',
+    'mailbox_oauth_credentials', 'mailbox_sync_state', 'mailbox_oauth_states',
+    'mailbox_drafts', 'mailbox_audit_events',
 ]);
 
 const TENANT_RPCS = new Set([
     'create_communication_contact', 'ingest_calendar_event', 'requeue_communication_enrichment',
     'resolve_communication_ask', 'search_communications', 'suggest_terms',
+    'consume_mailbox_oauth_state',
+    'claim_mailbox_sync',
 ]);
 
 function withTenant(value, tenantId) {

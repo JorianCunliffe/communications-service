@@ -135,19 +135,27 @@ async function existingEmailThread(db, tenantId, email) {
     return null;
 }
 
-async function processInbound(db, receipt, connection, payload) {
-    const provider = emailProvider(connection);
-    const eventData = payload.data || {};
-    const full = await provider.retrieveReceived(connection, eventData.email_id);
-    const email = canonicalEmail(inboundEmailInput(eventData, full));
-    const triage = triageEmail(email, payload.type);
+export async function ingestCanonicalInboundEmail({ db, tenantId, connection, email, receiptId = null, serviceIdentityId = null, providerEventType = 'email.received' }) {
+    const existing = await db.from('email_messages').select('communication_id,thread_id')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connection.id)
+        .eq('provider_email_id', email.provider_email_id).maybeSingle();
+    if (existing.error) throw new Error(existing.error.message);
+    if (existing.data) return { duplicate: true, communicationId: existing.data.communication_id, threadId: existing.data.thread_id };
+
+    const triage = triageEmail(email, providerEventType);
     const token = replyTokenFromAddresses(email.to_addresses);
-    let replyRoute = await resolveEmailReplyRoute(db, receipt.tenant_id, token);
-    if (!replyRoute) replyRoute = await resolveLegacyEmailReplyRoute(db, receipt.tenant_id, email.to_addresses);
+    let replyRoute = await resolveEmailReplyRoute(db, tenantId, token);
+    if (!replyRoute) replyRoute = await resolveLegacyEmailReplyRoute(db, tenantId, email.to_addresses);
     let serviceIdentity;
-    if (replyRoute) {
+    if (serviceIdentityId) {
+        const selected = await db.from('service_identities').select('*').eq('tenant_id', tenantId)
+            .eq('provider_connection_id', connection.id).eq('id', serviceIdentityId)
+            .eq('channel', 'email').eq('can_receive', true).maybeSingle();
+        if (selected.error || !selected.data) throw new Error(selected.error?.message || 'Connected mailbox receiving identity is unavailable');
+        serviceIdentity = selected.data;
+    } else if (replyRoute) {
         const replyAddress = replyRouteAddressFromAddresses(email.to_addresses);
-        const routed = await db.from('service_identities').select('*').eq('tenant_id', receipt.tenant_id)
+        const routed = await db.from('service_identities').select('*').eq('tenant_id', tenantId)
             .eq('id', replyRoute.service_identity_id).eq('channel', 'email').maybeSingle();
         if (routed.error || !routed.data) throw new Error(routed.error?.message || 'Reply route receiving identity is unavailable');
         if (!replyAddress || String(routed.data.reply_domain || '').toLowerCase() !== replyAddress.domain) {
@@ -155,22 +163,22 @@ async function processInbound(db, receipt, connection, payload) {
         }
         serviceIdentity = routed.data;
     } else {
-        serviceIdentity = await findReceivingIdentity(db, receipt.tenant_id, connection.id, email.to_addresses);
+        serviceIdentity = await findReceivingIdentity(db, tenantId, connection.id, email.to_addresses);
     }
-    const personId = await personForSender(db, receipt.tenant_id, email.from_addresses[0].address);
+    const personId = await personForSender(db, tenantId, email.from_addresses[0].address);
 
-    const nativeThread = replyRoute ? null : await existingEmailThread(db, receipt.tenant_id, email);
+    const nativeThread = replyRoute ? null : await existingEmailThread(db, tenantId, email);
     const purpose = replyRoute?.ask_id
         ? { type: 'human_ask', ask_id: replyRoute.ask_id }
         : nativeThread?.purpose || null;
     const correlation = {
         ...(nativeThread?.correlation || {}),
-        tenant_id: receipt.tenant_id,
+        tenant_id: tenantId,
         ...(replyRoute?.thread_id ? { thread_id: replyRoute.thread_id } : {}),
     };
     let semantic = await resolveCommunicationThread({
         db,
-        tenantId: receipt.tenant_id,
+        tenantId,
         participantIdentity: email.from_addresses[0].address,
         serviceIdentity: serviceIdentity.address,
         direction: 'inbound',
@@ -182,13 +190,13 @@ async function processInbound(db, receipt, connection, payload) {
     if (!semantic.threadId) {
         semantic = await resolveCommunicationThread({
             db,
-            tenantId: receipt.tenant_id,
+            tenantId,
             participantIdentity: email.from_addresses[0].address,
             serviceIdentity: serviceIdentity.address,
             direction: 'inbound',
             threadId: prefixedId('thread'),
             purpose: null,
-            correlation: { tenant_id: receipt.tenant_id },
+            correlation: { tenant_id: tenantId },
             callbackUrl: connection.default_callback_url || null,
         });
     }
@@ -197,14 +205,14 @@ async function processInbound(db, receipt, connection, payload) {
     const sourceId = randomUUID();
     const emailRow = await db.from('email_messages').insert({
         id: sourceId,
-        tenant_id: receipt.tenant_id,
+        tenant_id: tenantId,
         communication_id: communicationId,
         thread_id: semantic.threadId,
         person_id: personId,
         purpose: semantic.purpose,
         correlation: semantic.correlation,
         callback_url: semantic.callbackUrl,
-        receipt_id: receipt.id,
+        ...(receiptId ? { receipt_id: receiptId } : {}),
         provider_connection_id: connection.id,
         service_identity_id: serviceIdentity.id,
         ...inboundEmailRecord(email),
@@ -218,7 +226,7 @@ async function processInbound(db, receipt, connection, payload) {
     if (emailRow.error) throw new Error(emailRow.error.message);
 
     const communication = await db.from('communications').insert({
-        tenant_id: receipt.tenant_id,
+        tenant_id: tenantId,
         communication_id: communicationId,
         channel: 'email',
         direction: 'inbound',
@@ -244,7 +252,7 @@ async function processInbound(db, receipt, connection, payload) {
 
     if (email.attachments.length) {
         const rows = email.attachments.map((item) => ({
-            tenant_id: receipt.tenant_id,
+            tenant_id: tenantId,
             communication_id: communicationId,
             email_message_id: sourceId,
             provider_attachment_id: item.id || null,
@@ -259,7 +267,7 @@ async function processInbound(db, receipt, connection, payload) {
     }
 
     const eventBase = {
-        tenantId: receipt.tenant_id,
+        tenantId,
         communicationId,
         purpose: semantic.purpose,
         correlation: semantic.correlation,
@@ -270,6 +278,22 @@ async function processInbound(db, receipt, connection, payload) {
     if (triage.askResponseEligible && semantic.purpose?.type === 'human_ask') {
         await enqueueEvent({ ...eventBase, type: 'ask.response.received', dedupeKey: `email-ask-response:${connection.id}:${email.provider_email_id}` });
     }
+    return { duplicate: false, communicationId, threadId: semantic.threadId, triage: triage.classification };
+}
+
+async function processInbound(db, receipt, connection, payload) {
+    const provider = emailProvider(connection);
+    const eventData = payload.data || {};
+    const full = await provider.retrieveReceived(connection, eventData.email_id);
+    const email = canonicalEmail(inboundEmailInput(eventData, full));
+    return ingestCanonicalInboundEmail({
+        db,
+        tenantId: receipt.tenant_id,
+        connection,
+        email,
+        receiptId: receipt.id,
+        providerEventType: payload.type,
+    });
 }
 
 async function processDelivery(db, receipt, connection, payload) {

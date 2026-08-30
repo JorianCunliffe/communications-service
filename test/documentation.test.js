@@ -46,6 +46,8 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
         assert.equal(packageJson.scripts['start:production'], 'node scripts/migrate.js && node index.js');
         assert.match(replit, /run = \["npm", "run", "start:production"\]/);
         assert.match(replit, /HYPERFLOW_EVENT_URL = "https:\/\/hyper-flow5\.vercel\.app\/api\/events"/);
+        assert.match(replit, /\[userenv\.development\][\s\S]*?TWILIO_VALIDATE_SIGNATURES = "warn"/);
+        assert.match(replit, /\[userenv\.production\][\s\S]*?TWILIO_VALIDATE_SIGNATURES = "enforce"/);
     });
 
     test('the Replit runtime satisfies production dependency requirements', () => {

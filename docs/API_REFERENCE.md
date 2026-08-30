@@ -30,7 +30,7 @@ X-Tenant-Id: tenant_1
 
 The requested tenant must be present in the client's `allowed_tenants`. Any body or query tenant value must agree with the header. The authenticated tenant is injected into writes and durable events; callers cannot override it.
 
-Scoped clients also need `communications:read` for GET `/v1`, `communications:write` for mutations, and `email:send` for `POST /v1/emails`. Management routes use `management:read` and `management:write`. The compatibility key has `*` capability.
+Scoped clients also need `communications:read` for GET `/v1`, `communications:write` for mutations, `email:send` for `POST /v1/emails`, `email:draft` for connected-mailbox drafts, and `mailbox:manage` for OAuth and synchronization. Management routes use `management:read` and `management:write`. The compatibility key has `*` capability.
 
 The legacy `POST /sms` and `POST /outbound-call` routes use the same header.
 
@@ -55,7 +55,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `015`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, while `013`-`015` narrowly requeue inbound email jobs affected by the superseded reply-routing and attachment insert paths.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `016`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, and `016` adds encrypted connected-mailbox OAuth, sync, draft and audit storage.
 
 ### Twilio webhooks
 
@@ -383,6 +383,60 @@ GET /v1/emails/:communicationId
 ```
 
 Returns the canonical Communication plus its safe `email` record. Raw provider webhook bodies remain separate in `webhook_receipts`. Inbound attachment metadata is stored separately in `communication_attachments`; this response does not currently include it, and the service does not expose attachment content.
+
+
+### Connected Gmail mailboxes
+
+Connected personal mailboxes are tenant-owned and draft-only. OAuth tokens never appear in API responses and are stored encrypted by the service.
+
+```http
+GET /v1/mailboxes
+```
+
+Lists the authenticated tenant's Gmail or Outlook connection references and health. Gmail is implemented; Outlook connections are not yet available.
+
+```http
+POST /v1/mailboxes/oauth/google/start
+Content-Type: application/json
+
+{
+  "initiator_id": "firebase-user-id",
+  "return_url": "https://hyper-flow5.vercel.app/"
+}
+```
+
+Returns `{ "authorization_url": "https://accounts.google.com/..." }`. The state is signed, expires after ten minutes, is single-use, and is bound to the authenticated tenant and supplied initiating-user audit identity. Google redirects to the public callback `GET /oauth/mailboxes/google/callback`; the callback derives the tenant only from the verified state.
+
+```http
+POST /v1/mailboxes/:connectionId/sync
+```
+
+Runs incremental Gmail history synchronization. An absent or expired history cursor triggers a bounded full INBOX reconciliation. Repeated synchronization is idempotent by provider connection and provider message ID.
+
+```http
+POST /v1/mailboxes/:connectionId/drafts
+Idempotency-Key: stable-operation-key
+Content-Type: application/json
+
+{
+  "to": ["person@example.com"],
+  "subject": "Draft subject",
+  "text": "Draft body",
+  "provider_thread_id": "optional-gmail-thread-id",
+  "in_reply_to": "<optional-message-id@example.com>",
+  "references": "<optional-message-id@example.com>"
+}
+```
+
+Creates a provider-native Gmail draft and never sends it. Reusing the key with changed content returns `409`; an uncertain provider result also requires reconciliation rather than an automatic duplicate retry.
+
+```http
+GET /v1/mailboxes/:connectionId/drafts/:draftId
+```
+
+Retrieves a tenant-scoped draft record and verifies that the provider draft still exists.
+
+When Gmail Pub/Sub is configured, its authenticated push subscription posts to `POST /oauth/gmail`. The notification is only a sync hint: the durable mailbox history cursor remains authoritative, and scheduled reconciliation covers delayed or dropped notifications.
 
 ### Place a voice call
 
@@ -814,6 +868,7 @@ The following requirements are normative for a HyperFlow deployment consuming th
 - For email, call `POST /v1/emails` with a tenant-owned service identity, recipients, subject, body, purpose, and correlation.
 - Read `communication_id` from the canonical response. Consumers may temporarily accept a legacy `id` alias from other adapters, but this service does not emit it.
 - Provide an HTTPS `callback_url` per request when callbacks must return to a specific HyperFlow environment. Otherwise the deployment-wide `HYPERFLOW_EVENT_URL` is used.
+- Probe the stable HyperFlow production origin anonymously before adding a Vercel bypass. An application JSON `401` means the request reached HyperFlow; a login redirect or protection page is blocked. Generated deployment and preview URLs may be protected even when the production domain is public. Only for a blocked origin, set backend-only `HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET`. Communications adds `x-vercel-protection-bypass` only when the callback or voice-context origin exactly matches the configured HyperFlow origin; arbitrary callback hosts never receive the secret.
 
 #### Ask delivery and resolution
 
@@ -950,9 +1005,9 @@ Outbound provider callback URLs include the authenticated `tenant_id` as a signe
 
 | Route | Purpose | Response |
 |---|---|---|
-| `GET/POST /incoming-call` | Resolve inbound call config, record call, start preconnection/history/recording | TwiML with Media Stream |
+| `GET/POST /incoming-call` | Resolve the tenant from the dialled `phone_configs` number, resolve the caller's person, obtain signed HyperFlow project context, record the call, and start preconnection/recording | TwiML with Media Stream; fails closed when the number is not mapped to exactly one tenant |
 | `GET/POST /outbound-answer` | Answer an outbound call and start the voice stream | TwiML with Media Stream |
-| `GET/POST /incoming-sms` | Persist inbound message, correlate thread, queue events | Empty TwiML `<Response/>` |
+| `GET/POST /incoming-sms` | Resolve the tenant from the dialled `phone_configs` number, persist the inbound message, correlate its thread, and queue events | Empty TwiML `<Response/>`; no legacy-tenant fallback |
 | `GET/POST /message-status` | Update SMS provider status and queue status event | `204` |
 | `GET/POST /call-status` | Update call state/duration and queue lifecycle event | `204` |
 | `GET/POST /recording-status` | Queue completed Twilio recording or mark absent recording skipped | `204` |
@@ -1021,7 +1076,7 @@ Example:
 }
 ```
 
-`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `email.enabled` reflects only `EMAIL_ENABLED`; `providerPipeline` reflects persistence, not provider-row or secret validity. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; per-thread callbacks may still work when it reports `false`.
+`persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `email.enabled` reflects only `EMAIL_ENABLED`; `providerPipeline` reflects persistence, not provider-row or secret validity. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; per-thread callbacks may still work when it reports `false`. `hyperflowVoiceContext` means persistence, the shared HMAC secret, and either the explicit context URL or derivable event URL are configured; it is not a live endpoint probe.
 
 ## Management and recording API (`/api`)
 

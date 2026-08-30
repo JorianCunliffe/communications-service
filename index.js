@@ -8,9 +8,9 @@ import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
-import { assertContactable, resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
+import { assertContactable, resolveConfig, resolveInboundCall, resolveTenantForPhoneLine, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
 import { databaseProvider, getDatabase } from './database.js';
-import { recordAnswerDetection, recordCall, tenantForCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
+import { recordAnswerDetection, recordCall, tenantForCall, updateCallStatus, recordToolCall, updateCallProjectContext, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
 import { recordMessage, tenantForMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
@@ -24,8 +24,10 @@ import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbo
 import { startEnrichmentSweeper } from './enrichment.js';
 import { startCallOutcomeSweeper } from './callOutcome.js';
 import { prefixedId } from './communicationModel.js';
+import { applyHyperFlowVoiceContext, requestHyperFlowVoiceContext } from './hyperflowVoice.js';
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 import emailWebhookRoutes, { emailEnabled, installRawJsonParser, startCommunicationJobSweeper } from './emailWebhook.js';
+import mailboxPublicRoutes from './mailboxRoutes.js';
 
 // Retrieve the OpenAI API key from environment variables.
 const { OPENAI_API_KEY } = process.env;
@@ -46,6 +48,7 @@ installRawJsonParser(fastify);
 fastify.register(apiRoutes, { prefix: '/api' });
 fastify.register(v1Routes, { prefix: '/v1' });
 fastify.register(emailWebhookRoutes, { prefix: '/webhooks' });
+fastify.register(mailboxPublicRoutes, { prefix: '/oauth' });
 
 // Constants (per-call tunables live in config.js)
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
@@ -170,6 +173,11 @@ fastify.get('/health', async (request, reply) => {
         callOutcomeClassification: Boolean(persistenceProvider && process.env.OPENAI_API_KEY),
         answeringMachineDetection: ['Enable', 'DetectMessageEnd'].includes(String(process.env.TWILIO_MACHINE_DETECTION || '').trim()),
         durableEvents: Boolean(persistenceProvider && process.env.HYPERFLOW_EVENT_URL && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
+        hyperflowVoiceContext: Boolean(
+            persistenceProvider
+            && (process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL)
+            && process.env.COMMUNICATIONS_WEBHOOK_SECRET
+        ),
         email: {
             enabled: emailEnabled(),
             providerPipeline: Boolean(persistenceProvider),
@@ -225,7 +233,53 @@ const twilioWebhook = {
 fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     const webhookStarted = Date.now();
-    const config = await resolveConfig({ from: params.From, to: params.To, direction: 'inbound' });
+    let config;
+    try {
+        config = await resolveInboundCall({ from: params.From, to: params.To });
+    } catch (error) {
+        console.warn(`Rejected inbound call tenant resolution: ${error.message}`);
+        return reply.code(503).type('text/xml').send('<Response><Say>This number is not configured for incoming calls.</Say><Hangup/></Response>');
+    }
+    const communicationId = prefixedId('comm');
+    const semanticThreadId = prefixedId('thread');
+    let routingContext = null;
+    if (config.personId) {
+        try {
+            routingContext = await requestHyperFlowVoiceContext({
+                tenantId: config.tenantId,
+                personId: config.personId,
+                threadId: semanticThreadId,
+                communicationId,
+                serviceIdentity: params.To,
+            });
+            config = applyHyperFlowVoiceContext(config, routingContext);
+        } catch (error) {
+            console.warn(`HyperFlow voice context unavailable for ${params.CallSid}: ${error.message}`);
+            config = {
+                ...config,
+                systemMessage: 'HyperFlow project authorization is unavailable. Do not reveal tenant, project, contact-history, or memory information. Explain that project context is temporarily unavailable and ask the caller to try again later.',
+                greetingText: 'I cannot securely load your project context right now. Please try again later.',
+                aiSpeaksFirst: true,
+                wantsHistory: false,
+                tools: [],
+            };
+        }
+    } else {
+        config = {
+            ...config,
+            systemMessage: 'This caller has no verified Communications person identity. Do not reveal tenant, project, history, or memory information.',
+            greetingText: 'I cannot verify your agent identity for this call.',
+            aiSpeaksFirst: true,
+            wantsHistory: false,
+            tools: [],
+        };
+    }
+    config = {
+        ...config,
+        communicationId,
+        threadId: semanticThreadId,
+        serviceIdentity: params.To,
+    };
     storeCallConfig(params.CallSid, config);
     markAnswered(params.CallSid);
 
@@ -261,16 +315,27 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
         config,
         status: 'ringing',
         metadata: { to: params.To },
+        communicationId,
+        tenantId: config.tenantId,
+        threadId: semanticThreadId,
+        purpose: { type: 'agent_conversation' },
+        correlation: {
+            tenant_id: config.tenantId,
+            person_id: config.personId,
+            ...(routingContext?.routing?.projectId ? { external_project_id: routingContext.routing.projectId } : {}),
+        },
     }).then((stored) => {
         if (!stored) return;
         return Promise.all([
             enqueueEvent({
+                tenantId: config.tenantId,
                 type: 'communication.created', communicationId: stored.communicationId,
                 purpose: stored.purpose, correlation: stored.correlation,
                 destination: stored.callbackUrl,
                 payload: { channel: 'voice', direction: 'inbound' },
             }),
             enqueueEvent({
+                tenantId: config.tenantId,
                 type: 'call.started', communicationId: stored.communicationId,
                 purpose: stored.purpose, correlation: stored.correlation,
                 destination: stored.callbackUrl,
@@ -457,7 +522,14 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
 
     console.log(`Inbound SMS ${messageSid || '(no sid)'} from ${from || 'unknown'} to ${to || 'unknown'}`);
 
-    await ensureContact(from).catch((error) => console.warn(error.message));
+    let tenantId;
+    try {
+        tenantId = await resolveTenantForPhoneLine(to);
+    } catch (error) {
+        console.warn(`Rejected inbound SMS tenant resolution: ${error.message}`);
+        return reply.code(503).type('text/xml').send('<Response></Response>');
+    }
+    await ensureContact(from, tenantId).catch((error) => console.warn(error.message));
     const stored = await recordMessage({
         otherParty: from,
         twilioNumber: to,
@@ -465,16 +537,19 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
         body,
         messageSid,
         status: params.SmsStatus || params.MessageStatus,
+        tenantId,
     });
 
     if (stored) {
         await enqueueEvent({
+            tenantId,
             type: 'communication.created', communicationId: stored.communicationId,
             purpose: stored.purpose, correlation: stored.correlation,
             destination: stored.callbackUrl,
             payload: { channel: 'sms', direction: 'inbound' },
         }).catch((error) => console.warn(`Could not enqueue communication event: ${error.message}`));
         await enqueueEvent({
+            tenantId,
             type: 'communication.received', communicationId: stored.communicationId,
             purpose: stored.purpose, correlation: stored.correlation,
             destination: stored.callbackUrl,
@@ -485,6 +560,7 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
         // whether it answers the Ask and explicitly calls /v1/asks/:id/resolve.
         if (stored.purpose?.type === 'human_ask') {
             await enqueueEvent({
+                tenantId,
                 type: 'ask.response.received', communicationId: stored.communicationId,
                 purpose: stored.purpose, correlation: stored.correlation,
                 destination: stored.callbackUrl,
@@ -1090,13 +1166,32 @@ fastify.register(async (fastify) => {
             const { output, error, durationMs } = await executeTool(name, args, {
                 callSid,
                 phoneNumber: partyFor(callSid),
+                tenantId: config.tenantId || null,
+                personId: config.personId || null,
+                threadId: config.threadId || null,
+                communicationId: config.communicationId || null,
+                serviceIdentity: config.serviceIdentity || null,
             });
             console.log(`Tool ${name} ${error ? `failed: ${error}` : 'ok'} (${durationMs}ms)`);
+
+            if (name === 'select_hyperflow_project' && !error && output?.routing?.kind === 'routed' && output.routing.projectId) {
+                try {
+                    await updateCallProjectContext({
+                        callSid,
+                        projectId: output.routing.projectId,
+                        tenantId: config.tenantId || null,
+                    });
+                    config.hyperflowRouting = output.routing;
+                } catch (contextError) {
+                    console.warn(`Could not persist selected HyperFlow project for ${callSid}: ${contextError.message}`);
+                }
+            }
 
             // Not awaited: the model is waiting on the result, not the audit row.
             recordToolCall({
                 callSid, openAiCallId: toolCallId, name, args,
                 result: output ?? null, error: error ?? null, durationMs,
+                tenantId: config.tenantId || null,
             });
 
             if (generation !== toolGeneration) {

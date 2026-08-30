@@ -57,6 +57,34 @@ export function filterTurns(turns, query) {
 }
 
 const TOOLS = {
+    select_hyperflow_project: {
+        type: 'builtin',
+        timeoutMs: 5000,
+        description:
+            'Select or switch the HyperFlow project for this call and retrieve only the context that this caller is authorized to use. ' +
+            'Call this after the caller names a project, whenever they ask to switch projects, or before answering a project question when no project context is available. ' +
+            'Pass the caller\'s own project wording and current question. If the result asks for clarification, ask exactly that clarification and do not guess.',
+        parameters: {
+            type: 'object',
+            properties: {
+                project_reference: { type: 'string', description: 'The project name or wording the caller used.' },
+                question: { type: 'string', description: 'The caller\'s current question, when present.' },
+            },
+            required: ['project_reference'],
+        },
+        handler: async ({ project_reference, question = '' } = {}, context = {}) => {
+            const { requestHyperFlowVoiceContext } = await import('./hyperflowVoice.js');
+            return requestHyperFlowVoiceContext({
+                tenantId: context.tenantId,
+                personId: context.personId,
+                threadId: context.threadId,
+                communicationId: context.communicationId,
+                serviceIdentity: context.serviceIdentity,
+                utterance: [project_reference, question].filter(Boolean).join('. '),
+            });
+        },
+    },
+
     check_calendar: {
         type: 'http',
         timeoutMs: 3000,

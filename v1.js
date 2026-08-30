@@ -15,6 +15,8 @@ import { emailEnabled } from './emailWebhook.js';
 import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { outboundEmailRequest } from './email.js';
+import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash } from './mailboxOAuth.js';
+import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncGmailMailbox } from './mailboxService.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
 const DIRECTIONS = ['inbound', 'outbound'];
@@ -65,7 +67,9 @@ function toCanonical(row) {
         direction: row.direction,
         occurredAt: row.occurred_at,
         personId: row.person_id || row.contact_id,
-        content: row.body,
+        // Voice automation must reason from what the other person said, not
+        // from assistant speech in the flattened two-sided transcript.
+        content: row.channel === 'voice' ? (row.body_them || null) : row.body,
         summary: row.summary,
         provider: row.provider,
         providerId: row.provider_id,
@@ -122,6 +126,12 @@ export default async function v1Routes(fastify) {
             const emailDenied = rejectMissingCapability(request, reply, 'email:send');
             if (emailDenied) return emailDenied;
         }
+        const requestPath = request.url.split('?')[0];
+        if (requestPath.includes('/mailboxes/') || requestPath.endsWith('/mailboxes')) {
+            const capability = requestPath.includes('/drafts') ? 'email:draft' : 'mailbox:manage';
+            const mailboxDenied = rejectMissingCapability(request, reply, capability);
+            if (mailboxDenied) return mailboxDenied;
+        }
         if (request.body && typeof request.body === 'object' && !Array.isArray(request.body)) {
             request.body.tenant_id = request.tenantId;
             request.body.correlation = {
@@ -131,6 +141,76 @@ export default async function v1Routes(fastify) {
             };
         }
         return null;
+    });
+
+    fastify.get('/mailboxes', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try { return { data: await listMailboxConnections(db, request.tenantId) }; }
+        catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/mailboxes/oauth/google/start', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const initiatorId = String(request.body?.initiator_id || '').trim();
+        if (!initiatorId) return reply.code(400).send({ error: 'initiator_id is required' });
+        try {
+            const created = createMailboxOAuthState({
+                tenantId: request.tenantId,
+                initiatorId,
+                returnUrl: request.body?.return_url,
+            });
+            const stored = await db.from('mailbox_oauth_states').insert({
+                nonce_hash: mailboxOAuthNonceHash(created.state.nonce),
+                initiator_id: initiatorId,
+                expires_at: new Date(created.state.exp * 1000).toISOString(),
+            });
+            if (stored.error) throw new Error(stored.error.message);
+            return { authorization_url: gmailAuthorizationUrl(created.token) };
+        } catch (error) { return errorReply(reply, error, error.status || 400); }
+    });
+
+    fastify.post('/mailboxes/:connectionId/sync', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            return await syncGmailMailbox(db, {
+                tenantId: request.tenantId,
+                connectionId: request.params.connectionId,
+                actorId: request.body?.initiator_id || request.authContext?.keyId,
+            });
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
+    });
+
+    fastify.post('/mailboxes/:connectionId/drafts', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const draft = await createMailboxDraft(db, {
+                tenantId: request.tenantId,
+                connectionId: request.params.connectionId,
+                actorId: request.body?.initiator_id || request.authContext?.keyId,
+                idempotencyKey: request.headers['idempotency-key'],
+                request: request.body || {},
+            });
+            return reply.code(201).send({
+                id: draft.id,
+                provider_draft_id: draft.provider_draft_id,
+                provider_message_id: draft.provider_message_id,
+                provider_thread_id: draft.provider_thread_id,
+                status: draft.status,
+                created_at: draft.created_at,
+            });
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
+    });
+
+    fastify.get('/mailboxes/:connectionId/drafts/:draftId', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const draft = await getMailboxDraft(db, {
+                tenantId: request.tenantId,
+                connectionId: request.params.connectionId,
+                draftId: request.params.draftId,
+            });
+            return draft || reply.code(404).send({ error: 'Mailbox draft not found' });
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
     });
 
     fastify.get('/communications', async (request, reply) => {
@@ -150,6 +230,7 @@ export default async function v1Routes(fastify) {
         if (request.query.thread_id) query = query.eq('thread_id', request.query.thread_id);
         if (request.query.ask_id) query = query.eq('purpose->>ask_id', request.query.ask_id);
         if (request.query.person_id) query = query.eq('person_id', request.query.person_id);
+        if (request.query.provider_connection_id) query = query.eq('metadata->>provider_connection_id', request.query.provider_connection_id);
         if (request.query.business_status) query = query.eq('business_status', request.query.business_status);
         if (request.query.disposition) query = query.eq('disposition', request.query.disposition);
         if (request.query.successful === 'true' || request.query.successful === 'false') {
@@ -586,8 +667,8 @@ export default async function v1Routes(fastify) {
 
         let communicationId = prefixedId('comm');
         try {
-            await assertContactable(to, 'outbound call', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason });
-            await ensureContact(to);
+            await assertContactable(to, 'outbound call', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason }, request.tenantId);
+            await ensureContact(to, request.tenantId);
         } catch (error) {
             if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
             return errorReply(reply, error, 500);
@@ -600,7 +681,7 @@ export default async function v1Routes(fastify) {
             });
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
-            const resolved = await resolveConfig({ from, to, direction: 'outbound' });
+            const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
             const config = { ...resolved, ...overrides, tenantId: request.tenantId };
             const base = PUBLIC_URL.replace(/\/$/, '');
             let call = { sid: operation.provider_id, status: operation.provider_status };

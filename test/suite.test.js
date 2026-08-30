@@ -660,7 +660,7 @@ describe('HTTP – Twilio webhook signatures', () => {
         assert.ok(['off', 'warn', 'enforce'].includes(mode), `Unexpected signature mode ${mode}`);
     });
 
-    test('an unsigned webhook is rejected under enforce and allowed otherwise', async () => {
+    test('an unsigned webhook is rejected under enforce and otherwise reaches tenant resolution', async () => {
         const mode = await signatureModeFromHealth();
         const res = await fetch(`${BASE_URL}/incoming-call`, { method: 'POST' });
 
@@ -670,7 +670,7 @@ describe('HTTP – Twilio webhook signatures', () => {
             // A forged request should learn nothing about why it failed.
             assert.equal(text.trim(), '', 'The rejection body must not explain itself');
         } else {
-            assert.equal(res.status, 200, 'Warn and off must never reject a call — that is the point of the mode');
+            assert.equal(res.status, 503, 'Warn and off reach the handler, which then fails closed without a trusted dialled-number tenant');
         }
     });
 

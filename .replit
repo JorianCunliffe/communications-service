@@ -10,15 +10,16 @@ expertMode = true
 
 [userenv.shared]
 PERSISTENCE_PROVIDER = "postgres"
-TWILIO_VALIDATE_SIGNATURES = "warn"
 PORT = "3000"
 
 [userenv.development]
 PUBLIC_URL = "https://a8bb884d-9560-4f4e-b2d0-0f67c4ec39ca-00-3s3rdlke53rb.worf.replit.dev"
+TWILIO_VALIDATE_SIGNATURES = "warn"
 
 [userenv.production]
 PUBLIC_URL = "https://communications-service.replit.app"
 HYPERFLOW_EVENT_URL = "https://hyper-flow5.vercel.app/api/events"
+TWILIO_VALIDATE_SIGNATURES = "enforce"
 TWILIO_MACHINE_DETECTION = "Enable"
 TWILIO_MACHINE_DETECTION_TIMEOUT = "30"
 

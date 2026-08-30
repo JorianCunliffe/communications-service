@@ -8,13 +8,13 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `015`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Email remains off until `EMAIL_ENABLED=true` and a provider connection is provisioned.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `016`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail sync and provider-native drafts use their separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/015_inbound_email_attachment_recovery.sql)
+- [Latest database migration](migrations/016_connected_mailboxes.sql)
 
 ## Architecture
 
@@ -160,6 +160,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 14. `migrations/013_inbound_email_reply_recovery.sql`
 15. `migrations/014_casefolded_email_reply_recovery.sql`
 16. `migrations/015_inbound_email_attachment_recovery.sql`
+17. `migrations/016_connected_mailboxes.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -179,7 +180,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert. Migration `016` adds encrypted connected-mailbox credentials, OAuth state, sync cursors/leases, Gmail draft receipts and mailbox audit records.
 
 If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
@@ -207,7 +208,7 @@ API_KEY=replace-with-a-long-random-secret
 LEGACY_TENANT_ID=tenant_primary
 ```
 
-All `/v1` and `/api` routes require `X-API-Key`. The compatibility key maps only to `LEGACY_TENANT_ID`. Tenant-scoped clients use `<key_id>.<secret>` credentials from `api_clients` and must send `X-Tenant-Id`; stored secrets are salted scrypt verifiers. Capabilities are enforced (`communications:read`, `communications:write`, `email:send`, `management:read`, `management:write`). If credentials are missing or wrong, protected routes fail closed.
+All `/v1` and `/api` routes require `X-API-Key`. The compatibility key maps only to `LEGACY_TENANT_ID`. Tenant-scoped clients use `<key_id>.<secret>` credentials from `api_clients` and must send `X-Tenant-Id`; stored secrets are salted scrypt verifiers. Capabilities are enforced, including `communications:read`, `communications:write`, `email:send`, `email:draft`, `mailbox:manage`, `management:read`, and `management:write`. If credentials are missing or wrong, protected routes fail closed.
 
 To provision a scoped client, generate the verifier without placing the secret in source control, then insert the reported `key_id` and `secret_hash` with explicit `allowed_tenants`, `roles`, and `capabilities`:
 
@@ -239,6 +240,8 @@ Configure the Twilio number:
 | Voice: call status changes | `POST https://<host>/call-status` |
 | Messaging: a message comes in | `POST https://<host>/incoming-sms` |
 
+Each receiving number must have one enabled `phone_configs` row and must resolve to exactly one tenant. Incoming voice and SMS never fall back to `LEGACY_TENANT_ID`. For a live HyperFlow agent call, configure `HYPERFLOW_AGENT_CONTEXT_URL` (or `HYPERFLOW_EVENT_URL` so the context URL can be derived) and the shared `COMMUNICATIONS_WEBHOOK_SECRET`. Communications sends only its trusted tenant/person/thread/service-identity tuple to HyperFlow. Until HyperFlow returns an authorized project, unscoped history and tools are withheld; a context outage produces a tenant-safe unavailable message rather than the default prompt.
+
 ### 5. Enable Resend email
 
 Email is fail-closed and disabled by default. First set the provider secrets in Replit, insert one tenant-owned `provider_connections` row and at least one matching `service_identities` row, then register this signed webhook in Resend:
@@ -257,11 +260,28 @@ RESEND_WEBHOOK_SECRET=whsec_...
 
 Outbound requests use `POST /v1/emails` with `Idempotency-Key`. Webhooks are verified over the exact raw body, stored once by provider event ID, acknowledged, and normalized asynchronously. The verified SMTP-envelope recipient remains authoritative when Resend's retrieval API canonicalises an alias; new opaque reply tokens are lowercase-safe, and migrations `013`-`015` recover narrowly identified jobs created by the earlier routing and attachment defects. Attachment metadata is stored in `communication_attachments`, separate from `email_messages`; attachment content is not downloaded or exposed by the API. Bounces, spam, mailing-list traffic, and automatic replies stay auditable but cannot feed memory or emit `ask.response.received`.
 
+### 6. Connect a Gmail mailbox
+
+Gmail OAuth is separate from Resend and remains draft-only. Set the following deployment secrets, register `https://<communications-host>/oauth/mailboxes/google/callback` as an authorized Google redirect URI, apply migration `016`, and grant the HyperFlow API client `mailbox:manage`, `email:draft`, and `communications:read`:
+
+```dotenv
+MAILBOX_CREDENTIAL_ENCRYPTION_KEY=<base64-of-exactly-32-random-bytes>
+MAILBOX_OAUTH_STATE_SECRET=<at-least-32-random-bytes>
+GMAIL_OAUTH_CLIENT_ID=...
+GMAIL_OAUTH_CLIENT_SECRET=...
+HYPERFLOW_URL=https://hyper-flow5.vercel.app
+MAILBOX_OAUTH_RETURN_ORIGINS=https://hyper-flow5.vercel.app
+```
+
+HyperFlow starts OAuth with `POST /v1/mailboxes/oauth/google/start`, then stores only the returned non-secret connection reference. `POST /v1/mailboxes/:connectionId/sync` performs authoritative cursor reconciliation. `POST /v1/mailboxes/:connectionId/drafts` creates a provider-native Gmail draft using a required idempotency key; there is intentionally no connected-mailbox send route. Outlook is not implemented yet.
+
+Gmail Pub/Sub is optional. If configured, set `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_AUDIENCE`, `GMAIL_PUBSUB_SERVICE_ACCOUNT`, and optionally the exact `GMAIL_PUBSUB_SUBSCRIPTION`. The authenticated push URL is `POST /oauth/gmail`; notifications are hints and never replace scheduled reconciliation.
+
 Outbound calls and messages attach their status callbacks programmatically. If the number belongs to a Twilio Messaging Service, configure the inbound message webhook on that service.
 
 New deployments should use `enforce`. Existing deployments may temporarily use `warn` while confirming that `PUBLIC_URL` exactly matches the externally visible URL Twilio signs.
 
-### 5. Start
+### 7. Start
 
 ```powershell
 node index.js
@@ -434,6 +454,19 @@ No destination means no outbox row is created.
 | `HYPERFLOW_EVENT_URL` | Optional | Default durable event destination |
 | `COMMUNICATIONS_WEBHOOK_SECRET` | Durable events | Required HMAC-SHA256 event signing secret |
 | `COMMUNICATIONS_WEBHOOK_HOSTS` | Optional | Comma-separated allow-list for event destinations |
+| `HYPERFLOW_AGENT_CONTEXT_URL` | Inbound HyperFlow voice | Signed HyperFlow project-selection endpoint; defaults to the `HYPERFLOW_EVENT_URL` origin at `/api/agent/voice-context` |
+| `HYPERFLOW_AGENT_CONTEXT_HOSTS` | Optional | Comma-separated allow-list for the live voice-context endpoint; defaults to its configured host |
+| `HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET` | Blocked HyperFlow origin only | Backend-only Vercel automation-bypass secret. Configure it only when an anonymous probe of the selected production origin is intercepted by Deployment Protection. Added as `x-vercel-protection-bypass` only when the event/context destination exactly matches the configured HTTPS HyperFlow origin. |
+| `MAILBOX_CREDENTIAL_ENCRYPTION_KEY` | Connected Gmail | Base64 encoding of exactly 32 random bytes used for AES-256-GCM OAuth credential encryption |
+| `MAILBOX_OAUTH_STATE_SECRET` | Connected Gmail | Independent random OAuth state signing secret of at least 32 bytes |
+| `GMAIL_OAUTH_CLIENT_ID` | Connected Gmail | Google OAuth web client ID |
+| `GMAIL_OAUTH_CLIENT_SECRET` | Connected Gmail | Google OAuth web client secret |
+| `HYPERFLOW_URL` | Connected Gmail | Default allowlisted HyperFlow return URL |
+| `MAILBOX_OAUTH_RETURN_ORIGINS` | Optional with connected Gmail | Comma-separated exact origins accepted after OAuth; defaults to `HYPERFLOW_URL` |
+| `GMAIL_PUBSUB_TOPIC` | Optional Gmail push | Full Gmail watch topic name; omit to use scheduled/manual sync only |
+| `GMAIL_PUBSUB_AUDIENCE` | Gmail push enabled | Exact OIDC audience expected on `POST /oauth/gmail` |
+| `GMAIL_PUBSUB_SERVICE_ACCOUNT` | Gmail push enabled | Exact verified Google service-account email allowed to push |
+| `GMAIL_PUBSUB_SUBSCRIPTION` | Optional Gmail push hardening | Exact Pub/Sub subscription resource name |
 | `EMAIL_ENABLED` | Optional | `false` by default; set `true` only after provider connections, identities, and webhook secrets are ready |
 | `RESEND_API_KEY` | Resend connection references it | Resend API key; inbound email requires permission to retrieve received email content; the connection stores only `env:RESEND_API_KEY` |
 | `RESEND_WEBHOOK_SECRET` | Resend webhook connection references it | Resend/Svix signing secret; the connection stores only `env:RESEND_WEBHOOK_SECRET` |

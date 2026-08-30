@@ -4,6 +4,8 @@ import { signatureMode } from '../auth.js';
 import { createSafeLookup, safeFetch } from '../safeFetch.js';
 import { describeDeliveryError } from '../eventOutbox.js';
 import { normaliseCorrelation } from '../communicationModel.js';
+import { applyHyperFlowVoiceContext } from '../hyperflowVoice.js';
+import { hyperflowProtectionHeaders } from '../vercelProtection.js';
 
 test('Twilio signatures default to enforce when credentials exist', () => {
     const previousToken = process.env.TWILIO_AUTH_TOKEN;
@@ -73,4 +75,43 @@ test('outbox diagnostics retain the native fetch failure cause', () => {
 
 test('workflow project IDs stay external correlation', () => {
     assert.deepEqual(normaliseCorrelation({ project_id: 'workflow-project' }), { external_project_id: 'workflow-project' });
+});
+
+test('HyperFlow voice context disables unscoped history and tools', () => {
+    const config = applyHyperFlowVoiceContext({
+        systemMessage: 'base', greetingText: 'base greeting', wantsHistory: true,
+        tools: ['recall_conversations', 'check_calendar', 'end_call'],
+    }, {
+        instructions: 'Use only the selected project.',
+        greeting: 'Coaching is selected.',
+        routing: { kind: 'routed', projectId: 'coaching' },
+        project: { context: { project: { id: 'coaching', facts: { status: 'active' } } } },
+    });
+    assert.equal(config.wantsHistory, false);
+    assert.equal(config.greetingText, 'Coaching is selected.');
+    assert.deepEqual(config.tools, ['end_call', 'select_hyperflow_project']);
+    assert.match(config.systemMessage, /HYPERFLOW PROJECT CONTEXT DATA/);
+    assert.doesNotMatch(config.systemMessage, /recall_conversations/);
+});
+
+test('Vercel protection bypass is scoped to the configured HyperFlow origin', () => {
+    const previous = process.env.HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET;
+    process.env.HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET = 'automation-secret';
+    try {
+        assert.deepEqual(
+            hyperflowProtectionHeaders('https://hyper-flow5.vercel.app/api/events', 'https://hyper-flow5.vercel.app/api/events'),
+            { 'x-vercel-protection-bypass': 'automation-secret' },
+        );
+        assert.deepEqual(
+            hyperflowProtectionHeaders('https://attacker.example/callback', 'https://hyper-flow5.vercel.app/api/events'),
+            {},
+        );
+        assert.deepEqual(
+            hyperflowProtectionHeaders('http://hyper-flow5.vercel.app/api/events', 'https://hyper-flow5.vercel.app/api/events'),
+            {},
+        );
+    } finally {
+        if (previous === undefined) delete process.env.HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET;
+        else process.env.HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET = previous;
+    }
 });

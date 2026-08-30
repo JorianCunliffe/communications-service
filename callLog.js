@@ -274,6 +274,39 @@ export async function updateCallStatus({ callSid, status, durationSeconds, tenan
     }
 }
 
+export async function updateCallProjectContext({ callSid, projectId, tenantId = null }) {
+    const db = getClient();
+    if (!db || !callSid || !projectId) throw new Error('CallSid and projectId are required for call project context');
+    let scopedTenant;
+    let call;
+    for (let attempt = 0; attempt < 4 && !call; attempt += 1) {
+        try {
+            scopedTenant = await tenantForCall(db, callSid, tenantId);
+            call = await withTimeout(
+                db.from('calls').select('correlation,communication_thread_id').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
+                'Call project context lookup'
+            );
+        } catch (error) {
+            if (!String(error.message).includes('did not resolve to exactly one call') || attempt === 3) throw error;
+        }
+        if (!call && attempt < 3) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!call) throw new Error('Call was not found for project context update');
+    const correlation = { ...(call.correlation || {}), tenant_id: scopedTenant, external_project_id: projectId };
+    await withTimeout(
+        db.from('calls').update({ correlation }).eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid),
+        'Call project context update'
+    );
+    if (call.communication_thread_id) {
+        await withTimeout(
+            db.from('communication_threads').update({ correlation, last_activity_at: new Date().toISOString() })
+                .eq('tenant_id', scopedTenant).eq('thread_id', call.communication_thread_id),
+            'Call thread project context update'
+        );
+    }
+    return correlation;
+}
+
 // Stores Twilio's AnsweredBy signal separately from provider call status.
 // Machine/fax is decisive failure evidence; "human" still requires transcript
 // validation so a wrong number cannot become a successful call.

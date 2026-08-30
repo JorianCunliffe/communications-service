@@ -3,6 +3,7 @@ import { getDatabase } from './database.js';
 import { assertFetchable } from './recordingSources.js';
 import { safeFetch } from './safeFetch.js';
 import { prefixedId } from './communicationModel.js';
+import { hyperflowProtectionHeaders } from './vercelProtection.js';
 
 const MAX_ATTEMPTS = 12;
 const BATCH_SIZE = 20;
@@ -122,6 +123,7 @@ export async function deliverPendingEvents() {
                 'x-communications-contract-version': '2.0',
                 'x-communications-tenant-id': row.tenant_id,
                 'x-communications-timestamp': timestamp,
+                ...hyperflowProtectionHeaders(destination),
             };
             const signed = signature(body);
             if (signed) headers['x-communications-signature'] = signed;
