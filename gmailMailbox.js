@@ -5,6 +5,15 @@ import { safeFetch } from './safeFetch.js';
 
 const GMAIL_HOST = 'gmail.googleapis.com';
 
+export class GmailMessageNormalizationError extends Error {
+    constructor(messageId, cause) {
+        super(`Gmail message could not be normalized: ${cause?.message || cause || 'invalid message'}`, { cause });
+        this.name = 'GmailMessageNormalizationError';
+        this.code = 'GMAIL_MESSAGE_INVALID';
+        this.providerMessageId = messageId || null;
+    }
+}
+
 function headerMap(headers = []) {
     return Object.fromEntries(headers.map((item) => [String(item.name || '').toLowerCase(), String(item.value || '')]));
 }
@@ -50,7 +59,7 @@ function walkParts(part, result) {
     for (const child of part?.parts || []) walkParts(child, result);
 }
 
-export function canonicalGmailMessage(message) {
+export function canonicalGmailMessage(message, { mailboxAddress = null } = {}) {
     const headers = headerMap(message?.payload?.headers);
     const contents = { text: [], html: [], attachments: [] };
     walkParts(message?.payload || {}, contents);
@@ -61,8 +70,11 @@ export function canonicalGmailMessage(message) {
         message_id: headers['message-id'] || null,
         in_reply_to: headers['in-reply-to'] || null,
         references: headers.references || '',
-        from: splitAddresses(headers.from),
-        to: splitAddresses(headers.to),
+        from: splitAddresses(headers.from || headers.sender || headers['return-path']),
+        // Gmail can omit To on valid inbox messages (for example Bcc and some
+        // system-generated mail). The connected account is the trusted
+        // receiving identity, so it is the safe final fallback.
+        to: splitAddresses(headers.to || headers['delivered-to'] || headers['x-original-to'] || mailboxAddress),
         cc: splitAddresses(headers.cc),
         bcc: splitAddresses(headers.bcc),
         reply_to: splitAddresses(headers['reply-to']),
@@ -118,8 +130,13 @@ export function gmailProfile(accessToken) {
     return gmailRequest(accessToken, '/profile');
 }
 
-export async function gmailMessage(accessToken, messageId) {
-    return canonicalGmailMessage(await gmailRequest(accessToken, `/messages/${encodeURIComponent(messageId)}?format=full`));
+export async function gmailMessage(accessToken, messageId, mailboxAddress = null) {
+    const message = await gmailRequest(accessToken, `/messages/${encodeURIComponent(messageId)}?format=full`);
+    try {
+        return canonicalGmailMessage(message, { mailboxAddress });
+    } catch (error) {
+        throw new GmailMessageNormalizationError(messageId, error);
+    }
 }
 
 export async function gmailInitialMessageIds(accessToken, { maxMessages = 1000 } = {}) {

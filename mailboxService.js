@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { ingestCanonicalInboundEmail } from './emailWebhook.js';
 import {
     createGmailDraft,
+    GmailMessageNormalizationError,
     getGmailDraft,
     gmailHistoryMessageIds,
     gmailInitialMessageIds,
@@ -217,8 +218,16 @@ export async function syncGmailMailbox(db, { tenantId, connectionId, actorId = n
         }
         let ingested = 0;
         let duplicates = 0;
+        let skipped = 0;
         for (const messageId of messageIds) {
-            const email = await gmailMessage(credential.access_token, messageId);
+            let email;
+            try {
+                email = await gmailMessage(credential.access_token, messageId, connection.provider_account_id);
+            } catch (error) {
+                if (!(error instanceof GmailMessageNormalizationError)) throw error;
+                skipped += 1;
+                continue;
+            }
             if (!email.providerLabels.includes('INBOX')) continue;
             const outcome = await ingestCanonicalInboundEmail({
                 db,
@@ -241,8 +250,8 @@ export async function syncGmailMailbox(db, { tenantId, connectionId, actorId = n
             last_successful_sync_at: new Date().toISOString(),
             last_error: null,
         });
-        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'succeeded', { ingested, duplicates, recovered });
-        return { connection_id: connectionId, status: 'healthy', ingested, duplicates, recovered, history_id: watch?.historyId || nextHistoryId };
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'succeeded', { ingested, duplicates, skipped, recovered });
+        return { connection_id: connectionId, status: 'healthy', ingested, duplicates, skipped, recovered, history_id: watch?.historyId || nextHistoryId };
     } catch (error) {
         const state = [401, 403].includes(error.status) ? 'expired' : 'degraded';
         await markSync(db, tenantId, connectionId, { status: state, last_error: String(error.message || error).slice(0, 500) }).catch(() => {});

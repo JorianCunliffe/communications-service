@@ -8,7 +8,7 @@ import {
     mailboxOAuthNonceHash,
     verifyMailboxOAuthState,
 } from '../mailboxOAuth.js';
-import { canonicalGmailMessage, gmailDraftMessage } from '../gmailMailbox.js';
+import { canonicalGmailMessage, GmailMessageNormalizationError, gmailDraftMessage } from '../gmailMailbox.js';
 
 const KEYS = [
     'MAILBOX_CREDENTIAL_ENCRYPTION_KEY', 'MAILBOX_OAUTH_STATE_SECRET',
@@ -97,6 +97,29 @@ describe('Gmail adapter contract', () => {
         assert.equal(message.from_addresses[0].address, 'alex@example.com');
         assert.equal(message.text_body, 'Plain reply');
         assert.doesNotMatch(message.sanitized_html, /script/i);
+    });
+
+    test('uses the connected mailbox as the recipient for Gmail inbox messages without a To header', () => {
+        const message = canonicalGmailMessage({
+            id: 'gmail-message-bcc', threadId: 'gmail-thread-bcc', internalDate: String(Date.parse('2026-08-30T00:00:00Z')),
+            payload: {
+                mimeType: 'text/plain',
+                headers: [
+                    { name: 'From', value: 'Alex <alex@example.com>' },
+                    { name: 'Subject', value: 'Bcc delivery' },
+                ],
+                body: { data: Buffer.from('Private inbox message').toString('base64url') },
+            },
+        }, { mailboxAddress: 'coach@example.com' });
+        assert.equal(message.to_addresses[0].address, 'coach@example.com');
+        assert.equal(message.from_addresses[0].address, 'alex@example.com');
+    });
+
+    test('exposes a distinct error type for per-message Gmail normalization failures', () => {
+        const error = new GmailMessageNormalizationError('gmail-message-invalid', new Error('missing sender'));
+        assert.equal(error.code, 'GMAIL_MESSAGE_INVALID');
+        assert.equal(error.providerMessageId, 'gmail-message-invalid');
+        assert.match(error.message, /missing sender/);
     });
 
     test('creates a Gmail draft MIME payload but exposes no send operation', () => {
