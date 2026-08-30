@@ -10,6 +10,20 @@ import { prefixedId, resolveCommunicationThread } from './communicationModel.js'
 const MAX_ATTEMPTS = 8;
 let timer = null;
 
+export function inboundEmailInput(eventData = {}, full = {}) {
+    // The webhook recipient is the SMTP envelope Resend actually accepted. The
+    // retrieve endpoint may canonicalise an alias back to the service mailbox,
+    // which would erase our opaque reply+token route if it won precedence.
+    return { ...full, ...eventData, provider_email_id: eventData.email_id };
+}
+
+function logSafeError(error) {
+    return String(error?.message || error || 'Unknown error')
+        .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+        .replace(/https?:\/\/\S+/gi, '[url]')
+        .slice(0, 500);
+}
+
 export function emailEnabled() {
     return ['1', 'true', 'yes'].includes(String(process.env.EMAIL_ENABLED || '').trim().toLowerCase());
 }
@@ -115,7 +129,7 @@ async function processInbound(db, receipt, connection, payload) {
     const provider = emailProvider(connection);
     const eventData = payload.data || {};
     const full = await provider.retrieveReceived(connection, eventData.email_id);
-    const email = canonicalEmail({ ...eventData, ...full, provider_email_id: eventData.email_id });
+    const email = canonicalEmail(inboundEmailInput(eventData, full));
     const triage = triageEmail(email, payload.type);
     const token = replyTokenFromAddresses(email.to_addresses);
     const replyRoute = await resolveEmailReplyRoute(db, receipt.tenant_id, token);
@@ -291,23 +305,29 @@ export async function processCommunicationJobs() {
     let completed = 0;
     for (const job of claimed.data || []) {
         const receiptResult = await db.from('webhook_receipts').select('*').eq('tenant_id', job.tenant_id).eq('id', job.receipt_id).maybeSingle();
+        let stage = 'receipt_lookup';
         try {
             if (receiptResult.error || !receiptResult.data) throw new Error(receiptResult.error?.message || 'Webhook receipt is missing');
             const receipt = receiptResult.data;
+            stage = 'connection_lookup';
             const connectionResult = await db.from('provider_connections').select('*').eq('tenant_id', receipt.tenant_id)
                 .eq('id', receipt.provider_connection_id).maybeSingle();
             if (connectionResult.error || !connectionResult.data) throw new Error(connectionResult.error?.message || 'Provider connection is missing');
             const payload = receipt.raw_payload;
+            stage = payload.type === 'email.received' ? 'inbound_normalization' : 'delivery_normalization';
             if (payload.type === 'email.received') await processInbound(db, receipt, connectionResult.data, payload);
             else if (String(payload.type || '').startsWith('email.')) await processDelivery(db, receipt, connectionResult.data, payload);
+            stage = 'job_completion';
             await finishJob(db, job, receipt, { status: 'done', completed_at: new Date().toISOString(), last_error: null });
             completed += 1;
         } catch (error) {
             const exhausted = job.attempts >= MAX_ATTEMPTS || error.retryable === false;
             const delay = Math.min(60 * 60 * 1000, 5000 * (2 ** Math.min(job.attempts, 8)));
+            console.warn(`Email job ${job.id} stage ${stage} attempt ${job.attempts} ${exhausted ? 'failed' : 'deferred'}: ${logSafeError(error)}`);
             if (receiptResult.data) await finishJob(db, job, receiptResult.data, {
                 status: exhausted ? 'failed' : 'pending',
                 next_attempt_at: new Date(Date.now() + delay).toISOString(),
+                completed_at: exhausted ? new Date().toISOString() : null,
                 last_error: error.message.slice(0, 500),
             });
         }

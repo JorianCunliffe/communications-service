@@ -863,7 +863,6 @@ Contract tests should use these real request, response, and event shapes. A mock
 | `sms.sent` | Twilio accepts SMS or reports a nonterminal status |
 | `sms.delivered` | Twilio reports delivered |
 | `sms.failed` | Twilio reports failed or undelivered |
-| `sms.received` | Inbound SMS is persisted |
 | `call.started` | Call record starts or Twilio reports a nonterminal state |
 | `call.answered` | Twilio reports answered |
 | `call.completed` | Outcome finalizer verifies a meaningful response from the intended human; payload disposition is `human_completed` |
@@ -932,7 +931,7 @@ POST /webhooks/email/:provider/:connectionId
 
 Currently `provider` must be `resend`. This route does not accept API authentication or a request-supplied tenant. It loads the provider connection by opaque UUID, verifies the exact raw body using the connection's referenced Svix secret, and derives `tenant_id` from that trusted connection.
 
-Verified deliveries are stored immutably in `webhook_receipts`, deduplicated by provider connection plus `svix-id`, and queued in `communication_jobs`. The route returns `200` immediately; normalization, body retrieval, safe HTML storage, attachment metadata, thread resolution, triage, canonical communication creation, and event emission happen asynchronously. A valid replay returns `200` with `duplicate: true` and never creates a second communication.
+Verified deliveries are stored immutably in `webhook_receipts`, deduplicated by provider connection plus `svix-id`, and queued in `communication_jobs`. The route returns `200` immediately; normalization, body retrieval, safe HTML storage, attachment metadata, thread resolution, triage, canonical communication creation, and event emission happen asynchronously. The verified webhook envelope recipient takes precedence during opaque reply routing, because provider retrieval may canonicalise an alias back to its service mailbox.
 
 Inbound thread resolution is ordered: opaque reply route, provider/RFC reply headers, explicit Ask/thread, exactly one open tenant/person/mailbox thread, otherwise unassigned. Bounce, spam, mailing-list, and automatic-reply classifications are memory-ineligible and never emit `ask.response.received`.
 
@@ -941,6 +940,8 @@ When `EMAIL_ENABLED` is false the route returns `404`. Invalid signatures return
 ## Twilio webhook routes
 
 These routes accept both GET and POST where the implementation uses `all`.
+
+Outbound provider callback URLs include the authenticated `tenant_id` as a signed query parameter. Callback processing verifies that tenant against the stored provider identifier; callbacks without it are accepted only when the provider identifier resolves to exactly one tenant.
 
 | Route | Purpose | Response |
 |---|---|---|

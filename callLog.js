@@ -15,6 +15,20 @@ function getClient() {
     return getDatabase();
 }
 
+export async function tenantForCall(db, callSid, tenantId = null) {
+    if (!db || !callSid) throw new Error('callSid is required for call tenant resolution');
+    let query = db.from('calls').select('tenant_id').eq('twilio_call_sid', callSid);
+    if (tenantId) query = query.eq('tenant_id', tenantId);
+    const { data, error } = await query.limit(2);
+    if (error) throw new Error(`Call tenant lookup failed: ${error.message}`);
+    const matches = Array.isArray(data) ? data : (data ? [data] : []);
+    if (matches.length !== 1) {
+        const qualifier = tenantId ? ' for the supplied tenant' : '';
+        throw new Error(`CallSid did not resolve to exactly one call${qualifier}`);
+    }
+    return matches[0].tenant_id;
+}
+
 async function withTimeout(query, label) {
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -174,8 +188,7 @@ export async function saveTranscript({ callSid, transcript, status = 'completed'
     if (!db || !callSid || !transcript?.segments?.length) return;
 
     try {
-        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
-        if (!scopedTenant) throw new Error('tenant_id is required for transcript persistence');
+        const scopedTenant = await tenantForCall(db, callSid, tenantId);
         await withTimeout(
             db.from('calls')
                 .update({ transcript, transcription_status: status, transcription_error: null })
@@ -222,8 +235,7 @@ export async function saveTranscriptionError({ callSid, message, tenantId = null
     if (!db || !callSid) return;
 
     try {
-        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
-        if (!scopedTenant) throw new Error('tenant_id is required for transcription persistence');
+        const scopedTenant = await tenantForCall(db, callSid, tenantId);
         await withTimeout(
             db.from('calls')
                 .update({ transcription_status: 'failed', transcription_error: String(message).slice(0, 500) })
@@ -247,14 +259,13 @@ export async function updateCallStatus({ callSid, status, durationSeconds, tenan
     if (Number.isFinite(durationSeconds)) patch.duration_seconds = durationSeconds;
 
     try {
-        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
-        if (!scopedTenant) throw new Error('tenant_id is required for call status persistence');
+        const scopedTenant = await tenantForCall(db, callSid, tenantId);
         await withTimeout(
             db.from('calls').update(patch).eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid),
             'Call status update'
         );
         return await withTimeout(
-            db.from('calls').select('communication_id,purpose,correlation,communication_thread_id').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
+            db.from('calls').select('tenant_id,communication_id,purpose,correlation,communication_thread_id').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
             'Call event lookup'
         );
     } catch (error) {
@@ -272,8 +283,7 @@ export async function recordAnswerDetection({ callSid, answeredBy, durationMs, t
     const metadataPatch = { answered_by: String(answeredBy) };
     if (Number.isFinite(durationMs)) metadataPatch.machine_detection_duration_ms = Number(durationMs);
     try {
-        const scopedTenant = tenantId || process.env.LEGACY_TENANT_ID;
-        if (!scopedTenant) throw new Error('tenant_id is required for answer detection persistence');
+        const scopedTenant = await tenantForCall(db, callSid, tenantId);
         const current = await withTimeout(
             db.from('calls').select('metadata').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
             'Answer detection lookup'

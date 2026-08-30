@@ -2,7 +2,8 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import Fastify from 'fastify';
-import v1Routes, { outboundError, parseSemantic } from '../v1.js';
+import v1Routes, { outboundError, parseSemantic, providerCallbackUrl } from '../v1.js';
+import { tenantForMessage } from '../smsLog.js';
 import {
     canonicalCommunication,
     normaliseCorrelation,
@@ -10,6 +11,43 @@ import {
     prefixedId,
     resolveCommunicationThread,
 } from '../communicationModel.js';
+
+test('provider callbacks carry the authenticated tenant without exposing a secret', () => {
+    const callback = new URL(providerCallbackUrl('https://communications.example/', '/call-status', 'tenant_a'));
+    assert.equal(callback.origin, 'https://communications.example');
+    assert.equal(callback.pathname, '/call-status');
+    assert.equal(callback.searchParams.get('tenant_id'), 'tenant_a');
+});
+
+test('inbound SMS emits the canonical communication.received contract', () => {
+    const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    const handler = source.slice(source.indexOf("fastify.all('/incoming-sms'"), source.indexOf("fastify.all('/message-status'"));
+    assert.match(handler, /type: 'communication\.received'/);
+    assert.doesNotMatch(handler, /type: 'sms\.received'/);
+});
+
+test('SMS callbacks resolve exactly one tenant before updating provider state', async () => {
+    const rows = [
+        { tenant_id: 'tenant_a', twilio_message_sid: 'SM_shared' },
+        { tenant_id: 'tenant_b', twilio_message_sid: 'SM_shared' },
+    ];
+    const db = {
+        from() {
+            const filters = [];
+            const query = {
+                select() { return query; },
+                eq(field, value) { filters.push([field, value]); return query; },
+                limit() { return query; },
+                then(resolve, reject) {
+                    return Promise.resolve({ data: rows.filter((row) => filters.every(([field, value]) => row[field] === value)), error: null }).then(resolve, reject);
+                },
+            };
+            return query;
+        },
+    };
+    await assert.rejects(() => tenantForMessage(db, 'SM_shared'), /exactly one message/);
+    assert.equal(await tenantForMessage(db, 'SM_shared', 'tenant_b'), 'tenant_b');
+});
 
 class FakeQuery {
     constructor(db, table) {

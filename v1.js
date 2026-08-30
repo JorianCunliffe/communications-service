@@ -23,6 +23,12 @@ const CALL_OVERRIDE_FIELDS = ['model', 'effort', 'voice', 'temperature', 'system
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INBOX_DISPOSITIONS = ['candidate_human_response', 'human', 'spam', 'bounce', 'automatic_reply', 'mailing_list', 'unsubscribe_intent', 'system_generated', 'archived', 'unassigned'];
 
+export function providerCallbackUrl(baseUrl, path, tenantId) {
+    const url = new URL(path, `${String(baseUrl).replace(/\/$/, '')}/`);
+    url.searchParams.set('tenant_id', tenantId);
+    return url.toString();
+}
+
 function database(reply) {
     const db = getDatabase();
     if (!db) reply.code(503).send({ error: 'Communications persistence is not configured' });
@@ -362,7 +368,7 @@ export default async function v1Routes(fastify) {
                 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
                 message = await client.messages.create({
                     to, from, body,
-                    ...(PUBLIC_URL ? { statusCallback: `${PUBLIC_URL.replace(/\/$/, '')}/message-status` } : {}),
+                    ...(PUBLIC_URL ? { statusCallback: providerCallbackUrl(PUBLIC_URL, '/message-status', request.tenantId) } : {}),
                 });
                 await markOutbound(db, operation.id, { status: 'provider_sent', provider_id: message.sid, provider_status: message.status });
             }
@@ -595,13 +601,15 @@ export default async function v1Routes(fastify) {
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
             const resolved = await resolveConfig({ from, to, direction: 'outbound' });
-            const config = { ...resolved, ...overrides };
+            const config = { ...resolved, ...overrides, tenantId: request.tenantId };
             const base = PUBLIC_URL.replace(/\/$/, '');
             let call = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
                 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
                 call = await client.calls.create({
-                    to, from, url: `${base}/outbound-answer`, statusCallback: `${base}/call-status`,
+                    to, from,
+                    url: providerCallbackUrl(base, '/outbound-answer', request.tenantId),
+                    statusCallback: providerCallbackUrl(base, '/call-status', request.tenantId),
                     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'], statusCallbackMethod: 'POST',
                 });
                 await markOutbound(db, operation.id, { status: 'provider_sent', provider_id: call.sid, provider_status: call.status });
@@ -609,7 +617,7 @@ export default async function v1Routes(fastify) {
             storeCallConfig(call.sid, config);
             const stored = await recordCall({
                 callSid: call.sid, otherParty: to, serviceIdentity: from, direction: 'outbound', config,
-                metadata: { from }, communicationId, ...semantic, strict: true,
+                metadata: { from }, communicationId, tenantId: request.tenantId, ...semantic, strict: true,
             });
             await enqueueEvent({
                 type: 'communication.created', communicationId, purpose: stored.purpose,

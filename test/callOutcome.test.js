@@ -2,12 +2,46 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { classifyCallOutcome, classifyCallTranscript, deterministicCallOutcome } from '../callOutcome.js';
+import { tenantForCall } from '../callLog.js';
 
 const transcript = (...segments) => ({ segments });
 const caller = (text) => ({ role: 'user', text });
 const assistant = (text) => ({ role: 'assistant', text });
 
+function callTenantDb(rows) {
+    return {
+        from() {
+            const filters = [];
+            const query = {
+                select() { return query; },
+                eq(field, value) { filters.push([field, value]); return query; },
+                limit() { return query; },
+                then(resolve, reject) {
+                    const filtered = rows.filter((row) => filters.every(([field, value]) => row[field] === value));
+                    return Promise.resolve({ data: filtered, error: null }).then(resolve, reject);
+                },
+            };
+            return query;
+        },
+    };
+}
+
 describe('call business outcomes', () => {
+    test('provider callbacks resolve the call tenant from a unique CallSid', async () => {
+        const db = callTenantDb([
+            { tenant_id: 'tenant_a', twilio_call_sid: 'CA_unique' },
+            { tenant_id: 'tenant_b', twilio_call_sid: 'CA_other' },
+        ]);
+        assert.equal(await tenantForCall(db, 'CA_unique'), 'tenant_a');
+        await assert.rejects(() => tenantForCall(callTenantDb([
+            { tenant_id: 'tenant_a', twilio_call_sid: 'CA_shared' },
+            { tenant_id: 'tenant_b', twilio_call_sid: 'CA_shared' },
+        ]), 'CA_shared'), /exactly one call/);
+        assert.equal(await tenantForCall(callTenantDb([
+            { tenant_id: 'tenant_a', twilio_call_sid: 'CA_shared' },
+            { tenant_id: 'tenant_b', twilio_call_sid: 'CA_shared' },
+        ]), 'CA_shared', 'tenant_b'), 'tenant_b');
+    });
     test('summary and legacy memory writes are gated behind verified eligibility', () => {
         const summary = readFileSync(new URL('../summarise.js', import.meta.url), 'utf8');
         const migration = readFileSync(new URL('../migrations/008_call_outcomes.sql', import.meta.url), 'utf8');

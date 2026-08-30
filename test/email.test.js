@@ -7,7 +7,7 @@ import { replyTokenFromAddresses } from '../emailReplyRoutes.js';
 import { hashApiSecret, verifyApiSecret } from '../auth.js';
 import { tenantDatabase } from '../tenantContext.js';
 import Fastify from 'fastify';
-import { installRawJsonParser } from '../emailWebhook.js';
+import { inboundEmailInput, installRawJsonParser } from '../emailWebhook.js';
 import { Webhook } from 'svix';
 import { emailProviderAdapters } from '../emailProviders.js';
 
@@ -44,6 +44,31 @@ describe('tenant boundary', () => {
         const raw = { from: () => new Query([], 'x'), rpc: async (name, args) => ({ data: { name, args }, error: null }) };
         const result = await tenantDatabase(raw, 'tenant_a').rpc('search_communications', { q: 'lease' });
         assert.equal(result.data.args.p_tenant_id, 'tenant_a');
+    });
+});
+
+describe('inbound email routing', () => {
+    test('keeps the verified SMTP envelope recipient ahead of the retrieve response', () => {
+        const input = inboundEmailInput({
+            email_id: 'email_1',
+            to: ['reply+abcdefghijklmnopqrstuvwx@projectflow.online'],
+            subject: 'Reply',
+        }, {
+            id: 'email_1',
+            to: ['hyperflow@projectflow.online'],
+            from: 'person@example.com',
+            text: 'Received',
+        });
+        assert.deepEqual(input.to, ['reply+abcdefghijklmnopqrstuvwx@projectflow.online']);
+        assert.equal(input.text, 'Received');
+        assert.equal(input.provider_email_id, 'email_1');
+    });
+
+    test('requeues the exact routing failures caused by the old recipient precedence', () => {
+        const migration = readFileSync(new URL('../migrations/013_inbound_email_reply_recovery.sql', import.meta.url), 'utf8');
+        assert.match(migration, /Inbound address did not resolve to exactly one trusted receiving identity/);
+        assert.match(migration, /status='pending',attempts=0/);
+        assert.match(migration, /provider_event_type='email\.received'/);
     });
 });
 

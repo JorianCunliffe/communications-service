@@ -17,6 +17,20 @@ function getClient() {
     return getDatabase();
 }
 
+export async function tenantForMessage(db, messageSid, tenantId = null) {
+    if (!db || !messageSid) throw new Error('messageSid is required for SMS tenant resolution');
+    let query = db.from('sms_messages').select('tenant_id').eq('twilio_message_sid', messageSid);
+    if (tenantId) query = query.eq('tenant_id', tenantId);
+    const { data, error } = await query.limit(2);
+    if (error) throw new Error(`SMS tenant lookup failed: ${error.message}`);
+    const matches = Array.isArray(data) ? data : (data ? [data] : []);
+    if (matches.length !== 1) {
+        const qualifier = tenantId ? ' for the supplied tenant' : '';
+        throw new Error(`MessageSid did not resolve to exactly one message${qualifier}`);
+    }
+    return matches[0].tenant_id;
+}
+
 function withTimeout(query, label) {
     let timer;
     const timeout = new Promise((_, reject) => {

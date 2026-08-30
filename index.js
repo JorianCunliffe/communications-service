@@ -10,9 +10,9 @@ import { readFileSync } from 'node:fs';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
 import { assertContactable, resolveConfig, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
 import { databaseProvider, getDatabase } from './database.js';
-import { recordAnswerDetection, recordCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
+import { recordAnswerDetection, recordCall, tenantForCall, updateCallStatus, recordToolCall, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
-import { recordMessage } from './smsLog.js';
+import { recordMessage, tenantForMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
@@ -475,7 +475,7 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
             payload: { channel: 'sms', direction: 'inbound' },
         }).catch((error) => console.warn(`Could not enqueue communication event: ${error.message}`));
         await enqueueEvent({
-            type: 'sms.received', communicationId: stored.communicationId,
+            type: 'communication.received', communicationId: stored.communicationId,
             purpose: stored.purpose, correlation: stored.correlation,
             destination: stored.callbackUrl,
             payload: { channel: 'sms', direction: 'inbound', content: body },
@@ -502,20 +502,25 @@ fastify.all('/message-status', twilioWebhook, async (request, reply) => {
     const params = { ...request.query, ...request.body };
     const db = getDatabase();
     if (db && params.MessageSid) {
-        const { data: message, error } = await db.from('sms_messages')
+        const tenantId = await tenantForMessage(db, params.MessageSid, params.tenant_id || null)
+            .catch((error) => { console.warn(`Could not resolve SMS tenant for ${params.MessageSid}: ${error.message}`); return null; });
+        if (!tenantId) return reply.code(204).send();
+        let update = db.from('sms_messages')
             .update({ status: params.MessageStatus || params.SmsStatus || null })
+            .eq('tenant_id', tenantId)
             .eq('twilio_message_sid', params.MessageSid)
-            .select('communication_id,purpose,correlation,communication_thread_id')
-            .maybeSingle();
+            .select('tenant_id,communication_id,purpose,correlation,communication_thread_id');
+        const { data: message, error } = await update.maybeSingle();
         if (error) {
             console.warn(`Could not update SMS status ${params.MessageSid}: ${error.message}`);
         } else if (message?.communication_id) {
             const status = params.MessageStatus || params.SmsStatus || 'unknown';
             const eventType = status === 'delivered' ? 'sms.delivered'
                 : ['failed', 'undelivered'].includes(status) ? 'sms.failed' : 'sms.sent';
-            const destination = await callbackForThread(message.communication_thread_id)
+            const destination = await callbackForThread(message.tenant_id, message.communication_thread_id)
                 .catch((callbackError) => { console.warn(callbackError.message); return null; });
             await enqueueEvent({
+                tenantId: message.tenant_id,
                 type: eventType,
                 communicationId: message.communication_id,
                 purpose: message.purpose,
@@ -538,6 +543,7 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
             callSid: params.CallSid,
             answeredBy: params.AnsweredBy,
             durationMs: Number(params.MachineDetectionDuration),
+            tenantId: params.tenant_id || null,
         });
     }
     if (/^(machine_|machine$|fax$)/i.test(String(params.AnsweredBy || ''))) {
@@ -588,12 +594,14 @@ function startRecording(callSid, config) {
     }
 
     const base = PUBLIC_URL.replace(/\/$/, '');
+    const recordingStatusCallback = new URL('/recording-status', `${base}/`);
+    if (config.tenantId) recordingStatusCallback.searchParams.set('tenant_id', config.tenantId);
     twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         .calls(callSid)
         .recordings.create({
             recordingChannels: 'dual',
             recordingTrack: 'both',
-            recordingStatusCallback: `${base}/recording-status`,
+            recordingStatusCallback: recordingStatusCallback.toString(),
             recordingStatusCallbackEvent: ['completed', 'absent'],
             recordingStatusCallbackMethod: 'POST',
         })
@@ -620,12 +628,17 @@ fastify.all('/recording-status', twilioWebhook, async (request, reply) => {
 
     const db = getDatabase();
     if (!db) return;
+    const tenantId = callSid
+        ? await tenantForCall(db, callSid, params.tenant_id || null)
+            .catch((error) => { console.warn(`Could not resolve recording tenant for ${callSid}: ${error.message}`); return null; })
+        : null;
+    if (!tenantId) return;
 
     // 'absent' means Twilio produced no recording — silence, or a call that
     // ended too early. Recorded as a skipped row rather than as nothing, so
     // "why is there no transcript" has an answer.
     if (status === 'absent') {
-        await enqueueRecording({ source: 'twilio', externalId: recordingSid, status: 'skipped', phoneNumber: params.From ?? null });
+        await enqueueRecording({ tenantId, source: 'twilio', externalId: recordingSid, status: 'skipped', phoneNumber: params.From ?? null });
         return;
     }
     if (status !== 'completed') return; // 'in-progress' is not ours to act on
@@ -633,14 +646,17 @@ fastify.all('/recording-status', twilioWebhook, async (request, reply) => {
     const { data: call } = await db
         .from('calls')
         .select('id, contact_id, phone_number, metadata')
+        .eq('tenant_id', tenantId)
         .eq('twilio_call_sid', callSid)
         .maybeSingle();
 
     await db.from('calls')
         .update({ recording_sid: recordingSid, recording_status: 'completed', transcription_status: 'pending' })
+        .eq('tenant_id', tenantId)
         .eq('twilio_call_sid', callSid);
 
     await enqueueRecording({
+        tenantId,
         source: 'twilio',
         externalId: recordingSid,
         callId: call?.id ?? null,
@@ -674,6 +690,7 @@ fastify.all('/call-status', twilioWebhook, async (request, reply) => {
             callSid: params.CallSid,
             answeredBy: params.AnsweredBy,
             durationMs: Number(params.MachineDetectionDuration),
+            tenantId: params.tenant_id || null,
         });
     }
 
@@ -683,13 +700,15 @@ fastify.all('/call-status', twilioWebhook, async (request, reply) => {
         callSid: params.CallSid,
         status: params.CallStatus,
         durationSeconds: Number.isFinite(duration) ? duration : undefined,
+        tenantId: params.tenant_id || null,
     });
 
     if (communication?.communication_id && !['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(params.CallStatus)) {
         const eventType = params.CallStatus === 'answered' ? 'call.answered' : 'call.started';
-        const destination = await callbackForThread(communication.communication_thread_id)
+        const destination = await callbackForThread(communication.tenant_id, communication.communication_thread_id)
             .catch((callbackError) => { console.warn(callbackError.message); return null; });
         await enqueueEvent({
+            tenantId: communication.tenant_id,
             type: eventType,
             communicationId: communication.communication_id,
             purpose: communication.purpose,
@@ -1336,8 +1355,8 @@ fastify.register(async (fastify) => {
             // Summarising is chained onto the write rather than fired beside
             // it, because summariseCall reads the transcript back from the row
             // and would otherwise race the write that puts it there.
-            saveTranscript({ callSid, transcript })
-                .then(() => (config.summarise ? summariseCall(callSid) : null))
+            saveTranscript({ callSid, transcript, tenantId: config.tenantId || null })
+                .then(() => (config.summarise ? summariseCall(callSid, config.tenantId || null) : null))
                 .catch((error) => console.warn(`Post-call processing failed for ${callSid}: ${error.message}`));
         };
 

@@ -1,6 +1,6 @@
 # Communications Service
 
-Current contract release: `2.2.2`.
+Current contract release: `2.2.3`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
@@ -157,6 +157,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 11. `migrations/010_email_pipeline.sql`
 12. `migrations/011_terminal_event_recovery.sql`
 13. `migrations/012_outbound_event_conflict_target.sql`
+14. `migrations/013_inbound_email_reply_recovery.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -389,7 +390,6 @@ Implemented event types:
 ```text
 communication.created     communication.received
 sms.sent                  sms.delivered             sms.failed
-sms.received
 email.accepted            email.delivered           email.failed
 call.started              call.answered             call.completed
 call.failed               transcript.completed      summary.completed
@@ -433,7 +433,7 @@ No destination means no outbox row is created.
 | `COMMUNICATIONS_WEBHOOK_SECRET` | Durable events | Required HMAC-SHA256 event signing secret |
 | `COMMUNICATIONS_WEBHOOK_HOSTS` | Optional | Comma-separated allow-list for event destinations |
 | `EMAIL_ENABLED` | Optional | `false` by default; set `true` only after provider connections, identities, and webhook secrets are ready |
-| `RESEND_API_KEY` | Resend connection references it | Resend API key; the connection stores only `env:RESEND_API_KEY` |
+| `RESEND_API_KEY` | Resend connection references it | Resend API key; inbound email requires permission to retrieve received email content; the connection stores only `env:RESEND_API_KEY` |
 | `RESEND_WEBHOOK_SECRET` | Resend webhook connection references it | Resend/Svix signing secret; the connection stores only `env:RESEND_WEBHOOK_SECRET` |
 | `TOOL_<NAME>_URL` | Per HTTP tool | Makes that tool available to the voice model |
 | `RECORDING_SOURCE_<NAME>_HOSTS` | Optional | Comma-separated host allow-list for external recording media |
