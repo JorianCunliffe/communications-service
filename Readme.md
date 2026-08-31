@@ -1,6 +1,6 @@
 # Communications Service
 
-Current contract release: `2.2.5`.
+Current contract release: `2.3.0`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
@@ -8,13 +8,13 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `016`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail sync and provider-native drafts use their separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `017`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/016_connected_mailboxes.sql)
+- [Latest database migration](migrations/017_provider_neutral_mailbox_cursor.sql)
 
 ## Architecture
 
@@ -161,6 +161,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 15. `migrations/014_casefolded_email_reply_recovery.sql`
 16. `migrations/015_inbound_email_attachment_recovery.sql`
 17. `migrations/016_connected_mailboxes.sql`
+18. `migrations/017_provider_neutral_mailbox_cursor.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -180,7 +181,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert. Migration `016` adds encrypted connected-mailbox credentials, OAuth state, sync cursors/leases, Gmail draft receipts and mailbox audit records.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert. Migration `016` adds encrypted connected-mailbox credentials, OAuth state, sync cursors/leases, Gmail draft receipts and mailbox audit records. Migration `017` adds the provider-neutral mailbox cursor used for Gmail history IDs and opaque Microsoft Graph delta links while retaining the Gmail column during migration.
 
 If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
@@ -260,20 +261,23 @@ RESEND_WEBHOOK_SECRET=whsec_...
 
 Outbound requests use `POST /v1/emails` with `Idempotency-Key`. Webhooks are verified over the exact raw body, stored once by provider event ID, acknowledged, and normalized asynchronously. The verified SMTP-envelope recipient remains authoritative when Resend's retrieval API canonicalises an alias; new opaque reply tokens are lowercase-safe, and migrations `013`-`015` recover narrowly identified jobs created by the earlier routing and attachment defects. Attachment metadata is stored in `communication_attachments`, separate from `email_messages`; attachment content is not downloaded or exposed by the API. Bounces, spam, mailing-list traffic, and automatic replies stay auditable but cannot feed memory or emit `ask.response.received`.
 
-### 6. Connect a Gmail mailbox
+### 6. Connect Gmail or Outlook
 
-Gmail OAuth is separate from Resend and remains draft-only. Set the following deployment secrets, register `https://<communications-host>/oauth/mailboxes/google/callback` as an authorized Google redirect URI, apply migration `016`, and grant the HyperFlow API client `mailbox:manage`, `email:draft`, and `communications:read`:
+Connected-mailbox OAuth is separate from Resend and remains draft-only. Apply migrations through `017` and grant the HyperFlow API client `mailbox:manage`, `email:draft`, and `communications:read`. For Gmail, register `https://<communications-host>/oauth/mailboxes/google/callback` with Google. For Outlook personal and work/school accounts, register `https://<communications-host>/oauth/mailboxes/microsoft/callback` with Microsoft and allow the authorization-code flow for the `common` tenant (or set a specific tenant):
 
 ```dotenv
 MAILBOX_CREDENTIAL_ENCRYPTION_KEY=<base64-of-exactly-32-random-bytes>
 MAILBOX_OAUTH_STATE_SECRET=<at-least-32-random-bytes>
 GMAIL_OAUTH_CLIENT_ID=...
 GMAIL_OAUTH_CLIENT_SECRET=...
+MICROSOFT_OAUTH_CLIENT_ID=...
+MICROSOFT_OAUTH_CLIENT_SECRET=...
+MICROSOFT_OAUTH_TENANT=common
 HYPERFLOW_URL=https://hyper-flow5.vercel.app
 MAILBOX_OAUTH_RETURN_ORIGINS=https://hyper-flow5.vercel.app
 ```
 
-HyperFlow starts OAuth with `POST /v1/mailboxes/oauth/google/start`, then stores only the returned non-secret connection reference. `POST /v1/mailboxes/:connectionId/sync` performs authoritative cursor reconciliation. `POST /v1/mailboxes/:connectionId/drafts` creates a provider-native Gmail draft using a required idempotency key; there is intentionally no connected-mailbox send route. Outlook is not implemented yet.
+HyperFlow starts OAuth with the Google or Microsoft compatibility route, or `POST /v1/mailboxes/oauth/:provider/start` using `gmail` or `outlook`, then stores only the returned non-secret connection reference. Outlook requests `offline_access`, `User.Read`, and delegated `Mail.ReadWrite`; Gmail requests read and compose access. `POST /v1/mailboxes/:connectionId/sync` performs authoritative provider-cursor reconciliation. `POST /v1/mailboxes/:connectionId/drafts` creates a provider-native Gmail or Outlook draft using a required idempotency key; replies use the provider's native thread/reply mechanism. There is intentionally no connected-mailbox send route.
 
 Gmail Pub/Sub is optional. If configured, set `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_AUDIENCE`, `GMAIL_PUBSUB_SERVICE_ACCOUNT`, and optionally the exact `GMAIL_PUBSUB_SUBSCRIPTION`. The authenticated push URL is `POST /oauth/gmail`; notifications are hints and never replace scheduled reconciliation.
 
@@ -457,12 +461,15 @@ No destination means no outbox row is created.
 | `HYPERFLOW_AGENT_CONTEXT_URL` | Inbound HyperFlow voice | Signed HyperFlow project-selection endpoint; defaults to the `HYPERFLOW_EVENT_URL` origin at `/api/agent/voice-context` |
 | `HYPERFLOW_AGENT_CONTEXT_HOSTS` | Optional | Comma-separated allow-list for the live voice-context endpoint; defaults to its configured host |
 | `HYPERFLOW_VERCEL_AUTOMATION_BYPASS_SECRET` | Blocked HyperFlow origin only | Backend-only Vercel automation-bypass secret. Configure it only when an anonymous probe of the selected production origin is intercepted by Deployment Protection. Added as `x-vercel-protection-bypass` only when the event/context destination exactly matches the configured HTTPS HyperFlow origin. |
-| `MAILBOX_CREDENTIAL_ENCRYPTION_KEY` | Connected Gmail | Base64 encoding of exactly 32 random bytes used for AES-256-GCM OAuth credential encryption |
-| `MAILBOX_OAUTH_STATE_SECRET` | Connected Gmail | Independent random OAuth state signing secret of at least 32 bytes |
+| `MAILBOX_CREDENTIAL_ENCRYPTION_KEY` | Connected mailboxes | Base64 encoding of exactly 32 random bytes used for AES-256-GCM OAuth credential encryption |
+| `MAILBOX_OAUTH_STATE_SECRET` | Connected mailboxes | Independent random OAuth state signing secret of at least 32 bytes |
 | `GMAIL_OAUTH_CLIENT_ID` | Connected Gmail | Google OAuth web client ID |
 | `GMAIL_OAUTH_CLIENT_SECRET` | Connected Gmail | Google OAuth web client secret |
-| `HYPERFLOW_URL` | Connected Gmail | Default allowlisted HyperFlow return URL |
-| `MAILBOX_OAUTH_RETURN_ORIGINS` | Optional with connected Gmail | Comma-separated exact origins accepted after OAuth; defaults to `HYPERFLOW_URL` |
+| `MICROSOFT_OAUTH_CLIENT_ID` | Connected Outlook | Microsoft Entra application client ID |
+| `MICROSOFT_OAUTH_CLIENT_SECRET` | Connected Outlook | Microsoft Entra application client secret |
+| `MICROSOFT_OAUTH_TENANT` | Optional connected Outlook | `common` by default for personal and work/school accounts; may be a specific tenant ID |
+| `HYPERFLOW_URL` | Connected mailboxes | Default allowlisted HyperFlow return URL |
+| `MAILBOX_OAUTH_RETURN_ORIGINS` | Optional with connected mailboxes | Comma-separated exact origins accepted after OAuth; defaults to `HYPERFLOW_URL` |
 | `GMAIL_PUBSUB_TOPIC` | Optional Gmail push | Full Gmail watch topic name; omit to use scheduled/manual sync only |
 | `GMAIL_PUBSUB_AUDIENCE` | Gmail push enabled | Exact OIDC audience expected on `POST /oauth/gmail` |
 | `GMAIL_PUBSUB_SERVICE_ACCOUNT` | Gmail push enabled | Exact verified Google service-account email allowed to push |

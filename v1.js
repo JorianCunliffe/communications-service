@@ -15,8 +15,8 @@ import { emailEnabled } from './emailWebhook.js';
 import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { outboundEmailRequest } from './email.js';
-import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash } from './mailboxOAuth.js';
-import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncGmailMailbox } from './mailboxService.js';
+import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
+import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncMailbox } from './mailboxService.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
 const DIRECTIONS = ['inbound', 'outbound'];
@@ -149,7 +149,7 @@ export default async function v1Routes(fastify) {
         catch (error) { return errorReply(reply, error, 500); }
     });
 
-    fastify.post('/mailboxes/oauth/google/start', async (request, reply) => {
+    const startMailboxOAuth = async (provider, request, reply) => {
         const db = database(reply); if (!db) return reply;
         const initiatorId = String(request.body?.initiator_id || '').trim();
         if (!initiatorId) return reply.code(400).send({ error: 'initiator_id is required' });
@@ -158,6 +158,8 @@ export default async function v1Routes(fastify) {
                 tenantId: request.tenantId,
                 initiatorId,
                 returnUrl: request.body?.return_url,
+                provider,
+                setupDraftId: request.body?.setup_draft_id,
             });
             const stored = await db.from('mailbox_oauth_states').insert({
                 nonce_hash: mailboxOAuthNonceHash(created.state.nonce),
@@ -165,14 +167,22 @@ export default async function v1Routes(fastify) {
                 expires_at: new Date(created.state.exp * 1000).toISOString(),
             });
             if (stored.error) throw new Error(stored.error.message);
-            return { authorization_url: gmailAuthorizationUrl(created.token) };
+            return { authorization_url: provider === 'outlook' ? outlookAuthorizationUrl(created.token) : gmailAuthorizationUrl(created.token) };
         } catch (error) { return errorReply(reply, error, error.status || 400); }
+    };
+
+    fastify.post('/mailboxes/oauth/google/start', async (request, reply) => startMailboxOAuth('gmail', request, reply));
+    fastify.post('/mailboxes/oauth/microsoft/start', async (request, reply) => startMailboxOAuth('outlook', request, reply));
+    fastify.post('/mailboxes/oauth/:provider/start', async (request, reply) => {
+        const provider = String(request.params.provider || '').toLowerCase();
+        if (!['gmail', 'outlook'].includes(provider)) return reply.code(400).send({ error: 'provider must be gmail or outlook' });
+        return startMailboxOAuth(provider, request, reply);
     });
 
     fastify.post('/mailboxes/:connectionId/sync', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try {
-            return await syncGmailMailbox(db, {
+            return await syncMailbox(db, {
                 tenantId: request.tenantId,
                 connectionId: request.params.connectionId,
                 actorId: request.body?.initiator_id || request.authContext?.keyId,

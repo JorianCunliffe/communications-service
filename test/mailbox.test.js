@@ -6,13 +6,21 @@ import {
     createMailboxOAuthState,
     gmailAuthorizationUrl,
     mailboxOAuthNonceHash,
+    outlookAuthorizationUrl,
     verifyMailboxOAuthState,
 } from '../mailboxOAuth.js';
 import { canonicalGmailMessage, GmailMessageNormalizationError, gmailDraftMessage } from '../gmailMailbox.js';
+import {
+    canonicalOutlookMessage,
+    createOutlookDraft,
+    outlookDeltaMessages,
+    OutlookMessageNormalizationError,
+} from '../outlookMailbox.js';
 
 const KEYS = [
     'MAILBOX_CREDENTIAL_ENCRYPTION_KEY', 'MAILBOX_OAUTH_STATE_SECRET',
     'GMAIL_OAUTH_CLIENT_ID', 'GMAIL_OAUTH_CLIENT_SECRET', 'PUBLIC_URL',
+    'MICROSOFT_OAUTH_CLIENT_ID', 'MICROSOFT_OAUTH_CLIENT_SECRET', 'MICROSOFT_OAUTH_TENANT',
     'HYPERFLOW_URL', 'MAILBOX_OAUTH_RETURN_ORIGINS',
 ];
 const previous = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
@@ -29,6 +37,8 @@ function configure() {
     process.env.MAILBOX_OAUTH_STATE_SECRET = 'test-state-secret-that-is-long-and-random';
     process.env.GMAIL_OAUTH_CLIENT_ID = 'client.apps.googleusercontent.com';
     process.env.GMAIL_OAUTH_CLIENT_SECRET = 'client-secret';
+    process.env.MICROSOFT_OAUTH_CLIENT_ID = 'microsoft-client';
+    process.env.MICROSOFT_OAUTH_CLIENT_SECRET = 'microsoft-secret';
     process.env.PUBLIC_URL = 'https://communications.example.com';
     process.env.HYPERFLOW_URL = 'https://hyperflow.example.com';
     process.env.MAILBOX_OAUTH_RETURN_ORIGINS = 'https://hyperflow.example.com';
@@ -71,6 +81,23 @@ describe('connected mailbox credentials and OAuth state', () => {
         assert.equal(url.searchParams.get('redirect_uri'), 'https://communications.example.com/oauth/mailboxes/google/callback');
         assert.match(url.searchParams.get('scope'), /gmail\.readonly/);
         assert.match(url.searchParams.get('scope'), /gmail\.compose/);
+    });
+
+    test('binds Outlook OAuth state and requests delegated offline Mail.ReadWrite access', () => {
+        configure();
+        const created = createMailboxOAuthState({
+            tenantId: 'tenant-a', initiatorId: 'user-a', returnUrl: 'https://hyperflow.example.com/settings',
+            provider: 'outlook', setupDraftId: 'setup-1',
+        });
+        const verified = verifyMailboxOAuthState(created.token);
+        assert.equal(verified.provider, 'outlook');
+        assert.equal(verified.setupDraftId, 'setup-1');
+        const url = new URL(outlookAuthorizationUrl(created.token));
+        assert.equal(url.origin, 'https://login.microsoftonline.com');
+        assert.equal(url.pathname, '/common/oauth2/v2.0/authorize');
+        assert.equal(url.searchParams.get('redirect_uri'), 'https://communications.example.com/oauth/mailboxes/microsoft/callback');
+        assert.match(url.searchParams.get('scope'), /offline_access/);
+        assert.match(url.searchParams.get('scope'), /Mail\.ReadWrite/);
     });
 });
 
@@ -136,6 +163,85 @@ describe('Gmail adapter contract', () => {
     });
 });
 
+describe('Outlook adapter contract', () => {
+    test('follows Graph delta pagination, de-duplicates messages and persists the opaque delta cursor', async () => {
+        const calls = [];
+        const pages = [
+            { value: [{ id: 'm1' }, { id: 'm2' }], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/next-page' },
+            { value: [{ id: 'm2' }, { id: 'removed', '@removed': { reason: 'deleted' } }, { id: 'm3' }], '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta-cursor' },
+        ];
+        const result = await outlookDeltaMessages('token', null, {
+            request: async (_token, url) => { calls.push(url); return pages.shift(); },
+        });
+        assert.deepEqual(result.messageIds, ['m1', 'm2', 'm3']);
+        assert.equal(result.cursor, 'https://graph.microsoft.com/v1.0/delta-cursor');
+        assert.equal(calls[1], 'https://graph.microsoft.com/v1.0/next-page');
+    });
+
+    test('creates reply drafts with createReply followed by an update and never calls send', async () => {
+        const calls = [];
+        const result = await createOutlookDraft('token', {
+            provider_message_id: 'source-message', text: 'Draft response',
+        }, {
+            request: async (_token, path, options) => {
+                calls.push({ path, options });
+                return calls.length === 1 ? { id: 'draft-1' } : { id: 'draft-1', isDraft: true };
+            },
+        });
+        assert.equal(result.id, 'draft-1');
+        assert.match(calls[0].path, /source-message\/createReply$/);
+        assert.equal(calls[0].options.method, 'POST');
+        assert.match(calls[1].path, /draft-1$/);
+        assert.equal(calls[1].options.method, 'PATCH');
+        assert.equal(calls.some(call => /send/i.test(call.path)), false);
+    });
+
+    test('creates standalone Outlook drafts under messages and never sends them', async () => {
+        const calls = [];
+        const result = await createOutlookDraft('token', {
+            to: ['Alex <alex@example.com>'], subject: 'Review', text: 'Draft only',
+        }, {
+            request: async (_token, path, options) => { calls.push({ path, options }); return { id: 'draft-2', isDraft: true }; },
+        });
+        assert.equal(result.id, 'draft-2');
+        assert.equal(calls[0].path, 'me/messages');
+        assert.equal(calls[0].options.method, 'POST');
+        assert.equal(calls.some(call => /send/i.test(call.path)), false);
+    });
+
+    test('normalizes Graph messages into the canonical email contract', () => {
+        const email = canonicalOutlookMessage({
+            id: 'graph-message-1', conversationId: 'graph-thread-1', internetMessageId: '<graph@example.com>',
+            receivedDateTime: '2026-08-31T00:00:00Z', subject: 'Work update',
+            from: { emailAddress: { name: 'Alex', address: 'alex@work.example' } },
+            toRecipients: [{ emailAddress: { address: 'coach@work.example' } }],
+            body: { contentType: 'html', content: '<p>Progress</p><script>bad()</script>' },
+            bodyPreview: 'Progress',
+            attachments: [{ id: 'a1', name: 'report.pdf', contentType: 'application/pdf', size: 100, isInline: false }],
+        });
+        assert.equal(email.provider_email_id, 'graph-message-1');
+        assert.equal(email.provider_conversation_id, 'graph-thread-1');
+        assert.equal(email.from_addresses[0].address, 'alex@work.example');
+        assert.equal(email.to_addresses[0].address, 'coach@work.example');
+        assert.doesNotMatch(email.sanitized_html, /script/i);
+        assert.equal(email.attachments[0].filename, 'report.pdf');
+    });
+
+    test('uses the connected Outlook mailbox as a Bcc fallback', () => {
+        const email = canonicalOutlookMessage({
+            id: 'graph-message-2', from: { emailAddress: { address: 'sender@example.com' } },
+            subject: 'Private', body: { contentType: 'text', content: 'Private update' },
+        }, { mailboxAddress: 'owner@outlook.com' });
+        assert.equal(email.to_addresses[0].address, 'owner@outlook.com');
+    });
+
+    test('exposes a provider-specific Outlook normalization error', () => {
+        const error = new OutlookMessageNormalizationError('graph-invalid', new Error('missing sender'));
+        assert.equal(error.code, 'OUTLOOK_MESSAGE_INVALID');
+        assert.equal(error.providerMessageId, 'graph-invalid');
+    });
+});
+
 describe('connected mailbox migration', () => {
     test('keeps credentials, state, drafts and audit tenant-owned and backend-only', () => {
         const sql = readFileSync(new URL('../migrations/016_connected_mailboxes.sql', import.meta.url), 'utf8');
@@ -149,5 +255,11 @@ describe('connected mailbox migration', () => {
         assert.match(sql, /revoke execute on function public\.claim_mailbox_sync\(text,uuid,integer\) from public/);
         assert.match(sql, /grant select, insert, update, delete on public\.mailbox_oauth_credentials[\s\S]+to service_role/);
         assert.match(sql, /grant execute on function public\.consume_mailbox_oauth_state\(text,text,text\) to service_role/);
+    });
+
+    test('adds a provider-neutral cursor without removing Gmail history state', () => {
+        const sql = readFileSync(new URL('../migrations/017_provider_neutral_mailbox_cursor.sql', import.meta.url), 'utf8');
+        assert.match(sql, /add column if not exists provider_cursor text/);
+        assert.match(sql, /set provider_cursor=history_id/);
     });
 });

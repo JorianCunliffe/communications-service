@@ -1,6 +1,6 @@
 import { getDatabase } from './database.js';
-import { exchangeGmailCode, verifyMailboxOAuthState, mailboxOAuthNonceHash } from './mailboxOAuth.js';
-import { connectGmailMailbox, syncGmailMailbox } from './mailboxService.js';
+import { exchangeGmailCode, exchangeOutlookCode, verifyMailboxOAuthState, mailboxOAuthNonceHash } from './mailboxOAuth.js';
+import { connectGmailMailbox, connectOutlookMailbox, syncGmailMailbox } from './mailboxService.js';
 import { safeFetch } from './safeFetch.js';
 import { tenantDatabase } from './tenantContext.js';
 
@@ -41,10 +41,12 @@ function pubSubPayload(body) {
 }
 
 export default async function mailboxPublicRoutes(fastify) {
-    fastify.get('/mailboxes/google/callback', async (request, reply) => {
+    const completeOAuth = async (provider, request, reply) => {
         try {
-            if (request.query.error) throw new Error(`Google authorization was not completed: ${request.query.error}`);
+            const label = provider === 'outlook' ? 'Microsoft' : 'Google';
+            if (request.query.error) throw new Error(`${label} authorization was not completed: ${request.query.error}`);
             const state = verifyMailboxOAuthState(request.query.state);
+            if (state.provider !== provider) throw new Error('Mailbox OAuth provider does not match the callback');
             const db = getDatabase();
             if (!db) return reply.code(503).send({ error: 'Communications persistence is not configured' });
             const tenantDb = tenantDatabase(db, state.tenantId);
@@ -55,10 +57,11 @@ export default async function mailboxPublicRoutes(fastify) {
             });
             if (consumed.error || consumed.data !== true) throw new Error('Mailbox OAuth state was already used or expired');
             const code = String(request.query.code || '');
-            if (!code) throw new Error('Google authorization code is required');
-            const tokens = await exchangeGmailCode(code);
-            if (!tokens.refresh_token) throw new Error('Google did not issue offline access; reconnect and grant consent');
-            await connectGmailMailbox(tenantDb, {
+            if (!code) throw new Error(`${label} authorization code is required`);
+            const tokens = provider === 'outlook' ? await exchangeOutlookCode(code) : await exchangeGmailCode(code);
+            if (!tokens.refresh_token) throw new Error(`${label} did not issue offline access; reconnect and grant consent`);
+            const connect = provider === 'outlook' ? connectOutlookMailbox : connectGmailMailbox;
+            await connect(tenantDb, {
                 tenantId: state.tenantId,
                 initiatorId: state.initiatorId,
                 tokens,
@@ -66,11 +69,16 @@ export default async function mailboxPublicRoutes(fastify) {
             });
             const destination = new URL(state.returnUrl);
             destination.searchParams.set('mailbox', 'connected');
+            destination.searchParams.set('mailbox_provider', provider);
+            if (state.setupDraftId) destination.searchParams.set('setup_draft_id', state.setupDraftId);
             return reply.redirect(destination.toString());
         } catch (error) {
             return publicError(reply, error, error.status || 400);
         }
-    });
+    };
+
+    fastify.get('/mailboxes/google/callback', async (request, reply) => completeOAuth('gmail', request, reply));
+    fastify.get('/mailboxes/microsoft/callback', async (request, reply) => completeOAuth('outlook', request, reply));
 
     fastify.post('/gmail', async (request, reply) => {
         try {

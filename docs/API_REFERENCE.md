@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Updated: 30 August 2026. Contract release: `2.2.5`.
+Updated: 31 August 2026. Contract release: `2.3.0`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -385,7 +385,7 @@ GET /v1/emails/:communicationId
 Returns the canonical Communication plus its safe `email` record. Raw provider webhook bodies remain separate in `webhook_receipts`. Inbound attachment metadata is stored separately in `communication_attachments`; this response does not currently include it, and the service does not expose attachment content.
 
 
-### Connected Gmail mailboxes
+### Connected Gmail and Outlook mailboxes
 
 Connected personal mailboxes are tenant-owned and draft-only. OAuth tokens never appear in API responses and are stored encrypted by the service.
 
@@ -393,7 +393,7 @@ Connected personal mailboxes are tenant-owned and draft-only. OAuth tokens never
 GET /v1/mailboxes
 ```
 
-Lists the authenticated tenant's Gmail or Outlook connection references and health. Gmail is implemented; Outlook connections are not yet available.
+Lists the authenticated tenant's Gmail and Outlook connection references. Health is one of `connected`, `pending`, `healthy`, `syncing`, `degraded`, `expired`, or `revoked`; `last_error` contains a safe remediation reason when available. Both providers are draft-only and always report `can_send=false`; `can_create_drafts` is derived from the granted compose or `Mail.ReadWrite` scope.
 
 ```http
 POST /v1/mailboxes/oauth/google/start
@@ -408,10 +408,29 @@ Content-Type: application/json
 Returns `{ "authorization_url": "https://accounts.google.com/..." }`. The state is signed, expires after ten minutes, is single-use, and is bound to the authenticated tenant and supplied initiating-user audit identity. Google redirects to the public callback `GET /oauth/mailboxes/google/callback`; the callback derives the tenant only from the verified state.
 
 ```http
+POST /v1/mailboxes/oauth/microsoft/start
+Content-Type: application/json
+
+{
+  "initiator_id": "firebase-user-id",
+  "return_url": "https://hyper-flow5.vercel.app/",
+  "setup_draft_id": "optional-hyperflow-setup-id"
+}
+```
+
+Starts Microsoft authorization-code OAuth for personal and work/school accounts with `offline_access`, `User.Read`, and delegated `Mail.ReadWrite`. Microsoft redirects to `GET /oauth/mailboxes/microsoft/callback`. The optional setup draft ID is integrity-protected inside OAuth state and returned only to the allowlisted HyperFlow origin.
+
+```http
+POST /v1/mailboxes/oauth/:provider/start
+```
+
+Provider-neutral start route. `:provider` must be `gmail` or `outlook`. The Google and Microsoft routes above remain compatibility aliases.
+
+```http
 POST /v1/mailboxes/:connectionId/sync
 ```
 
-Runs incremental Gmail history synchronization. An absent or expired history cursor triggers a bounded full INBOX reconciliation. Repeated synchronization is idempotent by provider connection and provider message ID.
+Runs an authoritative incremental sync for the selected provider. Gmail uses history IDs; Outlook follows every Microsoft Graph `@odata.nextLink` until it receives and commits the opaque `@odata.deltaLink`. An absent or expired cursor triggers bounded recovery. Repeated synchronization is idempotent by tenant, provider connection, and provider message ID. Concurrent sync returns an in-progress result instead of starting duplicate work.
 
 ```http
 POST /v1/mailboxes/:connectionId/drafts
@@ -422,13 +441,14 @@ Content-Type: application/json
   "to": ["person@example.com"],
   "subject": "Draft subject",
   "text": "Draft body",
-  "provider_thread_id": "optional-gmail-thread-id",
+  "communication_id": "optional-canonical-message-to-reply-to",
+  "provider_thread_id": "optional-provider-thread-id",
   "in_reply_to": "<optional-message-id@example.com>",
   "references": "<optional-message-id@example.com>"
 }
 ```
 
-Creates a provider-native Gmail draft and never sends it. Reusing the key with changed content returns `409`; an uncertain provider result also requires reconciliation rather than an automatic duplicate retry.
+Creates a provider-native Gmail or Outlook draft and never sends it. For an Outlook reply, the service resolves the stored provider message, calls Graph `createReply`, then updates the returned draft body. Standalone Outlook drafts use `/me/messages`. Reusing the key with changed content returns `409`; an uncertain provider result also requires reconciliation rather than an automatic duplicate retry.
 
 ```http
 GET /v1/mailboxes/:connectionId/drafts/:draftId
