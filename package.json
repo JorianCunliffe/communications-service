@@ -7,8 +7,8 @@
     "db:migrate": "node scripts/migrate.js",
     "api-client:hash": "node scripts/hash-api-secret.js",
     "start:production": "node scripts/migrate.js && node index.js",
-    "test": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/mailbox.test.js test/callOutcome.test.js test/eventOutbox.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js test/suite.test.js",
-    "test:unit": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/mailbox.test.js test/callOutcome.test.js test/eventOutbox.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js"
+    "test": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/mailbox.test.js test/callOutcome.test.js test/eventOutbox.test.js test/hyperflowScheduler.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js test/suite.test.js",
+    "test:unit": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/mailbox.test.js test/callOutcome.test.js test/eventOutbox.test.js test/hyperflowScheduler.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js"
   },
   "keywords": [],
   "author": "",

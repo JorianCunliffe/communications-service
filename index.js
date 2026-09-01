@@ -28,6 +28,7 @@ import { applyHyperFlowVoiceContext, requestHyperFlowVoiceContext } from './hype
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 import emailWebhookRoutes, { emailEnabled, installRawJsonParser, startCommunicationJobSweeper } from './emailWebhook.js';
 import mailboxPublicRoutes from './mailboxRoutes.js';
+import { startHyperFlowScheduler } from './hyperflowScheduler.js';
 
 // Retrieve the OpenAI API key from environment variables.
 const { OPENAI_API_KEY } = process.env;
@@ -1559,4 +1560,8 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     // Provider completion is not business success. This durable worker waits
     // for transcript/AMD evidence, then emits exactly one terminal call event.
     startCallOutcomeSweeper();
+
+    // Replit's always-on process provides the frequent tick that Vercel Hobby
+    // cannot schedule. It reuses the existing timestamped webhook HMAC secret.
+    startHyperFlowScheduler();
 });

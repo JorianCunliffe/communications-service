@@ -38,6 +38,8 @@ npm run db:migrate
 | `PUBLIC_URL` | `https://communications-service.replit.app` |
 | `DATABASE_URL` | Replit managed PostgreSQL, injected automatically |
 
+When `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET` are present, the always-on deployment also sends HyperFlow's signed scheduler tick every five minutes. It reuses the existing replay-safe webhook HMAC; no scheduler secret is stored in this app. Set `HYPERFLOW_SCHEDULER_DISABLED=true` only if another reliable sub-daily timer has replaced it.
+
 ## Architecture
 
 - `index.js` - Fastify server, Twilio webhooks, and OpenAI Realtime bridge

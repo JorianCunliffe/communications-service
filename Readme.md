@@ -409,6 +409,8 @@ The outbox:
 
 Delivery is at least once. Consumers should deduplicate by `event_id`.
 
+On the always-on Replit VM, the same durable-event configuration also starts a five-minute HyperFlow scheduler helper. It derives `/api/schedules?action=tick` from `HYPERFLOW_EVENT_URL`, preserves a scoped Vercel protection-bypass query parameter when one is already configured, and signs an empty `POST` with the timestamped V2 `COMMUNICATIONS_WEBHOOK_SECRET` HMAC. Set `HYPERFLOW_SCHEDULER_DISABLED=true` only when another reliable sub-daily timer owns this responsibility.
+
 Voice terminal events are business outcomes, not raw Twilio status aliases. `call.completed` means the intended human supplied a meaningful response. `call.failed` includes `payload.disposition`, `payload.failure_code`, and `payload.failure_reason`; dispositions include `voicemail`, `wrong_number`, `no_answer`, `busy`, `fax`, `automated_system`, `no_meaningful_response`, `provider_failed`, `canceled`, and `unclassified`. Failed calls retain their raw audit transcript but have `memory_eligible: false` and never emit `ask.response.received`.
 
 Implemented event types:
@@ -457,6 +459,7 @@ No destination means no outbox row is created.
 | `MEMORY_SEARCH_*` | Optional | Testable text/person/project/thread/calendar/recency ranking weights |
 | `HYPERFLOW_EVENT_URL` | Optional | Default durable event destination |
 | `COMMUNICATIONS_WEBHOOK_SECRET` | Durable events | Required HMAC-SHA256 event signing secret |
+| `HYPERFLOW_SCHEDULER_DISABLED` | Optional | Set exactly `true` to disable the five-minute HyperFlow tick helper when another reliable timer is configured |
 | `COMMUNICATIONS_WEBHOOK_HOSTS` | Optional | Comma-separated allow-list for event destinations |
 | `HYPERFLOW_AGENT_CONTEXT_URL` | Inbound HyperFlow voice | Signed HyperFlow project-selection endpoint; defaults to the `HYPERFLOW_EVENT_URL` origin at `/api/agent/voice-context` |
 | `HYPERFLOW_AGENT_CONTEXT_HOSTS` | Optional | Comma-separated allow-list for the live voice-context endpoint; defaults to its configured host |
