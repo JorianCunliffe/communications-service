@@ -10,7 +10,7 @@ The server will not start without `OPENAI_API_KEY`. Add it via the Secrets panel
 
 ## Database
 
-Replit uses its built-in PostgreSQL database. `DATABASE_URL` is injected automatically. The migration runner applies numbered migrations 000 through 012 once, in order:
+Replit uses its built-in PostgreSQL database. `DATABASE_URL` is injected automatically. The migration runner applies numbered migrations 000 through 018 once, in order:
 
 ```sh
 npm run db:migrate
@@ -49,7 +49,7 @@ When `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET` are present, the 
 - `callOutcome.js` - durable post-call classification and terminal-event finalization
 - `memory.js` / `enrichment.js` - memory reads and asynchronous enrichment
 - `eventOutbox.js` - signed, replay-safe event delivery to HyperFlow
-- `migrations/` - SQL migrations 000 through 012
+- `migrations/` - SQL migrations 000 through 018
 - `scripts/migrate.js` - migration runner used by production startup
 - `docs/API_REFERENCE.md` - complete API reference
 

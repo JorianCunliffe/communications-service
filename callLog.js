@@ -79,6 +79,7 @@ export async function recordCall({
             participantIdentity: otherParty,
             serviceIdentity,
             direction,
+            personId: config?.personId || null,
             threadId,
             purpose: normalisePurpose(purpose),
             correlation: normaliseCorrelation({ ...correlation, tenant_id: scopedTenant }),
@@ -108,11 +109,13 @@ export async function recordCall({
             thread_link_type: semantic.linkType,
         };
 
+        if (semantic.personId) row.contact_id = semantic.personId;
+
         // Link the call to the contact, the way SMS threads are linked, so a
         // person's calls can be found without matching on phone number. Set
         // only when one exists: the upsert writes every column it is given, so
         // a null here would clear the link if this call were ever re-recorded.
-        if (otherParty) {
+        if (otherParty && !row.contact_id) {
             const contact = await withTimeout(
                 db.from('contacts').select('id').eq('tenant_id', scopedTenant).eq('phone_number', otherParty).maybeSingle(),
                 'Contact lookup for call record'

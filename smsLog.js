@@ -42,7 +42,7 @@ function withTimeout(query, label) {
 
 // Finds or creates the one thread for this conversation and returns its id.
 // The upsert doubles as the "touch" that keeps last_message_at current.
-async function ensureThread(db, tenantId, otherParty, twilioNumber) {
+async function ensureThread(db, tenantId, otherParty, twilioNumber, personId = null) {
     const row = {
         tenant_id: tenantId,
         phone_number: otherParty,
@@ -53,11 +53,15 @@ async function ensureThread(db, tenantId, otherParty, twilioNumber) {
     // Link the thread to the contact when one exists. Set only when found: an
     // upsert writes every column it is given, so sending null here would clear
     // the link on an existing thread.
-    const { data: contact } = await withTimeout(
-        db.from('contacts').select('id').eq('tenant_id', tenantId).eq('phone_number', otherParty).maybeSingle(),
-        'Contact lookup for SMS thread'
-    );
-    if (contact?.id) row.contact_id = contact.id;
+    if (personId) {
+        row.contact_id = personId;
+    } else {
+        const { data: contact } = await withTimeout(
+            db.from('contacts').select('id').eq('tenant_id', tenantId).eq('phone_number', otherParty).maybeSingle(),
+            'Contact lookup for SMS thread'
+        );
+        if (contact?.id) row.contact_id = contact.id;
+    }
 
     const { data, error } = await withTimeout(
         db.from('sms_threads')
@@ -111,7 +115,7 @@ export async function recordMessage({
             correlation: canonicalCorrelation,
             callbackUrl,
         });
-        const nativeThreadId = await ensureThread(db, scopedTenant, otherParty, twilioNumber);
+        const nativeThreadId = await ensureThread(db, scopedTenant, otherParty, twilioNumber, semantic.personId);
 
         const { error } = await withTimeout(
             db.from('sms_messages').insert({

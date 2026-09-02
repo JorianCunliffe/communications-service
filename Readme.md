@@ -8,7 +8,7 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `017`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `018`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
@@ -87,10 +87,11 @@ For each communication, the service uses this order:
 
 1. Explicit `thread_id` or `correlation.thread_id`.
 2. Existing `ask_bindings` entry for `purpose.ask_id`.
-3. For inbound communication only, exactly one open thread for the participant identity.
-4. Otherwise, no inferred thread.
+3. For inbound communication only, exactly one open thread for the participant's exact channel identity.
+4. If there is no exact-channel candidate and the identity resolves to one tenant-owned person, exactly one open thread across that person's verified identities.
+5. Otherwise, no inferred thread.
 
-If a person has two open Ask threads, the service does not guess. The sender must provide an explicit thread or Ask ID.
+This preserves an existing channel conversation before widening to a person's other channels, so multi-channel delivery does not make an SMS or voice reply lose its native thread. It also permits a new verified email identity to continue the person's sole SMS or voice thread. If an identity maps ambiguously, or person-wide inference finds two open threads, the service does not guess. The sender must provide an explicit thread or Ask ID. An explicit thread cannot be reassigned to a different Communications person.
 
 ## What is implemented
 
@@ -103,8 +104,8 @@ If a person has two open Ask threads, the service does not guess. The sender mus
 | Voice | OpenAI Realtime bidirectional audio over Twilio Media Streams |
 | Voice outcomes | Durable post-call classification; voicemail, wrong number, no answer, busy, fax, automated systems, provider failure, and non-meaningful responses fail closed |
 | Purpose and correlation | First-class `purpose`; allow-listed workflow correlation fields |
-| Ask threads | Explicit Ask binding, safe reply correlation, transactional resolution |
-| People and identities | Existing contacts plus multiple channel identities per person |
+| Ask threads | Explicit Ask binding, person-aware cross-channel reply correlation, transactional resolution |
+| People and identities | Existing contacts plus multiple tenant-owned channel identities per person |
 | Context | Chronological call/SMS/recording history and ranked communication search |
 | Memory layer | Calendar context, explainable thread expansion, summaries/current state, commitments, facts, and loose ends |
 | Memory views | Before-meeting, person, project, and enriched thread read models |
@@ -162,6 +163,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 16. `migrations/015_inbound_email_attachment_recovery.sql`
 17. `migrations/016_connected_mailboxes.sql`
 18. `migrations/017_provider_neutral_mailbox_cursor.sql`
+19. `migrations/018_person_aware_threads.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -181,7 +183,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert. Migration `016` adds encrypted connected-mailbox credentials, OAuth state, sync cursors/leases, Gmail draft receipts and mailbox audit records. Migration `017` adds the provider-neutral mailbox cursor used for Gmail history IDs and opaque Microsoft Graph delta links while retaining the Gmail column during migration.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert. Migration `016` adds encrypted connected-mailbox credentials, OAuth state, sync cursors/leases, Gmail draft receipts and mailbox audit records. Migration `017` adds the provider-neutral mailbox cursor used for Gmail history IDs and opaque Microsoft Graph delta links while retaining the Gmail column during migration. Migration `018` adds a tenant-owned person link to semantic threads and conservatively backfills only unambiguous existing relationships.
 
 If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
@@ -494,7 +496,7 @@ No destination means no outbox row is created.
 | `sms_threads` / `sms_messages` | Native Twilio phone-line history |
 | `recordings` | Durable recording/transcription queue |
 | `communications` | Canonical provider-independent projection and search surface |
-| `communication_threads` | Cross-channel thread state, purpose, correlation, and callback destination |
+| `communication_threads` | Person-aware cross-channel thread state, purpose, correlation, and callback destination |
 | `communication_thread_members` | Explicit/native/inferred communication membership |
 | `ask_bindings` | External Ask-to-thread binding and resolution state |
 | `outbound_events` | Durable webhook payload, retry, and delivery state |

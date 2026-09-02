@@ -117,6 +117,74 @@ function queryError(result, label) {
     return result?.data;
 }
 
+function identityVariants(value) {
+    const exact = typeof value === 'string' ? value.trim() : '';
+    if (!exact) return [];
+    return [...new Set([exact, exact.toLowerCase()])];
+}
+
+async function participantPersonResolution({ db, tenantId, participantIdentity }) {
+    const values = identityVariants(participantIdentity);
+    if (!db || !tenantId || values.length === 0) return { personId: null, matched: false, ambiguous: false };
+
+    let query = db.from('communication_identities').select('person_id').eq('tenant_id', tenantId);
+    query = values.length === 1 ? query.eq('value', values[0]) : query.in('value', values);
+    const rows = queryError(await query, 'Participant identity lookup') || [];
+    const people = [...new Set(rows.map((row) => row.person_id).filter(Boolean))];
+    return {
+        personId: people.length === 1 ? people[0] : null,
+        matched: rows.length > 0,
+        ambiguous: people.length > 1,
+    };
+}
+
+export async function resolveParticipantPerson(options) {
+    return (await participantPersonResolution(options)).personId;
+}
+
+async function openThreadsForPerson(db, tenantId, personId) {
+    const direct = queryError(await db.from('communication_threads')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('person_id', personId)
+        .eq('status', 'open')
+        .order('last_activity_at', { ascending: false })
+        .limit(2), 'Open person thread lookup') || [];
+
+    const identities = queryError(await db.from('communication_identities')
+        .select('value')
+        .eq('tenant_id', tenantId)
+        .eq('person_id', personId), 'Person identity lookup') || [];
+    const values = [...new Set(identities.flatMap((row) => identityVariants(row.value)))];
+    let legacy = [];
+    if (values.length) {
+        legacy = queryError(await db.from('communication_threads')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .in('participant_identity', values)
+            .eq('status', 'open')
+            .order('last_activity_at', { ascending: false })
+            .limit(3), 'Open identity thread lookup') || [];
+    }
+
+    const compatible = [...direct, ...legacy]
+        .filter((thread) => !thread.person_id || thread.person_id === personId);
+    return [...new Map(compatible.map((thread) => [thread.thread_id, thread])).values()];
+}
+
+async function openThreadsForIdentity(db, tenantId, participantIdentity) {
+    const values = identityVariants(participantIdentity);
+    if (!values.length) return [];
+    let query = db.from('communication_threads')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('status', 'open');
+    query = values.length === 1
+        ? query.eq('participant_identity', values[0])
+        : query.in('participant_identity', values);
+    return queryError(await query.order('last_activity_at', { ascending: false }).limit(2), 'Open thread lookup') || [];
+}
+
 // Explicit IDs win. A human Ask is next. Only then may an inbound interaction
 // attach to the most recent open thread for the same person. That order is the
 // service boundary in code: explicit correlation first, inference later.
@@ -126,6 +194,7 @@ export async function resolveCommunicationThread({
     participantIdentity,
     serviceIdentity = null,
     direction,
+    personId = null,
     threadId = null,
     purpose = null,
     correlation = {},
@@ -134,6 +203,15 @@ export async function resolveCommunicationThread({
     const scopedTenant = tenantId || correlation.tenant_id || db?.tenantId || process.env.LEGACY_TENANT_ID;
     if (!scopedTenant) throw new Error('tenant_id is required for thread resolution');
     correlation = { ...correlation, tenant_id: scopedTenant };
+    // correlation.person_id belongs to the calling workflow and may be a name,
+    // directory key, or another non-UUID identifier. Only the explicit API
+    // personId and verified Communications identities are internal contacts.
+    const suppliedPersonId = personId || null;
+    const personResolution = suppliedPersonId
+        ? { personId: suppliedPersonId, matched: true, ambiguous: false }
+        : await participantPersonResolution({ db, tenantId: scopedTenant, participantIdentity });
+    const resolvedPersonId = personResolution.personId;
+    if (resolvedPersonId && !correlation.person_id) correlation.person_id = resolvedPersonId;
     const explicitId = threadId || correlation.thread_id || null;
     let thread = null;
     let linkType = null;
@@ -156,17 +234,17 @@ export async function resolveCommunicationThread({
         }
     }
 
-    if (!thread && direction === 'inbound' && participantIdentity) {
-        const result = await db.from('communication_threads')
-            .select('*')
-            .eq('tenant_id', scopedTenant)
-            .eq('participant_identity', participantIdentity)
-            .eq('status', 'open')
-            .order('last_activity_at', { ascending: false })
-            .limit(2);
-        const candidates = queryError(result, 'Open thread lookup') || [];
+    if (!thread && direction === 'inbound' && !personResolution.ambiguous && (resolvedPersonId || participantIdentity)) {
+        const identityCandidates = participantIdentity
+            ? await openThreadsForIdentity(db, scopedTenant, participantIdentity)
+            : [];
+        const candidates = identityCandidates.length
+            ? identityCandidates
+            : resolvedPersonId ? await openThreadsForPerson(db, scopedTenant, resolvedPersonId) : [];
         // Never guess between two live intents. A single open thread is safe
-        // minimal correlation; ambiguity requires an explicit thread/Ask ID.
+        // minimal correlation. An exact channel identity wins before widening
+        // to the person's other verified identities. Ambiguity requires an
+        // explicit thread/Ask ID.
         thread = candidates.length === 1 ? candidates[0] : null;
         if (thread) linkType = 'inferred';
     }
@@ -178,6 +256,7 @@ export async function resolveCommunicationThread({
             tenant_id: scopedTenant,
             thread_id: newThreadId,
             status: 'open',
+            person_id: resolvedPersonId,
             participant_identity: participantIdentity,
             service_identity: serviceIdentity,
             purpose,
@@ -187,7 +266,11 @@ export async function resolveCommunicationThread({
         }).select('*').single(), 'Thread create');
     }
 
-    if (!thread) return { threadId: null, linkType: null, purpose, correlation };
+    if (!thread) return { threadId: null, personId: resolvedPersonId, linkType: null, purpose, correlation };
+
+    if (resolvedPersonId && thread.person_id && thread.person_id !== resolvedPersonId) {
+        throw new Error(`Thread ${thread.thread_id} belongs to a different person`);
+    }
 
     const inheritedPurpose = purpose || thread.purpose || null;
     const inheritedCorrelation = {
@@ -200,6 +283,7 @@ export async function resolveCommunicationThread({
         last_activity_at: new Date().toISOString(),
         purpose: inheritedPurpose,
         correlation: inheritedCorrelation,
+        ...(resolvedPersonId && !thread.person_id ? { person_id: resolvedPersonId } : {}),
         ...(callbackUrl ? { callback_url: callbackUrl } : {}),
     }).eq('tenant_id', scopedTenant).eq('thread_id', thread.thread_id);
 
@@ -219,6 +303,7 @@ export async function resolveCommunicationThread({
 
     return {
         threadId: thread.thread_id,
+        personId: resolvedPersonId || thread.person_id || null,
         linkType,
         purpose: inheritedPurpose,
         correlation: inheritedCorrelation,

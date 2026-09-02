@@ -55,7 +55,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `016`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, and `016` adds encrypted connected-mailbox OAuth, sync, draft and audit storage.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `018`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add encrypted Gmail/Outlook mailbox OAuth, sync, draft, audit, and provider-neutral cursor storage, and `018` adds person-aware semantic threads.
 
 ### Twilio webhooks
 
@@ -161,7 +161,7 @@ Only these optional string fields are retained:
 }
 ```
 
-Unknown correlation keys are ignored. Present values must be strings. `ask_id` belongs in `purpose`, not correlation. Top-level `project_id` is the internal project UUID. The deprecated `correlation.project_id` alias is normalized to `external_project_id` and is never written to the UUID foreign key.
+Unknown correlation keys are ignored. Present values must be strings. `ask_id` belongs in `purpose`, not correlation. Correlation identifiers belong to the calling workflow: `correlation.person_id` may be a directory key or other external identifier and is never used as the internal `contacts.id` foreign key. A top-level `person_id`, where supported, is the tenant-owned Communications contact UUID. Top-level `project_id` is the internal project UUID. The deprecated `correlation.project_id` alias is normalized to `external_project_id` and is never written to the UUID foreign key.
 
 ### Semantic request fields
 
@@ -794,10 +794,11 @@ Resolution order:
 
 1. `thread_id` or `correlation.thread_id`
 2. existing `ask_bindings.ask_id`
-3. one and only one open thread for an inbound participant identity
-4. no thread when zero or multiple candidates exist
+3. one and only one open thread for the exact inbound channel identity
+4. when there is no exact-channel candidate and the identity resolves to one tenant-owned person, one and only one open thread across that person's verified identities
+5. no thread when zero or multiple candidates exist
 
-Explicit links use confidence `1`. The limited participant inference uses confidence `0.8`. Link types are `native`, `explicit`, or `inferred`.
+Verified phone, email, and future channel identities can therefore converge on the same person's thread without displacing an existing exact-channel conversation. Identity-to-person resolution and thread lookup are tenant scoped. Ambiguous identity mappings, multiple person-wide candidates, and explicit attempts to attach another internal Communications person all fail closed. Workflow `correlation.person_id` remains opaque and does not participate in the internal identity lookup. Explicit links use confidence `1`; limited person or participant inference uses confidence `0.8`. Link types are `native`, `explicit`, or `inferred`.
 
 An inbound Ask communication emits a candidate response event. It never changes Ask status automatically.
 

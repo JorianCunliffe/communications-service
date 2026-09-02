@@ -62,6 +62,7 @@ class FakeQuery {
     }
     select() { return this; }
     eq(field, value) { this.filters.push((row) => row[field] === value); return this; }
+    in(field, values) { this.filters.push((row) => values.includes(row[field])); return this; }
     order(field, options = {}) { this.sort = { field, ascending: options.ascending !== false }; return this; }
     limit(value) { this.rowLimit = value; return this; }
     maybeSingle() { this.takeOne = true; return this; }
@@ -101,7 +102,7 @@ class FakeQuery {
 
 class FakeDb {
     constructor() {
-        this.tables = { communication_threads: [], ask_bindings: [] };
+        this.tables = { communication_threads: [], ask_bindings: [], communication_identities: [] };
     }
     from(table) { return new FakeQuery(this, table); }
 }
@@ -211,6 +212,115 @@ describe('Ask-aware cross-channel threading', () => {
         assert.equal(db.tables.ask_bindings[0].status, 'open', 'a reply candidate must not auto-resolve the Ask');
     });
 
+    test('an inbound email joins the one open SMS thread for the same person', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push(
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000', provider: 'twilio' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com', provider: 'gmail' },
+        );
+        const outboundSms = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: '+61400000000', direction: 'outbound',
+            purpose: { type: 'human_ask', ask_id: 'ask_cross_channel' }, correlation: {},
+        });
+
+        const inboundEmail = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'Person@Example.com', direction: 'inbound', correlation: {},
+        });
+
+        assert.equal(outboundSms.personId, 'person_1');
+        assert.equal(db.tables.communication_threads[0].person_id, 'person_1');
+        assert.equal(inboundEmail.threadId, outboundSms.threadId);
+        assert.equal(inboundEmail.personId, 'person_1');
+        assert.equal(inboundEmail.linkType, 'inferred');
+        assert.deepEqual(inboundEmail.purpose, { type: 'human_ask', ask_id: 'ask_cross_channel' });
+    });
+
+    test('an exact channel thread wins when the person has another open channel thread', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push(
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com' },
+        );
+        db.tables.communication_threads.push(
+            { tenant_id: 'tenant_1', thread_id: 'thread_sms', person_id: 'person_1', participant_identity: '+61400000000', status: 'open' },
+            { tenant_id: 'tenant_1', thread_id: 'thread_email', person_id: 'person_1', participant_identity: 'person@example.com', status: 'open' },
+        );
+
+        const inbound = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'person@example.com', direction: 'inbound', correlation: {},
+        });
+
+        assert.equal(inbound.threadId, 'thread_email');
+        assert.equal(inbound.personId, 'person_1');
+    });
+
+    test('person-wide inference remains ambiguous when a new channel has two candidates', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push(
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'slack', value: 'U_PERSON_1' },
+        );
+        db.tables.communication_threads.push(
+            { tenant_id: 'tenant_1', thread_id: 'thread_sms', person_id: 'person_1', participant_identity: '+61400000000', status: 'open' },
+            { tenant_id: 'tenant_1', thread_id: 'thread_email', person_id: 'person_1', participant_identity: 'person@example.com', status: 'open' },
+        );
+
+        const inbound = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'U_PERSON_1', direction: 'inbound', correlation: {},
+        });
+
+        assert.equal(inbound.threadId, null);
+        assert.equal(inbound.personId, 'person_1');
+    });
+
+    test('workflow person correlation stays opaque while the internal person comes from identity', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push({
+            tenant_id: 'tenant_1', person_id: '0f63d010-4fca-4cd4-8ad5-b9de136f28d4',
+            type: 'phone', value: '+61400000000', provider: 'twilio',
+        });
+
+        const result = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: '+61400000000', direction: 'outbound',
+            purpose: { type: 'human_ask', ask_id: 'ask_opaque_person' },
+            correlation: { person_id: 'Jorian' },
+        });
+
+        assert.equal(result.personId, '0f63d010-4fca-4cd4-8ad5-b9de136f28d4');
+        assert.equal(result.correlation.person_id, 'Jorian');
+        assert.equal(db.tables.communication_threads[0].person_id, '0f63d010-4fca-4cd4-8ad5-b9de136f28d4');
+    });
+
+    test('an identity mapped to two people never falls back to raw-address inference', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push(
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'shared@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_2', type: 'email', value: 'shared@example.com' },
+        );
+        db.tables.communication_threads.push({
+            tenant_id: 'tenant_1', thread_id: 'thread_raw', participant_identity: 'shared@example.com', status: 'open',
+        });
+
+        const inbound = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'shared@example.com', direction: 'inbound', correlation: {},
+        });
+
+        assert.equal(inbound.threadId, null);
+        assert.equal(inbound.personId, null);
+    });
+
+    test('an explicit thread cannot be reassigned to a different person', async () => {
+        const db = new FakeDb();
+        db.tables.communication_threads.push({
+            tenant_id: 'tenant_1', thread_id: 'thread_person_1', person_id: 'person_1', status: 'open', correlation: {},
+        });
+        await assert.rejects(() => resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'other@example.com', personId: 'person_2',
+            direction: 'inbound', threadId: 'thread_person_1', correlation: {},
+        }), /different person/);
+    });
+
     test('two open Asks are ambiguous and are never guessed between', async () => {
         const db = new FakeDb();
         db.tables.communication_threads.push(
@@ -257,6 +367,15 @@ describe('database contract', () => {
             'communication_identities', 'ask_bindings', 'outbound_events', 'purpose', 'resolution',
             'resolve_communication_ask',
         ]) assert.match(sql, new RegExp(required));
+    });
+
+    test('person-aware migration backfills and indexes semantic threads safely', () => {
+        const sql = readFileSync(new URL('../migrations/018_person_aware_threads.sql', import.meta.url), 'utf8');
+        for (const required of [
+            'communication_threads', 'person_id', 'communication_identities',
+            'count(distinct i.person_id)=1', 'communication_threads_tenant_person_fk',
+            'communication_threads_tenant_person_open',
+        ]) assert.match(sql, new RegExp(required.replace(/[()]/g, '\\$&')));
     });
 });
 

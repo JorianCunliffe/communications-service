@@ -10,7 +10,7 @@ import {
 } from './emailReplyRoutes.js';
 import { getDatabase } from './database.js';
 import { enqueueEvent } from './eventOutbox.js';
-import { prefixedId, resolveCommunicationThread } from './communicationModel.js';
+import { prefixedId, resolveCommunicationThread, resolveParticipantPerson } from './communicationModel.js';
 
 const MAX_ATTEMPTS = 8;
 let timer = null;
@@ -108,10 +108,7 @@ async function findReceivingIdentity(db, tenantId, connectionId, addresses) {
 }
 
 async function personForSender(db, tenantId, sender) {
-    const identity = await db.from('communication_identities').select('person_id')
-        .eq('tenant_id', tenantId).eq('type', 'email').eq('value', sender).maybeSingle();
-    if (identity.error) throw new Error(identity.error.message);
-    return identity.data?.person_id || null;
+    return resolveParticipantPerson({ db, tenantId, participantIdentity: sender });
 }
 
 async function existingEmailThread(db, tenantId, email) {
@@ -182,6 +179,7 @@ export async function ingestCanonicalInboundEmail({ db, tenantId, connection, em
         participantIdentity: email.from_addresses[0].address,
         serviceIdentity: serviceIdentity.address,
         direction: 'inbound',
+        personId,
         threadId: replyRoute?.thread_id || nativeThread?.thread_id || null,
         purpose,
         correlation,
@@ -194,6 +192,7 @@ export async function ingestCanonicalInboundEmail({ db, tenantId, connection, em
             participantIdentity: email.from_addresses[0].address,
             serviceIdentity: serviceIdentity.address,
             direction: 'inbound',
+            personId,
             threadId: prefixedId('thread'),
             purpose: null,
             correlation: { tenant_id: tenantId },
