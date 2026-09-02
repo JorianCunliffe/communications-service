@@ -513,10 +513,13 @@ describe('context – day boundaries', () => {
 });
 
 describe('ending a call – hanging up, and not outstaying the welcome', () => {
-    test('the tool is opt-in like every other one', () => {
-        // A call that does not list it never sees it, so no existing call can
-        // start hanging up on people because this shipped.
-        assert.deepEqual(buildToolDefinitions([]), []);
+    test('the tool is offered on every call, and can still be switched off', () => {
+        // This was opt-in when it shipped, so that no existing call could start
+        // hanging up on people the day it landed. That caution has been paid:
+        // the cost of the default was that almost no call could end itself,
+        // because DEFAULT_CONFIG.tools is empty. ALWAYS_OFFER_END_CALL=false is
+        // what remains of the original safety valve. See test/tools.test.js.
+        assert.deepEqual(buildToolDefinitions([]).map((tool) => tool.name), ['end_call']);
         const [definition] = buildToolDefinitions(['end_call']);
         assert.equal(definition.name, 'end_call');
         assert.deepEqual(definition.parameters.required, [], 'a reason is optional; hanging up must not fail for want of one');

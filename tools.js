@@ -300,15 +300,39 @@ function isAvailable(name) {
     return Boolean(process.env[urlEnvName(name)]);
 }
 
+// Tools every call is offered, whatever its configuration says.
+//
+// Hanging up is not an optional capability the way the calendar is. Without
+// end_call the assistant has no way to finish a conversation: the line stays
+// open until the caller hangs up or maxCallSeconds cuts it off mid-sentence,
+// and "are you still there?" loops forever because nothing can act on the
+// answer. Since DEFAULT_CONFIG.tools is [], leaving this to per-contact opt-in
+// meant nearly every call was placed unable to end itself.
+//
+// Set ALWAYS_OFFER_END_CALL=false to restore the previous opt-in behaviour.
+export const ALWAYS_ON_TOOLS = ['end_call'];
+
+const alwaysOnTools = () =>
+    /^(false|0|off|no)$/i.test(String(process.env.ALWAYS_OFFER_END_CALL ?? '').trim())
+        ? []
+        : ALWAYS_ON_TOOLS;
+
 // The tool definitions to advertise in session.update, in the API's expected
 // shape: type/name/description/parameters at the top level of each entry.
 // Unknown or unavailable names are dropped with a warning — a typo in the
 // database should cost one tool, not the call.
 export function buildToolDefinitions(names) {
-    if (!Array.isArray(names) || names.length === 0) return [];
+    const configured = Array.isArray(names) ? names : [];
+    // Configured order is preserved, and a configuration that already names an
+    // always-on tool keeps its own position for it rather than gaining a second.
+    const requested = [
+        ...configured,
+        ...alwaysOnTools().filter((name) => !configured.includes(name)),
+    ];
+    if (requested.length === 0) return [];
 
     const definitions = [];
-    for (const name of names) {
+    for (const name of requested) {
         if (!TOOLS[name]) {
             console.warn(`Ignoring unknown tool "${name}"`);
             continue;
