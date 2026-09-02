@@ -1,1 +1,2 @@
 - [Twilio PUBLIC_URL coupling](twilio-public-url.md) — "application error" with clean logs usually means PUBLIC_URL doesn't match the live domain; .replit userenv wins over shared env vars.
+- [Git cherry-pick identity](git-cherry-pick-identity.md) — missing committer identity can stop a cherry-pick after staging its patch; verify the index before retrying.
