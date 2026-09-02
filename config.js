@@ -331,10 +331,12 @@ export function buildSessionUpdate(config) {
         session.audio.input.transcription = { model: LIVE_TRANSCRIPT_MODEL };
     }
 
-    // Only sent when a call actually has tools. Omitting the keys entirely
-    // keeps this payload byte-identical to the long-standing one for every
-    // call that has none, so enabling tools for one contact cannot change how
-    // any other call is set up.
+    // Sent whenever the call has tools, which is now every call:
+    // buildToolDefinitions always adds end_call so the assistant can finish a
+    // conversation. Per-contact configuration still decides everything else, so
+    // enabling the calendar for one contact cannot change how anyone else's
+    // call is set up. Setting ALWAYS_OFFER_END_CALL=false restores the older
+    // behaviour, where a call with no configured tools sent neither key.
     const tools = buildToolDefinitions(config.tools);
     if (tools.length > 0) {
         session.tools = tools;
