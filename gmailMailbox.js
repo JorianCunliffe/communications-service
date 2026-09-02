@@ -14,6 +14,16 @@ export class GmailMessageNormalizationError extends Error {
     }
 }
 
+export class GmailMessageUnavailableError extends Error {
+    constructor(messageId, cause) {
+        super('Gmail message is no longer available', { cause });
+        this.name = 'GmailMessageUnavailableError';
+        this.code = 'GMAIL_MESSAGE_UNAVAILABLE';
+        this.status = Number(cause?.status) || 404;
+        this.providerMessageId = messageId || null;
+    }
+}
+
 function headerMap(headers = []) {
     return Object.fromEntries(headers.map((item) => [String(item.name || '').toLowerCase(), String(item.value || '')]));
 }
@@ -105,6 +115,17 @@ async function gmailRequest(accessToken, path, options = {}) {
         const error = new Error(payload?.error?.message || `Gmail returned HTTP ${response.status}`);
         error.status = response.status;
         error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        error.providerOperation = path.startsWith('/messages/')
+            ? 'gmail.messages.get'
+            : path.startsWith('/messages?')
+                ? 'gmail.messages.list'
+                : path.startsWith('/history?')
+                    ? 'gmail.history.list'
+                    : path === '/profile'
+                        ? 'gmail.users.getProfile'
+                        : path === '/watch'
+                            ? 'gmail.users.watch'
+                            : 'gmail.request';
         throw error;
     }
     return payload;
@@ -131,7 +152,15 @@ export function gmailProfile(accessToken) {
 }
 
 export async function gmailMessage(accessToken, messageId, mailboxAddress = null) {
-    const message = await gmailRequest(accessToken, `/messages/${encodeURIComponent(messageId)}?format=full`);
+    let message;
+    try {
+        message = await gmailRequest(accessToken, `/messages/${encodeURIComponent(messageId)}?format=full`);
+    } catch (error) {
+        if ([404, 410].includes(Number(error?.status))) {
+            throw new GmailMessageUnavailableError(messageId, error);
+        }
+        throw error;
+    }
     try {
         return canonicalGmailMessage(message, { mailboxAddress });
     } catch (error) {

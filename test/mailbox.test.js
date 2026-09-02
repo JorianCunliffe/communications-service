@@ -9,7 +9,7 @@ import {
     outlookAuthorizationUrl,
     verifyMailboxOAuthState,
 } from '../mailboxOAuth.js';
-import { canonicalGmailMessage, GmailMessageNormalizationError, gmailDraftMessage } from '../gmailMailbox.js';
+import { canonicalGmailMessage, GmailMessageNormalizationError, GmailMessageUnavailableError, gmailDraftMessage } from '../gmailMailbox.js';
 import {
     canonicalOutlookMessage,
     createOutlookDraft,
@@ -147,6 +147,18 @@ describe('Gmail adapter contract', () => {
         assert.equal(error.code, 'GMAIL_MESSAGE_INVALID');
         assert.equal(error.providerMessageId, 'gmail-message-invalid');
         assert.match(error.message, /missing sender/);
+    });
+
+    test('classifies a disappeared Gmail message as skippable provider churn', () => {
+        const cause = Object.assign(new Error('Requested entity was not found.'), {
+            status: 404,
+            providerOperation: 'gmail.messages.get',
+        });
+        const error = new GmailMessageUnavailableError('gmail-message-deleted', cause);
+        assert.equal(error.code, 'GMAIL_MESSAGE_UNAVAILABLE');
+        assert.equal(error.status, 404);
+        assert.equal(error.providerMessageId, 'gmail-message-deleted');
+        assert.equal(error.cause.providerOperation, 'gmail.messages.get');
     });
 
     test('creates a Gmail draft MIME payload but exposes no send operation', () => {

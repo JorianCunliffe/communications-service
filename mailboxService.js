@@ -3,6 +3,7 @@ import { ingestCanonicalInboundEmail } from './emailWebhook.js';
 import {
     createGmailDraft,
     GmailMessageNormalizationError,
+    GmailMessageUnavailableError,
     getGmailDraft,
     gmailHistoryMessageIds,
     gmailInitialMessageIds,
@@ -308,13 +309,15 @@ export async function syncGmailMailbox(db, { tenantId, connectionId, actorId = n
         let ingested = 0;
         let duplicates = 0;
         let skipped = 0;
+        let unavailable = 0;
         for (const messageId of messageIds) {
             let email;
             try {
                 email = await gmailMessage(credential.access_token, messageId, connection.provider_account_id);
             } catch (error) {
-                if (!(error instanceof GmailMessageNormalizationError)) throw error;
+                if (!(error instanceof GmailMessageNormalizationError) && !(error instanceof GmailMessageUnavailableError)) throw error;
                 skipped += 1;
+                if (error instanceof GmailMessageUnavailableError) unavailable += 1;
                 continue;
             }
             if (!email.providerLabels.includes('INBOX')) continue;
@@ -340,12 +343,13 @@ export async function syncGmailMailbox(db, { tenantId, connectionId, actorId = n
             last_successful_sync_at: new Date().toISOString(),
             last_error: null,
         });
-        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'succeeded', { ingested, duplicates, skipped, recovered });
-        return { connection_id: connectionId, status: 'healthy', ingested, duplicates, skipped, recovered, history_id: watch?.historyId || nextHistoryId };
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'succeeded', { ingested, duplicates, skipped, unavailable, recovered });
+        return { connection_id: connectionId, status: 'healthy', ingested, duplicates, skipped, unavailable, recovered, history_id: watch?.historyId || nextHistoryId };
     } catch (error) {
         const state = error.oauthError === 'invalid_grant' || error.status === 403 ? 'revoked' : error.status === 401 ? 'expired' : 'degraded';
-        await markSync(db, tenantId, connectionId, { status: state, last_error: String(error.message || error).slice(0, 500) }).catch(() => {});
-        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'failed', { error: String(error.message || error).slice(0, 200) }).catch(() => {});
+        const detail = `${error.providerOperation ? `${error.providerOperation}: ` : ''}${String(error.message || error)}`;
+        await markSync(db, tenantId, connectionId, { status: state, last_error: detail.slice(0, 500) }).catch(() => {});
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'failed', { error: detail.slice(0, 200) }).catch(() => {});
         throw error;
     }
 }
