@@ -18,6 +18,7 @@ import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { normaliseAddresses, outboundEmailRequest } from './email.js';
 import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
 import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncMailbox } from './mailboxService.js';
+import { ingestMeeting, getMeeting, findMeetingBySource, listMeetings, MeetingError } from './meetings.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
 const DIRECTIONS = ['inbound', 'outbound'];
@@ -159,6 +160,41 @@ export default async function v1Routes(fastify, options = {}) {
             };
         }
         return null;
+    });
+
+    fastify.get('/meetings', async (request, reply) => {
+        const db=database(reply); if(!db)return reply;
+        try { return await listMeetings(db,Number(request.query.offset||0)); }
+        catch(error) { return reply.code(error instanceof MeetingError?error.status:503).send({error:error.message}); }
+    });
+    fastify.get('/meetings/by-source', async (request, reply) => {
+        const db=database(reply); if(!db)return reply;
+        if(typeof request.query.source!=='string'||typeof request.query.externalId!=='string')return reply.code(400).send({error:'Source and meeting reference required'});
+        try {
+            const meeting=await findMeetingBySource(db,request.query.source,request.query.externalId);
+            if(!meeting)return reply.code(404).send({error:'Meeting not found'});
+            if(meeting.metadata.visibility==='private' && rejectMissingCapability(request,reply,'memory:private'))return reply;
+            return meeting;
+        } catch(error) { return reply.code(error instanceof MeetingError?error.status:503).send({error:error.message}); }
+    });
+    fastify.get('/meetings/:id', async (request, reply) => {
+        const db=database(reply); if(!db)return reply;
+        if(!UUID.test(request.params.id))return reply.code(400).send({error:'Invalid meeting ID'});
+        try {
+            const meeting=await getMeeting(db,request.params.id);
+            if(meeting.metadata.visibility==='private' && rejectMissingCapability(request,reply,'memory:private'))return reply;
+            return meeting;
+        } catch(error) { return reply.code(error instanceof MeetingError?error.status:503).send({error:error.message}); }
+    });
+    fastify.post('/meetings', async (request, reply) => {
+        const db=database(reply); if(!db)return reply;
+        if(request.body?.initiator_id && rejectMissingCapability(request,reply,'threads:actor:assert'))return reply;
+        if(request.body?.visibility==='private' && rejectMissingCapability(request,reply,'memory:private'))return reply;
+        try {
+            const actor=JSON.stringify({client_id:request.authContext.keyId,user_id:typeof request.body?.initiator_id==='string'?request.body.initiator_id.slice(0,200):null});
+            const result=await ingestMeeting(db,request.body,actor);
+            return reply.code(result.duplicate?200:201).send(result);
+        } catch(error) { return reply.code(error instanceof MeetingError?error.status:503).send({error:error.message,...(error.details?{details:error.details}:{})}); }
     });
 
     fastify.get('/tenant-policy/email', async (request, reply) => {

@@ -18,11 +18,11 @@ export const TENANT_TABLES = new Set([
     'mailbox_oauth_credentials', 'mailbox_sync_state', 'mailbox_oauth_states',
     'mailbox_drafts', 'mailbox_audit_events',
     'communication_thread_participants', 'thread_resolution_decisions',
-    'thread_resolution_feedback',
+    'thread_resolution_feedback', 'recording_revisions',
 ]);
 
 const TENANT_RPCS = new Set([
-    'create_communication_contact', 'ingest_calendar_event', 'requeue_communication_enrichment',
+    'create_communication_contact', 'ingest_calendar_event', 'ingest_transcribed_meeting', 'requeue_communication_enrichment',
     'resolve_communication_ask', 'search_communications', 'suggest_terms',
     'consume_mailbox_oauth_state',
     'claim_mailbox_sync',
