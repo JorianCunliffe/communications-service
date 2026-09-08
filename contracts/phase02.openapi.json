@@ -1,0 +1,388 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "communications-service Phase 02 supplemental contract",
+    "version": "1.0"
+  },
+  "paths": {
+    "/v1/thread-register": {
+      "get": {
+        "summary": "Canonical thread read",
+        "security": [
+          {
+            "auth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical result"
+          },
+          "400": {
+            "description": "Invalid shape or domain transition"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Tenant or capability denied"
+          },
+          "404": {
+            "description": "Missing resource or unsupported contract"
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "person_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "external_project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "communication_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communications/{communicationId}/thread-candidates": {
+      "get": {
+        "summary": "Canonical thread read",
+        "security": [
+          {
+            "auth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical result"
+          },
+          "400": {
+            "description": "Invalid shape or domain transition"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Tenant or capability denied"
+          },
+          "404": {
+            "description": "Missing resource or unsupported contract"
+          }
+        },
+        "parameters": [
+          {
+            "name": "communicationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communications/{communicationId}/rethread": {
+      "post": {
+        "summary": "Canonical thread correction or edit",
+        "security": [
+          {
+            "auth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical result"
+          },
+          "400": {
+            "description": "Invalid shape or domain transition"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Tenant or capability denied"
+          },
+          "404": {
+            "description": "Missing resource or unsupported contract"
+          }
+        },
+        "parameters": [
+          {
+            "name": "communicationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "thread_id": {
+                    "type": "string"
+                  },
+                  "create_new": {
+                    "type": "boolean"
+                  },
+                  "reason_code": {
+                    "type": "string",
+                    "enum": [
+                      "wrong_person",
+                      "wrong_project",
+                      "wrong_topic",
+                      "time_gap",
+                      "channel_boundary",
+                      "duplicate_thread",
+                      "other"
+                    ]
+                  },
+                  "reason_detail": {
+                    "type": "string",
+                    "maxLength": 1000
+                  },
+                  "person_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "update_identity": {
+                    "type": "boolean"
+                  },
+                  "external_project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "initiator_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reason_code"
+                ],
+                "oneOf": [
+                  {
+                    "required": [
+                      "thread_id"
+                    ],
+                    "not": {
+                      "required": [
+                        "create_new"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "create_new"
+                    ],
+                    "properties": {
+                      "create_new": {
+                        "const": true
+                      }
+                    },
+                    "not": {
+                      "required": [
+                        "thread_id"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "examples": {
+                "example": {
+                  "value": {
+                    "create_new": true,
+                    "reason_code": "wrong_topic"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{threadId}": {
+      "patch": {
+        "summary": "Canonical thread correction or edit",
+        "security": [
+          {
+            "auth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical result"
+          },
+          "400": {
+            "description": "Invalid shape or domain transition"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Tenant or capability denied"
+          },
+          "404": {
+            "description": "Missing resource or unsupported contract"
+          }
+        },
+        "parameters": [
+          {
+            "name": "threadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 500
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 5000
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "resolved",
+                      "closed"
+                    ]
+                  },
+                  "external_project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "initiator_id": {
+                    "type": "string"
+                  }
+                },
+                "required": []
+              },
+              "examples": {
+                "example": {
+                  "value": {
+                    "title": "Reviewed matter"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "auth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    }
+  }
+}

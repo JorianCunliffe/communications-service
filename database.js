@@ -15,7 +15,7 @@ const SET_RETURNING_RPCS = new Set([
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const JSON_COLUMNS = new Set([
-    'arguments', 'audit_context', 'authentication_results', 'bcc_addresses', 'cc_addresses',
+    'arguments', 'audit_context', 'authentication_results', 'bcc_addresses', 'candidate_scores', 'cc_addresses',
     'correlation', 'from_addresses', 'headers', 'metadata', 'participant_identities',
     'payload', 'purpose', 'raw_payload', 'reply_to_addresses', 'resolution', 'response',
     'result', 'signature_headers', 'spam_results', 'to_addresses', 'transcript',
@@ -375,11 +375,30 @@ class PostgresQuery {
     }
 }
 
-export function createPostgresClient(queryable) {
+export function createPostgresClient(queryable, { transactionBound = false } = {}) {
     const database = typeof queryable === 'function' ? { query: queryable } : queryable;
     if (!database || typeof database.query !== 'function') throw new Error('A PostgreSQL query function is required');
     return {
         provider: 'postgres',
+        ...(!transactionBound && (typeof database.connect === 'function' || typeof database.transaction === 'function') ? {
+            async transaction(work) {
+                if (typeof database.transaction === 'function') {
+                    return database.transaction(client => work(createPostgresClient(client, { transactionBound: true })));
+                }
+                const client = await database.connect();
+                let releaseError;
+                try {
+                    await client.query('begin');
+                    const result = await work(createPostgresClient(client, { transactionBound: true }));
+                    await client.query('commit');
+                    return result;
+                } catch (error) {
+                    try { await client.query('rollback'); }
+                    catch (rollbackError) { releaseError = rollbackError; }
+                    throw error;
+                } finally { client.release(releaseError); }
+            },
+        } : {}),
         from(table) { return new PostgresQuery(database, table); },
         async rpc(name, args = {}) {
             try {

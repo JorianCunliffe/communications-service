@@ -79,7 +79,9 @@ export async function recordCall({
             participantIdentity: otherParty,
             serviceIdentity,
             direction,
-            personId: config?.personId || null,
+            channel: 'voice',
+            occurredAt: new Date().toISOString(),
+            communicationId,
             threadId,
             purpose: normalisePurpose(purpose),
             correlation: normaliseCorrelation({ ...correlation, tenant_id: scopedTenant }),
@@ -115,7 +117,7 @@ export async function recordCall({
         // person's calls can be found without matching on phone number. Set
         // only when one exists: the upsert writes every column it is given, so
         // a null here would clear the link if this call were ever re-recorded.
-        if (otherParty && !row.contact_id) {
+        if (otherParty && !row.contact_id && semantic.resolution?.method !== 'ambiguous_identity_new_thread') {
             const contact = await withTimeout(
                 db.from('contacts').select('id').eq('tenant_id', scopedTenant).eq('phone_number', otherParty).maybeSingle(),
                 'Contact lookup for call record'
@@ -126,6 +128,11 @@ export async function recordCall({
         await withTimeout(
             db.from('calls').upsert(row, { onConflict: 'tenant_id,twilio_call_sid' }),
             'Call record insert'
+        );
+        await withTimeout(
+            db.from('communications').update({ resolution: semantic.resolution })
+                .eq('tenant_id', scopedTenant).eq('communication_id', communicationId),
+            'Call thread resolution update'
         );
         return {
             communicationId,
@@ -277,8 +284,8 @@ export async function updateCallStatus({ callSid, status, durationSeconds, tenan
     }
 }
 
-export async function updateCallProjectContext({ callSid, projectId, tenantId = null }) {
-    const db = getClient();
+export async function updateCallProjectContext({ callSid, projectId, tenantId = null, database = null }) {
+    const db = database || getClient();
     if (!db || !callSid || !projectId) throw new Error('CallSid and projectId are required for call project context');
     let scopedTenant;
     let call;
@@ -286,7 +293,8 @@ export async function updateCallProjectContext({ callSid, projectId, tenantId = 
         try {
             scopedTenant = await tenantForCall(db, callSid, tenantId);
             call = await withTimeout(
-                db.from('calls').select('correlation,communication_thread_id').eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
+                db.from('calls').select('communication_id,correlation,communication_thread_id,thread_link_type,phone_number,contact_id,direction,started_at,purpose')
+                    .eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid).maybeSingle(),
                 'Call project context lookup'
             );
         } catch (error) {
@@ -295,19 +303,36 @@ export async function updateCallProjectContext({ callSid, projectId, tenantId = 
         if (!call && attempt < 3) await new Promise(resolve => setTimeout(resolve, 100));
     }
     if (!call) throw new Error('Call was not found for project context update');
+    const previousThread = call.communication_thread_id ? await withTimeout(
+        db.from('communication_threads').select('*').eq('tenant_id', scopedTenant).eq('thread_id', call.communication_thread_id).maybeSingle(),
+        'Call thread context lookup'
+    ) : null;
+    if (previousThread?.external_project_id === projectId && call.correlation?.external_project_id === projectId) return call.correlation;
+    const previousProject = previousThread?.external_project_id || previousThread?.correlation?.external_project_id;
+    const keepThread = previousThread && (!previousProject || previousProject === projectId);
+    if (!keepThread && call.purpose?.type === 'human_ask') throw new Error('A workflow Ask call cannot switch its project through inferred threading');
     const correlation = { ...(call.correlation || {}), tenant_id: scopedTenant, external_project_id: projectId };
+    delete correlation.thread_id;
+    const semantic = await resolveCommunicationThread({
+        db, tenantId: scopedTenant, participantIdentity: call.phone_number, personId: call.contact_id,
+        direction: call.direction, channel: 'voice', occurredAt: call.started_at || new Date().toISOString(),
+        communicationId: call.communication_id, correlation, purpose: call.purpose,
+        threadId: keepThread ? call.communication_thread_id : null,
+    });
     await withTimeout(
-        db.from('calls').update({ correlation }).eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid),
+        db.from('calls').update({ correlation: semantic.correlation, purpose: semantic.purpose,
+            communication_thread_id: semantic.threadId,
+            thread_link_type: keepThread && call.thread_link_type === 'corrected' ? 'corrected' : semantic.linkType,
+        }).eq('tenant_id', scopedTenant).eq('twilio_call_sid', callSid),
         'Call project context update'
     );
-    if (call.communication_thread_id) {
+    if (!(keepThread && call.thread_link_type === 'corrected')) {
         await withTimeout(
-            db.from('communication_threads').update({ correlation, last_activity_at: new Date().toISOString() })
-                .eq('tenant_id', scopedTenant).eq('thread_id', call.communication_thread_id),
-            'Call thread project context update'
+            db.from('communications').update({ resolution: semantic.resolution }).eq('tenant_id', scopedTenant).eq('communication_id', call.communication_id),
+            'Call project resolution update'
         );
     }
-    return correlation;
+    return semantic.correlation;
 }
 
 // Stores Twilio's AnsweredBy signal separately from provider call status.

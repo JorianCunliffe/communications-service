@@ -1,6 +1,6 @@
 # Communications Service
 
-A purpose-aware, tenant-isolated communications API (v2.2.5) built with Fastify, Twilio, OpenAI Realtime, and PostgreSQL.
+A purpose-aware, tenant-isolated communications API (v2.4.0) built with Fastify, Twilio, OpenAI Realtime, and PostgreSQL.
 
 ## How to run
 
@@ -10,11 +10,15 @@ The server will not start without `OPENAI_API_KEY`. Add it via the Secrets panel
 
 ## Database
 
-Replit uses its built-in PostgreSQL database. `DATABASE_URL` is injected automatically. The migration runner applies numbered migrations 000 through 018 once, in order:
+Replit uses its built-in PostgreSQL database. `DATABASE_URL` is injected automatically. The migration runner applies numbered migrations 000 through 019 once, in order:
 
 ```sh
 npm run db:migrate
 ```
+
+Release 2.4.0 requires migration `019_ranked_thread_resolution.sql`. Pull the release before republishing; a GitHub push alone does not update a published Replit snapshot. Check the deployed `/health` build against the intended source and verify an authenticated `/v1/thread-register` read after startup. No additional provider secret is required for the register.
+
+Run `npm run test:unit` and `npm run test:db` for credential-free checks. The latter uses an isolated PostgreSQL fixture, not the production database. See `docs/THREADING.md` for the model and rollout checks.
 
 ## Required secrets
 
@@ -49,7 +53,7 @@ When `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET` are present, the 
 - `callOutcome.js` - durable post-call classification and terminal-event finalization
 - `memory.js` / `enrichment.js` - memory reads and asynchronous enrichment
 - `eventOutbox.js` - signed, replay-safe event delivery to HyperFlow
-- `migrations/` - SQL migrations 000 through 018
+- `migrations/` - SQL migrations 000 through 019
 - `scripts/migrate.js` - migration runner used by production startup
 - `docs/API_REFERENCE.md` - complete API reference
 
@@ -58,3 +62,6 @@ When `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET` are present, the 
 - Voice: `POST https://communications-service.replit.app/incoming-call`
 - Inbound SMS: `POST https://communications-service.replit.app/incoming-sms`
 - Call status: `POST https://communications-service.replit.app/call-status`
+
+
+See [Phase 02 record](docs/implementation/P02.md) for migration 020, actor assertion capability, project safeguards and local acceptance limits.
