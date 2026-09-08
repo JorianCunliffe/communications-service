@@ -80,13 +80,13 @@ npm run test:unit
 npm run test:db
 ```
 
-The database suite applies migrations 000–020 to isolated PGlite PostgreSQL and exercises actual Fastify authentication, SQL functions, constraints, and provider-table projections. It covers group and project separation, cross-channel continuation, ranking, corrections/identity repair, Ask protection, voice/SMS/recording updates, email reply anchors, paging, live-call project reassignment, overlapping HTTP requests, and failed-resolution rollback. PGlite is an embedded single-connection fixture; this is not a production multi-node load test.
+The database suite applies migrations 000–021 to isolated PGlite PostgreSQL and exercises actual Fastify authentication, SQL functions, constraints, and provider-table projections. It covers group and project separation, cross-channel continuation, ranking, corrections/identity repair, Ask protection, voice/SMS/recording updates, email reply anchors, paging, live-call project reassignment, overlapping HTTP requests, and failed-resolution rollback. PGlite is an embedded single-connection fixture; this is not a production multi-node load test.
 
 HyperFlow verification uses its full test suite, TypeScript checks and production build, plus `tests/ui/thread-register.html` with synthetic data. Browser checks cover collapsed loading, saved editor values, old-history loading, score explanations, explicit identity repair and the moved communication's destination. The fixture never authenticates to real services or sends communications.
 
 Production acceptance still requires:
 
-- publish the intended Communications source and apply migrations through 020 before serving it;
+- publish the intended Communications source and apply migrations through 021 before serving it, approving only a generated database plan with no truncation, deletion, or dropped records;
 - verify the live build fingerprint and an authenticated register read against the intended production database;
 - deploy the matching HyperFlow proxy/UI and verify the register under authenticated membership;
 - run a controlled cross-channel communication story and inspect the stored membership, correction, subsequent matching and correlated HyperFlow event results;
