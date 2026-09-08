@@ -1,0 +1,34 @@
+
+> communications-service@2.4.0 test:db
+> node --test --test-reporter=spec test/threadDatabase.test.js
+
+▶ PostgreSQL-backed thread story
+  ✔ applies the entire migration sequence and normalizes identities on real inserts (2.2266ms)
+Communications persistence disabled
+  ✔ email, SMS and recording join one project thread and persist scores and group participants (95.2911ms)
+  ✔ another project and a stale topic create separate threads (50.8167ms)
+  ✔ ordinary outbound replies can join, while explicit IDs and new Asks never fall through to inference (57.4616ms)
+  ✔ an atomic correction moves only the selected row, repairs identity and trains the next match (50.8165ms)
+  ✔ thread detail edits persist without resolving an Ask or leaking across tenants (31.9079ms)
+  ✔ moving an inferred Ask reply cannot rebind the Ask or move its outbound request (24.9614ms)
+  ✔ SMS source corrections survive later provider updates without changing sibling messages (27.8818ms)
+  ✔ recording projection preserves its correction after transcript reprocessing (25.9496ms)
+  ✔ editing a recording thread project preserves each recording's own workflow correlation (24.4042ms)
+  ✔ an unknown participant is not attributed to the thread owner and project alone is not enough (36.864ms)
+  ✔ moving a group communication carries every participant and removes stale participant evidence (40.122ms)
+  ✔ voice source correction survives later transcript and provider status updates (31.5193ms)
+  ✔ native email replies follow corrected parents, exclude reply aliases, and scope provider IDs to a mailbox connection (58.7272ms)
+  ✔ a corrected outbound email keeps its own reply address without moving sibling routes or inheriting another Ask (44.2627ms)
+  ✔ register pages threads and older communications without hiding quiet threads (28.9132ms)
+  ✔ a live call project switch moves only the call and preserves the other project thread (48.0651ms)
+  ✔ simultaneous communications in a new conversation do not create competing threads (29.7686ms)
+  ✔ failed resolution rolls back thread, participant and decision writes (7.5181ms)
+✔ PostgreSQL-backed thread story (1885.4881ms)
+ℹ tests 19
+ℹ suites 1
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2520.8408
