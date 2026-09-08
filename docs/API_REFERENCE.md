@@ -1,6 +1,8 @@
 # Communications Service API Reference
 
-Updated: 31 August 2026. Contract release: `2.3.0`.
+Phase 01 adds account email authority and separate sms:send / voice:call capabilities. All unconfigured accounts default to draft-only. See [authority contract](architecture/BOUNDARIES.md).
+
+Updated: 8 September 2026. Contract release: `2.4.0`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -55,7 +57,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `018`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add encrypted Gmail/Outlook mailbox OAuth, sync, draft, audit, and provider-neutral cursor storage, and `018` adds person-aware semantic threads.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `020`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
 
 ### Twilio webhooks
 
@@ -703,6 +705,50 @@ Returns the original thread fields for compatibility plus:
 
 Communications are chronological. Missing enrichment is returned as null/empty rather than failing the thread read.
 
+### Thread register
+
+```http
+GET /v1/thread-register?status=open&person_id=<uuid>&external_project_id=<workflow-project>&limit=50&offset=0
+```
+
+Returns `{ data, count, has_more }`, ordered by activity and thread ID. Filters are optional and tenant scoped. `status` defaults to `open`; `all`, `closed`, and `resolved` are also supported. `person_id` includes secondary group participants. `project_id` is an internal UUID; `external_project_id` is the opaque workflow project ID. `limit` is capped at 200 and `offset` pages older threads.
+
+Each entry includes `participants`, the latest 20 `communications`, `communications_count`, the latest 20 `decisions`, and up to 50 `corrections`. History previews contain at most 2,000 body characters. Use `thread_id=<id>&status=all&communication_offset=20` to retrieve the next history page for one thread. Paging is ordered, but not a frozen snapshot while new traffic arrives.
+
+### Edit thread details
+
+```http
+PATCH /v1/threads/:threadId
+Content-Type: application/json
+
+{ "title": "Settlement planning", "summary": "Confirm timing and documents", "external_project_id": "project_123" }
+```
+
+Editable fields are `title`, `summary`, `status`, `project_id`, and `external_project_id`; null clears nullable fields. `status` is `open`, `resolved`, or `closed`, but a Human Ask's status remains controlled by its workflow. Project edits cascade to the thread's communications and provider records while preserving each communication's own run/task correlation. An optional `initiator_id` records the caller's operator; HyperFlow supplies its verified member ID.
+
+### Explain a communication's thread candidates
+
+```http
+GET /v1/communications/:communicationId/thread-candidates
+```
+
+Returns the current thread and ranked open candidates. Each candidate includes `score`, `confidence`, `excluded`, and named `signals`, so a UI can explain the decision without exposing hidden model reasoning.
+
+### Correct a mismatched communication
+
+```http
+POST /v1/communications/:communicationId/rethread
+Content-Type: application/json
+
+{ "thread_id": "thread_correct", "reason_code": "wrong_project", "reason_detail": "This was about Project B" }
+```
+
+Use `{ "create_new": true, ... }` instead of `thread_id` to split one communication into a new conversation. Exactly one destination is required. Reasons are `wrong_person`, `wrong_project`, `wrong_topic`, `time_gap`, `channel_boundary`, `duplicate_thread`, or `other`. Optional fields are `person_id`, `update_identity`, `project_id`, `external_project_id`, `reason_detail`, and `initiator_id`.
+
+`update_identity: true` requires a verified `person_id` and explicitly repairs that communication's email/phone identity mapping; without it, only the selected communication's person is corrected. The transaction moves canonical/provider membership and participant evidence, records the reason, and saves contextual negative/preferred evidence for subsequent ranking. Group siblings are not moved. A source thread with no remaining communications is closed unless it belongs to an Ask. A later correction supersedes feedback for that same communication.
+
+Outbound Ask requests and terminal Ask associations cannot be moved here. Moving an inferred inbound reply out of an open Ask clears its inherited Ask association without rebinding or resolving the Ask. Corrections neither send messages nor replay earlier workflow events. [Threading details](THREADING.md) describe feedback scope and limits.
+
 ### List loose ends
 
 ```http
@@ -794,11 +840,12 @@ Resolution order:
 
 1. `thread_id` or `correlation.thread_id`
 2. existing `ask_bindings.ask_id`
-3. one and only one open thread for the exact inbound channel identity
-4. when there is no exact-channel candidate and the identity resolves to one tenant-owned person, one and only one open thread across that person's verified identities
-5. no thread when zero or multiple candidates exist
+3. a new explicit ID or new purpose starts its own thread rather than falling through to inference
+4. otherwise rank inbound and outbound candidates from exact identity, all known people/identities, internal/external project, channel, topic, recency, and active human feedback
+5. attach only at score 65 or greater with a margin of at least 12 over the runner-up
+6. create a new temporal conversation when evidence is weak, stale, conflicting, or ambiguous
 
-Verified phone, email, and future channel identities can therefore converge on the same person's thread without displacing an existing exact-channel conversation. Identity-to-person resolution and thread lookup are tenant scoped. Ambiguous identity mappings, multiple person-wide candidates, and explicit attempts to attach another internal Communications person all fail closed. Workflow `correlation.person_id` remains opaque and does not participate in the internal identity lookup. Explicit links use confidence `1`; limited person or participant inference uses confidence `0.8`. Link types are `native`, `explicit`, or `inferred`.
+Every decision is written to `thread_resolution_decisions` with candidate scores and named signals. `communication_thread_participants` supports multiple people and channel identities on one thread. Disjoint known people, conflicting known projects, and applicable human rejection are hard exclusions. Unknown people need at least two shared topic terms before project/recency can support a match. Stale activity reduces scores. Workflow `correlation.person_id` remains opaque and does not participate in internal identity lookup. Confidence is an explanatory heuristic, not a calibrated probability; explicit links use `1`. Link types are `native`, `explicit`, `inferred`, or `corrected`.
 
 An inbound Ask communication emits a candidate response event. It never changes Ask status automatically.
 
@@ -1014,7 +1061,7 @@ Verified deliveries are stored immutably in `webhook_receipts`, deduplicated by 
 
 The verified SMTP-envelope recipient takes precedence during opaque reply routing because provider retrieval may canonicalise an alias back to its service mailbox. New reply capabilities use lowercase-safe hexadecimal tokens. The resolver retains a fail-closed recovery path for pre-2.2.4 mixed-case tokens only when the recorded outbound Reply-To identifies exactly one live tenant-owned route. Attachment metadata is inserted into `communication_attachments`, never into `email_messages`; attachment bytes are not fetched.
 
-Inbound thread resolution is ordered: opaque reply route, provider/RFC reply headers, explicit Ask/thread, exactly one open tenant/person/mailbox thread, otherwise unassigned. Bounce, spam, mailing-list, and automatic-reply classifications are memory-ineligible and never emit `ask.response.received`.
+Inbound email routing first preserves a human-corrected exact parent, then an opaque reply route, then RFC parent references, then a single provider conversation thread within that mailbox connection. Without such anchors, the ranked resolver either attaches or creates a thread. Receiving-mailbox validation remains independent of semantic grouping; opaque reply aliases are not recorded as human participants. Bounce, spam, mailing-list, and automatic-reply classifications are memory-ineligible and never emit `ask.response.received`.
 
 When `EMAIL_ENABLED` is false the route returns `404`. Invalid signatures return a deliberately generic `400`.
 
@@ -1230,3 +1277,16 @@ Errors are JSON unless the endpoint is a Twilio webhook rejection:
 - Native Plaud polling requires an injected authenticated adapter; external Plaud pushes are supported immediately.
 - `/v1/calls` trusts authenticated `overrides`; the legacy call route has the stricter allow-list.
 - Inbound email attachment metadata is persisted, but no protected endpoint currently lists that metadata or returns attachment content.
+
+## Account email authority
+
+GET `/v1/tenant-policy/email` returns `{mode, configuredMode, version}` for the authenticated tenant; requires `communications:read`. POST `/v1/tenant-policy/email` accepts `{mode, version}` and additionally requires `tenant:policy:manage` and `communications:write`. Mode is `draft_only` or `allow_send`; version is the opaque value from GET. Success returns the updated policy, 400 invalid input, 401 unauthenticated, 403 denied, 409 stale update, 503 unavailable storage/configuration. This is a synchronous, version-checked setting change, not a communication operation. Re-read after an uncertain save before retrying. No provider delivery occurs.
+
+
+See [Phase 02 record](implementation/P02.md) for migration 020, actor assertion capability, project safeguards and local acceptance limits.
+
+#### Phase 02 authority additions
+
+Correction and thread-edit requests with `initiator_id` additionally require `threads:actor:assert` (or `*`); otherwise HTTP 403. Without that field, the authenticated API client is the actor. Persisted actor values contain JSON `{ "client_id": "...", "user_id": "..." }`; the user is an assertion by an authorized client. Body tenant values never broaden authority.
+
+A move between known projects requires `reason_code: "wrong_project"`. Migration 020 rejects project changes when the communication/thread has Ask, run or task ownership; use the owning workflow to reconcile those records. Invalid corrections return 400 without partial movement. Offsets must fit a non-negative signed 32-bit integer. Register count is the returned page count, not the tenant total.

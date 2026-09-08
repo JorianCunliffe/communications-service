@@ -111,23 +111,26 @@ async function personForSender(db, tenantId, sender) {
     return resolveParticipantPerson({ db, tenantId, participantIdentity: sender });
 }
 
-async function existingEmailThread(db, tenantId, email) {
-    if (email.provider_conversation_id) {
-        const match = await db.from('email_messages').select('thread_id,purpose,correlation,callback_url')
-            .eq('tenant_id', tenantId).eq('provider_conversation_id', email.provider_conversation_id)
-            .order('occurred_at', { ascending: false }).limit(2);
-        if (match.error) throw new Error(match.error.message);
-        const withThread = (match.data || []).filter((row) => row.thread_id);
-        if (withThread.length === 1) return withThread[0];
-    }
-    const references = [email.in_reply_to, ...email.references_header].filter(Boolean);
+async function existingEmailThread(db, tenantId, connectionId, email) {
+    // The immediate parent is more specific than a provider conversation ID,
+    // especially after an operator splits a conversation into separate topics.
+    const references = [...new Set([email.in_reply_to, ...[...email.references_header].reverse()].filter(Boolean))];
     for (const reference of references) {
-        const match = await db.from('email_messages').select('thread_id,purpose,correlation,callback_url')
+        const match = await db.from('email_messages').select('communication_id,thread_id,purpose,correlation,callback_url')
             .eq('tenant_id', tenantId).eq('message_id', reference).limit(2);
         if (match.error) throw new Error(match.error.message);
         const withThread = (match.data || []).filter((row) => row.thread_id);
-        if (withThread.length === 1) return withThread[0];
+        if (withThread.length === 1) return { ...withThread[0], matchedBy: 'message_reference' };
         if (withThread.length > 1) return null;
+    }
+    if (email.provider_conversation_id) {
+        const match = await db.from('email_messages').select('communication_id,thread_id,purpose,correlation,callback_url')
+            .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+            .eq('provider_conversation_id', email.provider_conversation_id)
+            .order('occurred_at', { ascending: false });
+        if (match.error) throw new Error(match.error.message);
+        const withThread = (match.data || []).filter((row) => row.thread_id);
+        if (new Set(withThread.map(row => row.thread_id)).size === 1) return { ...withThread[0], matchedBy: 'provider_conversation' };
     }
     return null;
 }
@@ -164,50 +167,60 @@ export async function ingestCanonicalInboundEmail({ db, tenantId, connection, em
     }
     const personId = await personForSender(db, tenantId, email.from_addresses[0].address);
 
-    const nativeThread = replyRoute ? null : await existingEmailThread(db, tenantId, email);
-    const purpose = replyRoute?.ask_id
+    const nativeThread = await existingEmailThread(db, tenantId, connection.id, email);
+    let correctedParent = false;
+    if (nativeThread?.matchedBy === 'message_reference' && nativeThread.communication_id) {
+        const parent = await db.from('communications').select('thread_link_type')
+            .eq('tenant_id', tenantId).eq('communication_id', nativeThread.communication_id).maybeSingle();
+        if (parent.error) throw new Error(parent.error.message);
+        correctedParent = parent.data?.thread_link_type === 'corrected';
+    }
+    // A reply address still authenticates the receiving mailbox, but cannot
+    // undo a human correction of the exact message being replied to.
+    const semanticReplyRoute = correctedParent ? null : replyRoute;
+    const selectedNativeThread = semanticReplyRoute ? null : nativeThread;
+    const purpose = semanticReplyRoute?.ask_id
         ? { type: 'human_ask', ask_id: replyRoute.ask_id }
-        : nativeThread?.purpose || null;
+        : selectedNativeThread?.purpose || null;
     const correlation = {
-        ...(nativeThread?.correlation || {}),
+        ...(selectedNativeThread?.correlation || {}),
         tenant_id: tenantId,
-        ...(replyRoute?.thread_id ? { thread_id: replyRoute.thread_id } : {}),
+        ...(semanticReplyRoute?.thread_id ? { thread_id: semanticReplyRoute.thread_id } : {}),
     };
-    let semantic = await resolveCommunicationThread({
+    const communicationId = prefixedId('comm');
+    const emailParticipants = [
+        ...email.from_addresses.map((item) => ({ identity: item.address, channel: 'email', role: 'sender' })),
+        ...email.to_addresses.map((item) => ({ identity: item.address, channel: 'email', role: 'recipient' })),
+        ...email.cc_addresses.map((item) => ({ identity: item.address, channel: 'email', role: 'participant' })),
+    ].filter((item) => item.identity !== serviceIdentity.address
+        && item.identity !== replyRouteAddressFromAddresses(email.to_addresses)?.address);
+    const semantic = await resolveCommunicationThread({
         db,
         tenantId,
         participantIdentity: email.from_addresses[0].address,
         serviceIdentity: serviceIdentity.address,
         direction: 'inbound',
+        channel: 'email',
+        occurredAt: email.occurred_at,
+        subject: email.subject,
+        content: email.text_body || email.sanitized_html,
+        communicationId,
+        participants: emailParticipants,
         personId,
-        threadId: replyRoute?.thread_id || nativeThread?.thread_id || null,
+        threadId: semanticReplyRoute?.thread_id || selectedNativeThread?.thread_id || null,
         purpose,
         correlation,
-        callbackUrl: nativeThread?.callback_url || connection.default_callback_url || null,
+        callbackUrl: selectedNativeThread?.callback_url || connection.default_callback_url || null,
+        allowParticipantExpansion: Boolean(semanticReplyRoute || selectedNativeThread),
     });
-    if (!semantic.threadId) {
-        semantic = await resolveCommunicationThread({
-            db,
-            tenantId,
-            participantIdentity: email.from_addresses[0].address,
-            serviceIdentity: serviceIdentity.address,
-            direction: 'inbound',
-            personId,
-            threadId: prefixedId('thread'),
-            purpose: null,
-            correlation: { tenant_id: tenantId },
-            callbackUrl: connection.default_callback_url || null,
-        });
-    }
 
-    const communicationId = prefixedId('comm');
     const sourceId = randomUUID();
     const emailRow = await db.from('email_messages').insert({
         id: sourceId,
         tenant_id: tenantId,
         communication_id: communicationId,
         thread_id: semantic.threadId,
-        person_id: personId,
+        person_id: semantic.personId,
         purpose: semantic.purpose,
         correlation: semantic.correlation,
         callback_url: semantic.callbackUrl,
@@ -231,8 +244,8 @@ export async function ingestCanonicalInboundEmail({ db, tenantId, connection, em
         direction: 'inbound',
         source_table: 'email_messages',
         source_id: sourceId,
-        contact_id: personId,
-        person_id: personId,
+        contact_id: semantic.personId,
+        person_id: semantic.personId,
         occurred_at: email.occurred_at,
         subject: email.subject,
         body: email.text_body || email.sanitized_html,
@@ -243,9 +256,15 @@ export async function ingestCanonicalInboundEmail({ db, tenantId, connection, em
         correlation: semantic.correlation,
         thread_id: semantic.threadId,
         thread_link_type: semantic.linkType || 'native',
+        resolution: semantic.resolution,
         memory_eligible: triage.memoryEligible,
         disposition: triage.classification,
-        metadata: { provider_connection_id: connection.id, message_id: email.message_id },
+        metadata: {
+            provider_connection_id: connection.id,
+            message_id: email.message_id,
+            participant_identity: email.from_addresses[0].address,
+            participant_identities: [...new Set(emailParticipants.map((item) => item.identity))],
+        },
     });
     if (communication.error) throw new Error(communication.error.message);
 

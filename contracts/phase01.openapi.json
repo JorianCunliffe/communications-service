@@ -1,0 +1,305 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Communications Phase 01 authorization supplement",
+    "version": "1.0.0",
+    "description": "Supplement to docs/API_REFERENCE.md; transport contracts remain owned by Communications."
+  },
+  "paths": {
+    "/v1/messages": {
+      "post": {
+        "description": "Requires authenticated tenant, communications:write and sms:send (or wildcard). Email also requires tenant ceiling permission. Existing payload contract in API_REFERENCE.md.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for named API clients; validated against allowed_tenants."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted operation; inspect canonical communication for outcome"
+          },
+          "403": {
+            "description": "Request denied or configuration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request denied or configuration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/calls": {
+      "post": {
+        "description": "Requires authenticated tenant, communications:write and voice:call (or wildcard). Email also requires tenant ceiling permission. Existing payload contract in API_REFERENCE.md.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for named API clients; validated against allowed_tenants."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted operation; inspect canonical communication for outcome"
+          },
+          "403": {
+            "description": "Request denied or configuration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request denied or configuration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/emails": {
+      "post": {
+        "description": "Requires authenticated tenant, communications:write and email:send (or wildcard). Email also requires tenant ceiling permission. Existing payload contract in API_REFERENCE.md.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for named API clients; validated against allowed_tenants."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted operation; inspect canonical communication for outcome"
+          },
+          "403": {
+            "description": "Request denied or configuration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request denied or configuration unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenant-policy/email": {
+      "get": {
+        "description": "Read authenticated organization email authority.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current effective mode, configuredMode and opaque version"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient authority"
+          },
+          "409": {
+            "description": "Stale version; reload"
+          },
+          "503": {
+            "description": "Policy unavailable"
+          }
+        }
+      },
+      "post": {
+        "description": "Save mode with current opaque version. Requires organization owner/admin in HyperFlow, or tenant:policy:manage plus communications:write in Communications.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current effective mode, configuredMode and opaque version"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient authority"
+          },
+          "409": {
+            "description": "Stale version; reload"
+          },
+          "503": {
+            "description": "Policy unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "mode",
+                  "version"
+                ],
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "draft_only",
+                      "allow_send"
+                    ]
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    }
+  }
+}

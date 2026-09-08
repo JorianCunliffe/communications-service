@@ -1,0 +1,357 @@
+
+> communications-service@2.3.0 test:unit
+> node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/emailPolicy.test.js test/mailbox.test.js test/callOutcome.test.js test/tools.test.js test/eventOutbox.test.js test/hyperflowScheduler.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js
+
+▶ call business outcomes
+  ✔ provider callbacks resolve the call tenant from a unique CallSid (1.0265ms)
+  ✔ summary and legacy memory writes are gated behind verified eligibility (1.5167ms)
+  ✔ the outcome migration is portable to the deployed thread schema (2.9353ms)
+  ✔ provider failures are terminal failures without consulting a transcript (0.2673ms)
+  ✔ Twilio answering-machine and fax detection fail closed (0.199ms)
+  ✔ transcript rules reject voicemail, full mailbox, wrong number and automated systems (1.4972ms)
+  ✔ assistant speech cannot make a call successful and greetings alone fail (0.2816ms)
+  ✔ meaningful human speech is classified with strict structured output (1.073ms)
+  ✔ ambiguous completed calls are model-classified and model failures remain errors for durable retry (1.119ms)
+✔ call business outcomes (11.3ms)
+Failed to send message: Policy evaluation failed (Twilio 60250) {
+  provider: 'twilio',
+  code: 60250,
+  status: 400,
+  more_info: 'https://www.twilio.com/docs/api/errors/60250'
+}
+✔ provider callbacks carry the authenticated tenant without exposing a secret (1.5896ms)
+✔ inbound SMS emits the canonical communication.received contract (0.7227ms)
+✔ SMS callbacks resolve exactly one tenant before updating provider state (0.529ms)
+▶ outbound provider diagnostics
+  ✔ retains the Twilio error code without exposing credentials (2.4771ms)
+✔ outbound provider diagnostics (2.6496ms)
+▶ first-class communication purpose
+  ✔ human_ask requires and preserves a real ask_id (0.4179ms)
+  ✔ ask_id is not accepted as a random correlation metadata field (0.1167ms)
+  ✔ canonical identity is provider-independent (1.1414ms)
+  ✔ canonical voice records expose business outcome separately from provider delivery (0.1496ms)
+✔ first-class communication purpose (2.0656ms)
+▶ Ask-aware cross-channel threading
+  ✔ a client-supplied explicit thread ID is created and preserved (0.8757ms)
+  ✔ an inbound call inherits the open purpose created by an SMS Ask (0.458ms)
+  ✔ an inbound email joins the one open SMS thread for the same person (6.8878ms)
+  ✔ an exact channel thread wins when the person has another open channel thread (0.2003ms)
+  ✔ person-wide inference remains ambiguous when a new channel has two candidates (12.5688ms)
+  ✔ workflow person correlation stays opaque while the internal person comes from identity (0.8934ms)
+  ✔ an identity mapped to two people never falls back to raw-address inference (0.113ms)
+  ✔ an explicit thread cannot be reassigned to a different person (0.6188ms)
+  ✔ two open Asks are ambiguous and are never guessed between (0.228ms)
+  ✔ terminal threads and Ask bindings cannot be reopened (0.1987ms)
+  ✔ the same participant in another tenant is never considered for inference (0.0845ms)
+✔ Ask-aware cross-channel threading (23.4844ms)
+▶ database contract
+  ✔ migration includes universal IDs, Ask bindings, threads and durable events (17.5243ms)
+  ✔ person-aware migration backfills and indexes semantic threads safely (0.7012ms)
+✔ database contract (18.3194ms)
+▶ versioned API contract
+  ✔ purpose is parsed separately from correlation and callback URLs require https (0.291ms)
+  ✔ /v1 fails closed without credentials and never falls back to memory (478.8799ms)
+✔ versioned API contract (479.2752ms)
+Communications persistence disabled
+History for +61400000000: no previous contact in 2ms
+▶ context – turns
+  ✔ normalises role and trims content (0.7477ms)
+  ✔ an empty turn is dropped rather than stored blank (0.1355ms)
+  ✔ an unrecognised role becomes unknown (0.0723ms)
+  ✔ accepts a Date and stores an ISO string (0.8432ms)
+✔ context – turns (2.758ms)
+▶ context – merging channels
+  ✔ interleaves channels chronologically (1.0181ms)
+  ✔ oldest first — the order the conversation happened in (0.0803ms)
+  ✔ identical timestamps keep their arrival order (0.0927ms)
+  ✔ an undated turn sorts last, not first (0.1256ms)
+✔ context – merging channels (1.5514ms)
+▶ context – budgeting
+  ✔ keeps the most recent turns, not the oldest (0.3312ms)
+  ✔ a character budget also trims from the front (0.1995ms)
+  ✔ never returns nothing when there was something (0.0858ms)
+  ✔ an empty history budgets to nothing without error (0.0822ms)
+✔ context – budgeting (0.8932ms)
+▶ context – rendering
+  ✔ labels every line with its channel (33.9849ms)
+  ✔ groups by day with a relative marker (0.3952ms)
+  ✔ speaks in second person, so the model knows which side it is (0.2653ms)
+  ✔ does not mutate the caller's now (0.2764ms)
+  ✔ empty history renders as an empty string, not a stray header (0.0503ms)
+✔ context – rendering (35.1249ms)
+▶ context – channels
+  ✔ readable channels are the ones with providers (0.1059ms)
+  ✔ planned channels are named rather than omitted (0.0627ms)
+✔ context – channels (0.2391ms)
+▶ context – conversation boundaries
+  ✔ two calls in one day are two conversations (0.5648ms)
+  ✔ texts are one stream, not one conversation per message (0.2639ms)
+  ✔ a call spanning a day boundary is restated, not left dangling (0.2464ms)
+✔ context – conversation boundaries (1.1679ms)
+▶ context – for a prompt
+  ✔ wraps the record so it cannot read as instructions (0.4836ms)
+  ✔ closes with a reminder, not just a fence (0.6391ms)
+  ✔ injected instructions stay inside the fence (0.5336ms)
+  ✔ no turns renders as null, so the caller chooses what to say (0.1741ms)
+  ✔ the empty record says nothing happened, rather than saying nothing (0.1263ms)
+✔ context – for a prompt (2.2204ms)
+▶ history – the placeholder is the switch
+  ✔ a prompt without {{history}} asks for nothing (0.4215ms)
+  ✔ detected in any templated field, with or without a fallback (0.064ms)
+  ✔ combined_history is not history — the old field still stands alone (0.0406ms)
+  ✔ the placeholder becomes a forward reference, never the record (0.7434ms)
+  ✔ the notice hedges, because the record may be empty (0.2876ms)
+  ✔ the notice forbids inventing a past conversation (0.5399ms)
+  ✔ wantsHistory survives rendering, which erases the placeholder (0.1036ms)
+  ✔ a fallback lets the prompt word the notice itself (4.4631ms)
+  ✔ history and combined_history are independent (1.544ms)
+✔ history – the placeholder is the switch (9.023ms)
+▶ history – off the critical path
+  ✔ no placeholder, no lookup at all (0.4496ms)
+  ✔ nothing to claim for a call that never started one (0.0754ms)
+  ✔ a lookup without a phone number is not started (0.0775ms)
+  ✔ claiming consumes, so a second stream cannot re-send the record (2.0271ms)
+✔ history – off the critical path (4.2072ms)
+▶ recall – the query does the work
+  ✔ a spoken query loses its punctuation, like the SQL does (0.4333ms)
+  ✔ single characters are dropped, because a spelled-out name is not a query (0.0699ms)
+  ✔ a match brings its neighbours, because a hit alone is unreadable (0.1781ms)
+  ✔ a fuzzy match still returns something quotable (4.3465ms)
+  ✔ no subject returns the end of the conversation (0.2304ms)
+  ✔ excerpts are case-insensitive (0.0611ms)
+  ✔ a long transcript is clipped rather than read out whole (0.4624ms)
+  ✔ an empty body does not become an empty-looking quote (0.0707ms)
+  ✔ the tool asks for a subject, not a page of turns (11.2038ms)
+  ✔ an unusable date becomes no filter, not a wrong one (0.1704ms)
+  ✔ without a caller it errors rather than claiming no history (3.7956ms)
+✔ recall – the query does the work (21.446ms)
+▶ greeting – a one-off direction, not a standing one
+  ✔ asks for one response instead of leaving a message in the conversation (0.1181ms)
+  ✔ carries the system prompt, because response instructions replace it (0.0439ms)
+  ✔ persona comes before the direction (0.0388ms)
+  ✔ a missing greeting or prompt does not produce stray blank lines (0.0381ms)
+  ✔ the escape hatch is off by default and opt-in by name (0.3199ms)
+✔ greeting – a one-off direction, not a standing one (0.7921ms)
+▶ context – day boundaries
+  ✔ two instants on the same local day share one header (0.5428ms)
+  ✔ never labels two different days "today" (0.2514ms)
+  ✔ groups in the configured zone, not the server's (0.2534ms)
+✔ context – day boundaries (1.1333ms)
+▶ ending a call – hanging up, and not outstaying the welcome
+  ✔ the tool is offered on every call (0.2426ms)
+  ✔ the description tells it to say goodbye first (0.056ms)
+  ✔ the description warns against hanging up on a pause (0.0549ms)
+  ✔ it reports the intent rather than doing the hanging up (0.1489ms)
+  ✔ a call with no stated reason still ends (0.0619ms)
+  ✔ there is a time limit by default, and it is not the whole afternoon (0.0382ms)
+  ✔ the wrap-up warning lands before the limit, not on it (0.0295ms)
+  ✔ the warning tells it to close, without narrating a countdown (0.1075ms)
+✔ ending a call – hanging up, and not outstaying the welcome (0.8809ms)
+▶ Communications v2 shared contract fixtures
+  ✔ defines the canonical inbound and terminal fixture set (1.4119ms)
+  ✔ keeps every fixture tenant scoped and terminal calls fully correlated (0.1631ms)
+  ✔ marks voicemail as unsuccessful and memory-ineligible (0.0805ms)
+✔ Communications v2 shared contract fixtures (2.7243ms)
+▶ persistence provider selection
+  ✔ explicit selection wins and Replit aliases select PostgreSQL (0.5737ms)
+  ✔ preserves the existing Supabase default before auto-detecting DATABASE_URL (0.0901ms)
+  ✔ rejects an unknown provider instead of silently using the wrong store (0.2415ms)
+✔ persistence provider selection (1.6944ms)
+▶ blank PostgreSQL database contract
+  ✔ defines every provider table required before feature migrations run (0.3462ms)
+  ✔ supports contact upsert, transcript-only recordings and leased claims (0.1603ms)
+✔ blank PostgreSQL database contract (0.638ms)
+▶ PostgreSQL compatibility adapter
+  ✔ builds parameterised select, filter, order and pagination queries (1.7202ms)
+  ✔ supports exact counts without returning rows for a head query (0.1556ms)
+  ✔ supports the allow-listed JSON text filter used by Ask lookup (0.1384ms)
+  ✔ maps supported embedded relations to PostgreSQL JSON (0.2339ms)
+  ✔ honours ignoreDuplicates with ON CONFLICT DO NOTHING (0.3888ms)
+  ✔ serialises JSON arrays without breaking native PostgreSQL arrays (0.192ms)
+  ✔ serialises JSON containment filters used by legacy email reply lookup (0.1531ms)
+  ✔ unwraps scalar RPCs and preserves set-returning RPC rows (0.2738ms)
+✔ PostgreSQL compatibility adapter (3.552ms)
+▶ documentation stays aligned with the implemented HTTP surface
+  ✔ the README links to the checked-in API reference (1.4971ms)
+  ✔ the API reference names every implemented HTTP route (1.3495ms)
+  ✔ the README documents the core runtime configuration (0.137ms)
+  ✔ the test console supplies an idempotency key for outbound actions (1.2671ms)
+  ✔ the production deployment applies migrations before starting the API (0.9812ms)
+  ✔ the Replit runtime satisfies production dependency requirements (0.7694ms)
+✔ documentation stays aligned with the implemented HTTP surface (6.9956ms)
+▶ tenant boundary
+  ✔ reads are filtered and writes are stamped structurally (2.0108ms)
+  ✔ tenant-aware RPCs receive the authenticated tenant (0.1599ms)
+✔ tenant boundary (2.9505ms)
+▶ inbound email routing
+  ✔ keeps the verified SMTP envelope recipient ahead of the retrieve response (0.228ms)
+  ✔ stores attachments only in the attachment table (0.1213ms)
+  ✔ requeues the exact routing failures caused by the old recipient precedence (0.9917ms)
+  ✔ requeues legacy case-folded reply routes after the resolver fix (1.2922ms)
+  ✔ requeues the exact attachment-column failures exposed by reply recovery (9.9135ms)
+✔ inbound email routing (12.8693ms)
+▶ email adapter contract
+  ✔ preserves exact JSON bytes for webhook signature verification (113.2833ms)
+  ✔ accepts an exact signed provider body and rejects a changed body (2.1061ms)
+  ✔ normalises addresses and removes active HTML (2.0334ms)
+  ✔ requires a deliverable outbound envelope (0.142ms)
+  ✔ bounces and automatic replies cannot feed Ask completion or memory (0.4071ms)
+  ✔ opaque reply tokens are extracted only from the dedicated route shape (0.1464ms)
+  ✔ new opaque reply tokens survive email address case folding (0.2189ms)
+  ✔ legacy case-folded tokens recover only through one recorded outbound route (0.2832ms)
+✔ email adapter contract (118.9645ms)
+▶ API client credentials
+  ✔ stores a salted one-way scrypt verifier (91.7411ms)
+✔ API client credentials (91.879ms)
+▶ migration contract
+  ✔ adds first-class tenants, provider connections, receipts, jobs and email records (2.0235ms)
+✔ migration contract (2.1118ms)
+Communications persistence disabled
+✔ shared transport policy restricts CEO and preserves other authorized tenants (2.3965ms)
+✔ malformed policy and missing tenant cannot reach the provider (0.8787ms)
+✔ provider boundary blocks configured tenant before adapter lookup (0.3378ms)
+✔ another tenant still reaches its provider when explicitly permitted (0.7213ms)
+✔ HTTP legacy wildcard cannot override tenant ceiling or spoof tenant via body (78.6267ms)
+✔ scoped client grants remain channel-specific and cannot cross tenant (91.0984ms)
+✔ account policy defaults safely, persists both modes and rejects stale writes (0.903ms)
+✔ saved restriction wins over operator grant and operator ceiling wins over saved grant (0.4239ms)
+✔ policy HTTP routes authenticate and enforce tenant binding (7.5022ms)
+✔ concurrent policy updates cannot overwrite each other (0.3953ms)
+✔ ordinary scoped service client cannot change email authority (96.7201ms)
+▶ tenant-safe terminal event delivery
+  ✔ deduplicates outbound events with the tenant-scoped unique key (1.3537ms)
+  ✔ requeues terminal outcomes stranded by the obsolete conflict target (0.9932ms)
+  ✔ uses a non-partial composite index PostgreSQL can infer for ON CONFLICT (0.8412ms)
+✔ tenant-safe terminal event delivery (4.0035ms)
+✔ derives the tick endpoint while preserving the Vercel bypass parameter (1.6087ms)
+✔ signs the empty scheduler request body with the shared V2 HMAC contract (5.5085ms)
+✔ posts one signed empty-body tick and does not expose the secret in the URL (3.2413ms)
+✔ stays disabled when durable HyperFlow event configuration is absent (0.2173ms)
+▶ connected mailbox credentials and OAuth state
+  ✔ encrypts OAuth material with tenant and connection associated data (3.9937ms)
+  ✔ signs a short-lived tenant and initiator-bound OAuth state (0.9503ms)
+  ✔ rejects a low-entropy OAuth state secret (0.3303ms)
+  ✔ requests offline Gmail read and compose access with the exact callback (0.7745ms)
+  ✔ binds Outlook OAuth state and requests delegated offline Mail.ReadWrite access (0.6248ms)
+✔ connected mailbox credentials and OAuth state (7.5465ms)
+▶ Gmail adapter contract
+  ✔ normalizes a full Gmail MIME message without trusting provider HTML (3.0338ms)
+  ✔ uses the connected mailbox as the recipient for Gmail inbox messages without a To header (0.3195ms)
+  ✔ exposes a distinct error type for per-message Gmail normalization failures (0.2052ms)
+  ✔ classifies a disappeared Gmail message as skippable provider churn (0.2586ms)
+  ✔ creates a Gmail draft MIME payload but exposes no send operation (0.5282ms)
+✔ Gmail adapter contract (4.6408ms)
+▶ Outlook adapter contract
+  ✔ follows Graph delta pagination, de-duplicates messages and persists the opaque delta cursor (0.2826ms)
+  ✔ creates reply drafts with createReply followed by an update and never calls send (0.2657ms)
+  ✔ creates standalone Outlook drafts under messages and never sends them (0.1724ms)
+  ✔ normalizes Graph messages into the canonical email contract (0.4053ms)
+  ✔ uses the connected Outlook mailbox as a Bcc fallback (0.1767ms)
+  ✔ exposes a provider-specific Outlook normalization error (0.1471ms)
+✔ Outlook adapter contract (1.6062ms)
+▶ connected mailbox migration
+  ✔ keeps credentials, state, drafts and audit tenant-owned and backend-only (1.1789ms)
+  ✔ adds a provider-neutral cursor without removing Gmail history state (0.5944ms)
+✔ connected mailbox migration (1.8609ms)
+▶ calendar memory foundation
+  ✔ normalises canonical dates and rejects invalid ranges (3.0861ms)
+  ✔ ingestion is idempotent, resolves exact identities, and retains unknown participants (1.1678ms)
+  ✔ ambiguous nearby events remain candidates and are never auto-linked (6.6862ms)
+✔ calendar memory foundation (12.3948ms)
+▶ Plaud uses the existing recording pipeline contract
+  ✔ normalises correlation without inventing a Plaud API (0.1647ms)
+  ✔ provider requires an injected native adapter (0.2419ms)
+  ✔ existing queue deduplicates, skips transcription for supplied text, and projects recording context (2.6242ms)
+✔ Plaud uses the existing recording pipeline contract (3.2354ms)
+▶ commitment extraction
+  ✔ extracts an obvious promise and due weekday conservatively (7.9285ms)
+  ✔ does not manufacture a commitment from an ordinary statement (0.9531ms)
+  ✔ does not turn requests or assistant questions into commitments (0.1474ms)
+  ✔ does not store a counterparty question as a commitment (0.3841ms)
+  ✔ final re-enrichment removes obsolete open commitments but preserves completed work (1.414ms)
+  ✔ rejects model commitments attributed to assistant speech or user preferences (0.1464ms)
+  ✔ stores only a verified counterparty promise from an outbound call (0.5954ms)
+  ✔ re-enrichment preserves a human-completed commitment (0.4313ms)
+✔ commitment extraction (12.4214ms)
+▶ structured asynchronous enrichment
+  ✔ uses strict Responses API output with evidence IDs (0.6519ms)
+✔ structured asynchronous enrichment (0.7024ms)
+▶ thread-aware retrieval
+  ✔ labels direct matches and thread context separately and omits unrelated threads (6.2498ms)
+  ✔ ranking explains person, project, thread and recency boosts (0.5139ms)
+✔ thread-aware retrieval (7.1202ms)
+▶ memory read models
+  ✔ thread memory includes enrichment and provenance without requiring it (0.6349ms)
+  ✔ person memory assembles active work, evidence and upcoming events (0.8088ms)
+  ✔ memory read models exclude audit-only failed calls (0.2148ms)
+  ✔ project and event views assemble scoped context (0.4388ms)
+✔ memory read models (2.2343ms)
+▶ loose ends
+  ✔ returns open commitments and unresolved Asks, but not completed commitments (0.2891ms)
+✔ loose ends (0.3387ms)
+▶ fact lifecycle
+  ✔ a new value supersedes rather than deletes the old provenance (0.4514ms)
+  ✔ rejects facts cited only to assistant or missing evidence (0.0909ms)
+✔ fact lifecycle (0.665ms)
+▶ migration contract
+  ✔ adds calendar, durable enrichment, provenance, lifecycle and recording correlation (9.2025ms)
+✔ migration contract (9.2595ms)
+✔ Twilio signatures default to enforce when credentials exist (1.1134ms)
+✔ safe fetch validates redirect destinations before following them (1.1592ms)
+✔ safe lookup returns every validated address when Undici requests all addresses (3.3026ms)
+✔ safe lookup preserves the single-address callback contract (0.1722ms)
+✔ outbox diagnostics retain the native fetch failure cause (0.1169ms)
+✔ workflow project IDs stay external correlation (0.1138ms)
+✔ HyperFlow voice context disables unscoped history and tools (0.2241ms)
+✔ Vercel protection bypass is scoped to the configured HyperFlow origin (0.2336ms)
+Ignoring unknown tool "no_such_tool"
+▶ end_call is offered on every call
+  ✔ the default empty configuration still advertises end_call (2.8326ms)
+  ✔ missing and malformed configured tool lists remain safe (2.4138ms)
+  ✔ configured tools preserve order without duplicating end_call (0.2353ms)
+  ✔ unknown tools are dropped without removing end_call (0.5534ms)
+  ✔ session.update carries the default tool to the Realtime model (0.2656ms)
+  ✔ the explicit deployment kill switch restores opt-in behavior (0.3018ms)
+  ✔ the always-on list has one canonical definition (0.1304ms)
+✔ end_call is offered on every call (8.649ms)
+▶ transcripts – segments
+  ✔ keeps text, role and timing (0.6816ms)
+  ✔ drops an empty or whitespace-only turn (0.0871ms)
+  ✔ an unrecognised role becomes unknown rather than being dropped (0.0809ms)
+  ✔ trims text and rejects a negative or non-finite start (2.7936ms)
+  ✔ a numeric string is not a number (0.4643ms)
+✔ transcripts – segments (5.0665ms)
+▶ transcripts – ordering
+  ✔ sorts by start time (1.7435ms)
+  ✔ equal start times keep arrival order (0.1469ms)
+  ✔ an untimed segment stays where it arrived (0.1438ms)
+  ✔ a fully untimed transcript keeps its original order (0.1068ms)
+✔ transcripts – ordering (2.3944ms)
+▶ transcripts – assembly
+  ✔ builds a versioned transcript and orders its segments (0.7191ms)
+  ✔ an unknown channel falls back to other rather than being kept (0.0907ms)
+  ✔ empty and malformed segments are dropped during assembly (0.0592ms)
+  ✔ counts turns that happened but produced no text (0.1936ms)
+  ✔ a clean transcript reports nothing lost (0.0943ms)
+  ✔ isEmpty distinguishes a silent call from a real one (0.0947ms)
+✔ transcripts – assembly (1.4296ms)
+▶ transcripts – flattening
+  ✔ renders speaker-labelled lines (0.1176ms)
+  ✔ falls back to the role when there is no speaker label (0.068ms)
+  ✔ an empty transcript flattens to an empty string, not "undefined" (0.0482ms)
+✔ transcripts – flattening (0.3109ms)
+▶ transcripts – external input
+  ✔ rejects anything that is not this shape (0.2445ms)
+  ✔ names the offending segment so a bad payload can be fixed (0.1017ms)
+  ✔ normalises second-based timings into milliseconds (0.1294ms)
+  ✔ accepts content as an alias for text (0.0666ms)
+  ✔ keeps the source speaker label alongside the normalised role (0.1255ms)
+✔ transcripts – external input (0.7897ms)
+ℹ tests 237
+ℹ suites 49
+ℹ pass 237
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1146.9135

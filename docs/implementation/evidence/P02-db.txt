@@ -1,0 +1,37 @@
+
+> communications-service@2.4.0 test:db
+> node --test --test-reporter=spec test/threadDatabase.test.js
+
+▶ PostgreSQL-backed thread story
+  ✔ applies the entire migration sequence and normalizes identities on real inserts (1.9571ms)
+Communications persistence disabled
+  ✔ email, SMS, voice and recording join one project thread and persist scores and group participants (94.765ms)
+  ✔ another project and a stale topic create separate threads (46.633ms)
+  ✔ ordinary outbound replies can join, while explicit IDs and new Asks never fall through to inference (47.6927ms)
+  ✔ an atomic correction moves only the selected row, repairs identity and trains the next match (45.3863ms)
+  ✔ thread detail edits persist without resolving an Ask or leaking across tenants (31.098ms)
+  ✔ moving an inferred Ask reply cannot rebind the Ask or move its outbound request (26.0561ms)
+  ✔ SMS source corrections survive later provider updates without changing sibling messages (26.0613ms)
+  ✔ recording projection preserves its correction after transcript reprocessing (23.9029ms)
+  ✔ recording workflow project changes are rejected while ordinary edits preserve correlation (25.0418ms)
+  ✔ an unknown participant is not attributed to the thread owner and project alone is not enough (27.3691ms)
+  ✔ moving a group communication carries every participant and removes stale participant evidence (36.0071ms)
+  ✔ voice source correction survives later transcript and provider status updates (26.3408ms)
+  ✔ native email replies follow corrected parents, exclude reply aliases, and scope provider IDs to a mailbox connection (50.255ms)
+  ✔ a corrected outbound email keeps its own reply address without moving sibling routes or inheriting another Ask (45.6546ms)
+  ✔ register pages threads and older communications without hiding quiet threads (28.8686ms)
+  ✔ a live call project switch moves only the call and preserves the other project thread (45.2281ms)
+  ✔ simultaneous communications in a new conversation do not create competing threads (28.7057ms)
+  ✔ more than 100 threads page without gaps and deep history remains accessible (14.418ms)
+  ✔ cross-project moves require an explicit reason and cannot move workflow ownership (48.8431ms)
+  ✔ audit attributes the authenticated client and rejects untrusted user assertions (109.3342ms)
+  ✔ failed resolution rolls back thread, participant and decision writes (6.4454ms)
+✔ PostgreSQL-backed thread story (1902.665ms)
+ℹ tests 22
+ℹ suites 1
+ℹ pass 22
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2358.6946

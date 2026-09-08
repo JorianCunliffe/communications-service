@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Backend tenant email authority",
+  "type": "object",
+  "additionalProperties": {
+    "enum": [
+      "draft_only",
+      "allow_send"
+    ]
+  }
+}

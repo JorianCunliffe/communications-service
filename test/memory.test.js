@@ -61,7 +61,7 @@ describe('calendar memory foundation', () => {
 
     test('ingestion is idempotent, resolves exact identities, and retains unknown participants', async () => {
         const db = new FakeDb({
-            communication_identities: [{ person_id: 'person_jim', type: 'email', value: 'jim@example.com' }],
+            communication_identities: [{ person_id: 'person_jim', type: 'email', value: 'jim@example.com', normalized_value: 'jim@example.com' }],
             calendar_events: [], calendar_event_participants: [],
         });
         const input = { provider: 'google', providerId: 'event_1', title: 'Smith Street', startsAt: '2026-08-13T00:30:00Z', participants: [

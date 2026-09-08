@@ -47,6 +47,7 @@ export async function enqueueRecording(recording) {
 
     const row = {
         tenant_id: tenantId,
+        ...(recording.communicationId ? { communication_id: recording.communicationId } : {}),
         source: recording.source,
         external_id: recording.externalId ?? null,
         call_id: recording.callId ?? null,
@@ -62,6 +63,8 @@ export async function enqueueRecording(recording) {
         calendar_event_id: recording.calendarEventId ?? null,
         project_id: recording.projectId ?? null,
         communication_thread_id: recording.threadId ?? null,
+        thread_link_type: recording.threadLinkType ?? null,
+        resolution: recording.resolution ?? null,
         title: recording.title ?? null,
         meeting_type: recording.meetingType ?? null,
         metadata: recording.metadata ?? {},

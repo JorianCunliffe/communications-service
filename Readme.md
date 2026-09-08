@@ -1,6 +1,8 @@
 # Communications Service
 
-Current contract release: `2.3.0`.
+Phase 01 adds an organization-wide email option: Draft only (default) or Allow authorized sending. Owners/admins manage it in HyperFlow Settings; Communications stores and enforces it. SMS/voice permissions remain separate. See [boundaries and rollout](docs/architecture/BOUNDARIES.md).
+
+Current contract release: `2.4.0`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
@@ -8,13 +10,14 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `018`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `020`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
+- [Threading model, correction workflow and verification](docs/THREADING.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/017_provider_neutral_mailbox_cursor.sql)
+- [Latest database migration](migrations/019_ranked_thread_resolution.sql)
 
 ## Architecture
 
@@ -87,11 +90,11 @@ For each communication, the service uses this order:
 
 1. Explicit `thread_id` or `correlation.thread_id`.
 2. Existing `ask_bindings` entry for `purpose.ask_id`.
-3. For inbound communication only, exactly one open thread for the participant's exact channel identity.
-4. If there is no exact-channel candidate and the identity resolves to one tenant-owned person, exactly one open thread across that person's verified identities.
-5. Otherwise, no inferred thread.
+3. For inbound communication, rank open candidates using human corrections, exact identity, person overlap, project, channel continuity, subject/topic overlap, and elapsed time.
+4. Attach only when the best candidate clears both the confidence threshold and the margin over the runner-up.
+5. Otherwise create a new temporal conversation thread.
 
-This preserves an existing channel conversation before widening to a person's other channels, so multi-channel delivery does not make an SMS or voice reply lose its native thread. It also permits a new verified email identity to continue the person's sole SMS or voice thread. If an identity maps ambiguously, or person-wide inference finds two open threads, the service does not guess. The sender must provide an explicit thread or Ask ID. An explicit thread cannot be reassigned to a different Communications person.
+Every automatic decision stores its candidates, scores, named signals, confidence, and margin. Known person conflicts and prior human rejections are hard exclusions. Recent cross-channel communication for the same person/project can converge, while stale, weak, or closely tied candidates start a new thread. `communication_thread_participants` supports multiple people and identities per thread, including future meeting/transcript channels. The thread register and correction endpoints let an operator move a communication with a short reason; that feedback blocks the rejected match and boosts the corrected destination in later decisions.
 
 ## What is implemented
 
@@ -164,6 +167,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 17. `migrations/016_connected_mailboxes.sql`
 18. `migrations/017_provider_neutral_mailbox_cursor.sql`
 19. `migrations/018_person_aware_threads.sql`
+20. `migrations/019_ranked_thread_resolution.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -183,7 +187,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` backfills every existing row to the explicitly configured `LEGACY_TENANT_ID` and replaces provider/idempotency uniqueness with tenant-scoped keys. Migration `010` adds provider connections, immutable webhook receipts, durable normalization jobs, email records, attachments, and opaque reply routes. Migrations `011` and `012` recover missing terminal call events and install the inferable tenant-scoped event dedupe index. Migrations `013`-`015` requeue inbound email jobs affected by recipient precedence, legacy mixed-case reply tokens, or the obsolete attachment-column insert. Migration `016` adds encrypted connected-mailbox credentials, OAuth state, sync cursors/leases, Gmail draft receipts and mailbox audit records. Migration `017` adds the provider-neutral mailbox cursor used for Gmail history IDs and opaque Microsoft Graph delta links while retaining the Gmail column during migration. Migration `018` adds a tenant-owned person link to semantic threads and conservatively backfills only unambiguous existing relationships.
+Migration `003` adds the canonical API contract. Migrations `004`-`006` add calendar and recording relationships, memory enrichment, provenance, and search. Migration `007` adds outbound idempotency, terminal Ask protection, worker leases, and atomic writes. Migration `008` separates provider completion from verified human success. Migration `009` establishes tenant-safe keys. Migrations `010`-`017` add and harden email, event, and connected-mailbox pipelines. Migration `018` adds a tenant-owned person link to semantic threads. Migration `019` adds ranked decisions, multi-person thread participants, project/channel/topic register fields, durable correction feedback, and atomic rethreading.
 
 If `PERSISTENCE_PROVIDER` is omitted, the service keeps backward compatibility: enabled Supabase is preferred, otherwise `DATABASE_URL` selects PostgreSQL. Set the provider explicitly in production. [Replit App Storage](https://docs.replit.com/references/data-and-storage/object-storage) is not required by the current recording flow because media is fetched from its source for transcription while metadata and transcripts live in PostgreSQL; use object storage only if permanent raw-audio archiving is added.
 
@@ -196,6 +200,9 @@ Useful read models:
 ```text
 POST /v1/context/search
 GET  /v1/threads/:threadId
+GET  /v1/thread-register
+GET  /v1/communications/:communicationId/thread-candidates
+POST /v1/communications/:communicationId/rethread
 GET  /v1/loose-ends
 GET  /v1/calendar/events/:eventId/context
 GET  /v1/contacts/:personId/memory
@@ -497,7 +504,10 @@ No destination means no outbox row is created.
 | `recordings` | Durable recording/transcription queue |
 | `communications` | Canonical provider-independent projection and search surface |
 | `communication_threads` | Person-aware cross-channel thread state, purpose, correlation, and callback destination |
-| `communication_thread_members` | Explicit/native/inferred communication membership |
+| `communication_thread_members` | Explicit/native/inferred/corrected communication membership |
+| `communication_thread_participants` | Multi-person and multi-identity membership across channels |
+| `thread_resolution_decisions` | Ranked candidates, signals, confidence, margin, and selected action |
+| `thread_resolution_feedback` | Editable human corrections used by future matching |
 | `ask_bindings` | External Ask-to-thread binding and resolution state |
 | `outbound_events` | Durable webhook payload, retry, and delivery state |
 | `projects` / `project_contacts` | Optional project association for contextual retrieval |
@@ -546,6 +556,14 @@ Unit tests:
 npm.cmd run test:unit
 ```
 
+The database-backed threading story applies every migration to an isolated embedded PostgreSQL database, then exercises authenticated HTTP routes and actual provider-table projections. It needs no production credentials and sends no messages:
+
+```powershell
+npm.cmd run test:db
+```
+
+This covers multi-person/project grouping, score explanations, human corrections and identity repair, voice/SMS/recording reprocessing, corrected email replies, paging, project switching, concurrent requests, and resolution rollback. It does not prove that the production migration or a live provider delivery succeeded.
+
 The full suite expects a running server and includes live OpenAI Realtime connectivity checks:
 
 ```powershell
@@ -592,3 +610,8 @@ The purpose/thread suite verifies:
 ## License
 
 See [LICENSE](LICENSE).
+
+
+### Phase 02 correction boundary
+
+Migration `020_thread_correction_boundaries.sql` must follow 019. Cross-project correction requires `reason_code: wrong_project`; project changes on Ask/run/task-bound communications are rejected. `initiator_id` on correction/edit requires `threads:actor:assert` or wildcard. The audit actor is JSON text containing authenticated `client_id` and service-attested `user_id`. See [Phase 02 evidence and rollout](docs/implementation/P02.md).

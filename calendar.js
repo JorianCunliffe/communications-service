@@ -1,4 +1,5 @@
 import { normalisePushedCalendarEvent } from './calendarProviders.js';
+import { normaliseThreadIdentity } from './communicationModel.js';
 
 const CANDIDATE_WINDOW_MINUTES = Math.max(1, Number(process.env.CALENDAR_CANDIDATE_WINDOW_MINUTES) || 120);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -47,7 +48,7 @@ export async function resolveExactIdentity(db, participant) {
     if (participant.contactId) return participant.contactId;
     if (!participant.identityType || !participant.identityValue) return null;
     const { data, error } = await db.from('communication_identities').select('person_id')
-        .eq('type', participant.identityType).eq('value', participant.identityValue).limit(2);
+        .eq('type', participant.identityType).eq('normalized_value', normaliseThreadIdentity(participant.identityValue)).limit(2);
     if (error) throw new Error(`Identity lookup: ${error.message}`);
     const people = [...new Set((data || []).map((row) => row.person_id).filter(Boolean))];
     return people.length === 1 ? people[0] : null;
