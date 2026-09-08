@@ -1,4 +1,4 @@
-# Application boundaries and authority — Phase 01
+# Application boundaries and authority â€” Phase 01
 
 Contract version: email authority 1.1. Memory remains in Communications Service.
 
