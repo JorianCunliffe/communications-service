@@ -18,6 +18,11 @@ function iso(value, name, required = false) {
 
 export function normaliseCalendarEvent(raw) {
     const event = normalisePushedCalendarEvent(raw);
+    if (event.metadata?.observed_at) {
+        const observed = iso(event.metadata.observed_at, 'observed_at', true);
+        if (Date.parse(observed) > Date.now() + 300000) throw new Error('observed_at cannot be more than five minutes in the future');
+        event.metadata = { ...event.metadata, observed_at: observed };
+    }
     const startsAt = iso(event.startsAt, 'starts_at', true);
     const endsAt = iso(event.endsAt, 'ends_at');
     if (endsAt && endsAt < startsAt) throw new Error('"ends_at" cannot be before "starts_at"');
@@ -160,7 +165,7 @@ export async function calendarCandidates(db, { contactId, occurredAt, windowMinu
         .lte('starts_at', new Date(at.getTime() + windowMs).toISOString())
         .order('starts_at', { ascending: false }).limit(100);
     if (events.error) throw new Error(`Calendar candidates: ${events.error.message}`);
-    return (events.data || []).filter((event) => new Date(event.ends_at || event.starts_at).getTime() >= lower).map((event) => {
+    return (events.data || []).filter((event) => event.metadata?.status !== 'cancelled' && new Date(event.ends_at || event.starts_at).getTime() >= lower).map((event) => {
         const starts = new Date(event.starts_at).getTime();
         const ends = new Date(event.ends_at || event.starts_at).getTime();
         const distance = at.getTime() < starts ? starts - at.getTime() : at.getTime() > ends ? at.getTime() - ends : 0;

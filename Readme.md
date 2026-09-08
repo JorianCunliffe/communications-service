@@ -10,14 +10,14 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `020`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `023`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Threading model, correction workflow and verification](docs/THREADING.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/019_ranked_thread_resolution.sql)
+- [Latest database migration](migrations/023_calendar_observation_order.sql)
 
 ## Architecture
 
@@ -168,6 +168,10 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 18. `migrations/017_provider_neutral_mailbox_cursor.sql`
 19. `migrations/018_person_aware_threads.sql`
 20. `migrations/019_ranked_thread_resolution.sql`
+21. `migrations/020_thread_correction_boundaries.sql`
+22. `migrations/021_identity_normalized_publish_compatibility.sql`
+23. `migrations/022_transcribed_meetings.sql`
+24. `migrations/023_calendar_observation_order.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 

@@ -57,7 +57,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `020`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `023`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
 
 ### Twilio webhooks
 
@@ -1306,3 +1306,9 @@ The result includes `id`, `version`, `duplicate` and topic receipts. Reusing the
 `GET /v1/meetings?offset=0` lists at most 50 non-private manifests and an optional next offset. `GET /v1/meetings/:id` returns one manifest plus revision history. `GET /v1/meetings/by-source?source=...&externalId=...` retrieves the same record by provider identity. Standard communications read/write capabilities and tenant authentication apply. Private reads/writes require `memory:private`; `initiator_id` requires `threads:actor:assert`. The authenticated client identity remains in the revision actor. Optional service-supplied `allowedProjectIds` narrows both prior and new topic scope atomically.
 
 Source instructions are data only. Ingestion does not send messages, grant authority, accept commitments, download audio or invoke transcription. Extracted promises remain evidence for HyperFlow review.
+
+### Calendar observations (Phase 08)
+
+Apply migration `023_calendar_observation_order.sql` before deploying this release. Calendar provider access, proposals, approvals and booking stay in HyperFlow. Communications accepts normalized observations and enriches exact participant identities; it does not become a booking engine.
+
+Supply `metadata.observed_at` as the provider-read timestamp, `metadata.external_project_id` for the HyperFlow project, and `metadata.status` (`confirmed` or `cancelled`). Event and participant snapshots update atomically. An older or equal observation returns the current event with `stale: true`; it cannot resurrect a cancelled event or restore removed participants. Once an event has a timestamped observation, an unversioned replacement is rejected. Timestamps more than five minutes in the future are rejected. Cancelled events are excluded from automatic calendar candidates. Contact, project and thread references must belong to the authenticated tenant.

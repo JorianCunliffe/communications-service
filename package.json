@@ -1,6 +1,6 @@
 {
   "name": "communications-service",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Purpose-aware, channel-independent communications API for voice, SMS and future providers",
   "main": "index.js",
   "scripts": {
@@ -9,7 +9,7 @@
     "start:production": "node scripts/migrate.js && node index.js",
     "test": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/emailPolicy.test.js test/mailbox.test.js test/callOutcome.test.js test/tools.test.js test/eventOutbox.test.js test/hyperflowScheduler.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js test/suite.test.js",
     "test:unit": "node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/emailPolicy.test.js test/mailbox.test.js test/callOutcome.test.js test/tools.test.js test/eventOutbox.test.js test/hyperflowScheduler.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js test/meetings.test.js",
-    "test:db": "node --test --test-reporter=spec test/threadDatabase.test.js test/memoryDatabase.test.js test/meetingsDatabase.test.js"
+    "test:db": "node --test --test-reporter=spec test/threadDatabase.test.js test/memoryDatabase.test.js test/meetingsDatabase.test.js test/calendarObservationsDatabase.test.js"
   },
   "keywords": [],
   "author": "",
