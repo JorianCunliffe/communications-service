@@ -513,10 +513,8 @@ describe('context – day boundaries', () => {
 });
 
 describe('ending a call – hanging up, and not outstaying the welcome', () => {
-    test('the tool is opt-in like every other one', () => {
-        // A call that does not list it never sees it, so no existing call can
-        // start hanging up on people because this shipped.
-        assert.deepEqual(buildToolDefinitions([]), []);
+    test('the tool is offered on every call', () => {
+        assert.deepEqual(buildToolDefinitions([]).map((tool) => tool.name), ['end_call']);
         const [definition] = buildToolDefinitions(['end_call']);
         assert.equal(definition.name, 'end_call');
         assert.deepEqual(definition.parameters.required, [], 'a reason is optional; hanging up must not fail for want of one');

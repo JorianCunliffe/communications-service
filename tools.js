@@ -300,15 +300,31 @@ function isAvailable(name) {
     return Boolean(process.env[urlEnvName(name)]);
 }
 
+// Tools every call is offered, whatever its per-contact configuration says.
+// A caller and the assistant need a reliable way to finish the live call;
+// leaving end_call opt-in meant the default empty tool list could only wait
+// for the caller or the hard time limit to disconnect.
+export const ALWAYS_ON_TOOLS = ['end_call'];
+
+const alwaysOnTools = () =>
+    /^(false|0|off|no)$/i.test(String(process.env.ALWAYS_OFFER_END_CALL ?? '').trim())
+        ? []
+        : ALWAYS_ON_TOOLS;
+
 // The tool definitions to advertise in session.update, in the API's expected
 // shape: type/name/description/parameters at the top level of each entry.
 // Unknown or unavailable names are dropped with a warning — a typo in the
 // database should cost one tool, not the call.
 export function buildToolDefinitions(names) {
-    if (!Array.isArray(names) || names.length === 0) return [];
+    const configured = Array.isArray(names) ? names : [];
+    const requested = [
+        ...configured,
+        ...alwaysOnTools().filter((name) => !configured.includes(name)),
+    ];
+    if (requested.length === 0) return [];
 
     const definitions = [];
-    for (const name of names) {
+    for (const name of requested) {
         if (!TOOLS[name]) {
             console.warn(`Ignoring unknown tool "${name}"`);
             continue;
