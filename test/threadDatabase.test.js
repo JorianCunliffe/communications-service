@@ -72,7 +72,7 @@ after(async () => {
 
 describe('PostgreSQL-backed thread story', () => {
     test('applies the entire migration sequence and normalizes identities on real inserts', async () => {
-        assert.equal(migrationCount, 24);
+        assert.equal(migrationCount, 25);
         const identities = (await sql.query('select normalized_value from communication_identities where person_id=$1', [alex])).rows;
         assert.ok(identities.some(row => row.normalized_value === 'alex@example.com'));
         assert.equal((await sql.query("select normalize_communication_identity('tel:+61 (400) 000-111') value")).rows[0].value, '+61400000111');

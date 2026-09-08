@@ -84,7 +84,7 @@ const BUILD = (() => {
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',
-        'tenantContext.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
+        'tenantContext.js', 'tenantOperations.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
         'emailDelivery.js', 'emailTriage.js', 'emailReplyRoutes.js',
         'console.html', 'home.html', 'package.json',
     ];
