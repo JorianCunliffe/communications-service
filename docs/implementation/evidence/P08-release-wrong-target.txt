@@ -1,0 +1,736 @@
+
+> communications-service@2.6.0 test
+> node --test --test-reporter=spec test/database.test.js test/transcripts.test.js test/context.test.js test/communications.test.js test/email.test.js test/emailPolicy.test.js test/mailbox.test.js test/callOutcome.test.js test/tools.test.js test/eventOutbox.test.js test/hyperflowScheduler.test.js test/memory.test.js test/security.test.js test/contractFixtures.test.js test/documentation.test.js test/suite.test.js
+
+▶ call business outcomes
+  ✔ provider callbacks resolve the call tenant from a unique CallSid (1.0311ms)
+  ✔ summary and legacy memory writes are gated behind verified eligibility (1.2137ms)
+  ✔ the outcome migration is portable to the deployed thread schema (0.5194ms)
+  ✔ provider failures are terminal failures without consulting a transcript (0.4113ms)
+  ✔ Twilio answering-machine and fax detection fail closed (0.1428ms)
+  ✔ transcript rules reject voicemail, full mailbox, wrong number and automated systems (0.9367ms)
+  ✔ assistant speech cannot make a call successful and greetings alone fail (0.2774ms)
+  ✔ meaningful human speech is classified with strict structured output (0.7732ms)
+  ✔ ambiguous completed calls are model-classified and model failures remain errors for durable retry (0.6775ms)
+✔ call business outcomes (7.0755ms)
+Failed to send message: Policy evaluation failed (Twilio 60250) {
+  provider: 'twilio',
+  code: 60250,
+  status: 400,
+  more_info: 'https://www.twilio.com/docs/api/errors/60250'
+}
+✔ provider callbacks carry the authenticated tenant without exposing a secret (1.4479ms)
+✔ inbound SMS emits the canonical communication.received contract (0.5682ms)
+✔ SMS callbacks resolve exactly one tenant before updating provider state (0.4311ms)
+▶ outbound provider diagnostics
+  ✔ retains the Twilio error code without exposing credentials (2.2894ms)
+✔ outbound provider diagnostics (2.4535ms)
+▶ first-class communication purpose
+  ✔ human_ask requires and preserves a real ask_id (0.3011ms)
+  ✔ ask_id is not accepted as a random correlation metadata field (0.1051ms)
+  ✔ canonical identity is provider-independent (1.0345ms)
+  ✔ canonical voice records expose business outcome separately from provider delivery (0.1293ms)
+✔ first-class communication purpose (1.7901ms)
+▶ Ask-aware cross-channel threading
+  ✔ a client-supplied explicit thread ID is created and preserved (1.3191ms)
+  ✔ an inbound call inherits the open purpose created by an SMS Ask (1.1756ms)
+  ✔ an inbound email joins the one open SMS thread for the same person (0.5668ms)
+  ✔ an exact channel thread wins when the person has another open channel thread (7.0392ms)
+  ✔ person-wide inference remains ambiguous when a new channel has two candidates (0.7334ms)
+  ✔ workflow person correlation stays opaque while the internal person comes from identity (0.2549ms)
+  ✔ an identity mapped to two people never falls back to raw-address inference (0.2301ms)
+  ✔ an explicit thread cannot be reassigned to a different person (0.201ms)
+  ✔ two open Asks are ambiguous and are never guessed between (0.2464ms)
+  ✔ terminal threads and Ask bindings cannot be reopened (0.1633ms)
+  ✔ the same participant in another tenant is never considered for inference (0.1535ms)
+✔ Ask-aware cross-channel threading (12.4924ms)
+▶ ranked and correctable threading
+  ✔ scores transparent person, project, topic, channel and recency signals (0.2292ms)
+  ✔ a different known person is a hard exclusion even on the same project (0.06ms)
+  ✔ a different known project is a hard exclusion even for the same person and topic (0.0494ms)
+  ✔ normalizes equivalent email and phone channel identities (0.0484ms)
+  ✔ a human correction permanently blocks the rejected thread and prefers the destination (0.1422ms)
+  ✔ stale person-only contact creates a new temporal conversation (0.2653ms)
+  ✔ two equally plausible recent threads remain ambiguous and create a new conversation (0.2962ms)
+  ✔ multi-person evidence rediscovers and prefers the thread covering the whole group (0.3774ms)
+  ✔ trusted native correlation can add a new person to an existing group thread (0.1347ms)
+  ✔ late historical ingestion does not replace the thread latest channel or activity (0.1162ms)
+  ✔ unscoped feedback does not train the resolver across a whole tenant (0.1003ms)
+✔ ranked and correctable threading (2.0194ms)
+▶ database contract
+  ✔ migration includes universal IDs, Ask bindings, threads and durable events (0.6994ms)
+  ✔ person-aware migration backfills and indexes semantic threads safely (0.4195ms)
+  ✔ ranked-thread migration provides a register, decisions, feedback and atomic correction (0.329ms)
+✔ database contract (1.5588ms)
+▶ versioned API contract
+  ✔ purpose is parsed separately from correlation and callback URLs require https (0.1597ms)
+  ✔ /v1 fails closed without credentials and never falls back to memory (478.3353ms)
+✔ versioned API contract (478.5792ms)
+Communications persistence disabled
+History for +61400000000: 91 chars in 1ms
+▶ context – turns
+  ✔ normalises role and trims content (0.6131ms)
+  ✔ an empty turn is dropped rather than stored blank (0.0758ms)
+  ✔ an unrecognised role becomes unknown (0.064ms)
+  ✔ accepts a Date and stores an ISO string (0.8473ms)
+✔ context – turns (2.4458ms)
+▶ context – merging channels
+  ✔ interleaves channels chronologically (1.0002ms)
+  ✔ oldest first — the order the conversation happened in (0.0774ms)
+  ✔ identical timestamps keep their arrival order (0.0999ms)
+  ✔ an undated turn sorts last, not first (0.1337ms)
+✔ context – merging channels (1.5261ms)
+▶ context – budgeting
+  ✔ keeps the most recent turns, not the oldest (0.1914ms)
+  ✔ a character budget also trims from the front (0.1445ms)
+  ✔ never returns nothing when there was something (0.0697ms)
+  ✔ an empty history budgets to nothing without error (0.0707ms)
+✔ context – budgeting (0.6512ms)
+▶ context – rendering
+  ✔ labels every line with its channel (42.577ms)
+  ✔ groups by day with a relative marker (0.2871ms)
+  ✔ speaks in second person, so the model knows which side it is (0.58ms)
+  ✔ does not mutate the caller's now (0.4125ms)
+  ✔ empty history renders as an empty string, not a stray header (0.0653ms)
+✔ context – rendering (44.1218ms)
+▶ context – channels
+  ✔ readable channels are the ones with providers (0.1135ms)
+  ✔ planned channels are named rather than omitted (0.0578ms)
+✔ context – channels (0.2515ms)
+▶ context – conversation boundaries
+  ✔ two calls in one day are two conversations (0.703ms)
+  ✔ texts are one stream, not one conversation per message (0.275ms)
+  ✔ a call spanning a day boundary is restated, not left dangling (0.2213ms)
+✔ context – conversation boundaries (1.2871ms)
+▶ context – for a prompt
+  ✔ wraps the record so it cannot read as instructions (0.2445ms)
+  ✔ closes with a reminder, not just a fence (0.1965ms)
+  ✔ injected instructions stay inside the fence (0.1973ms)
+  ✔ no turns renders as null, so the caller chooses what to say (0.0621ms)
+  ✔ the empty record says nothing happened, rather than saying nothing (0.0587ms)
+✔ context – for a prompt (0.8704ms)
+▶ history – the placeholder is the switch
+  ✔ a prompt without {{history}} asks for nothing (0.2385ms)
+  ✔ detected in any templated field, with or without a fallback (0.0509ms)
+  ✔ combined_history is not history — the old field still stands alone (0.0539ms)
+  ✔ the placeholder becomes a forward reference, never the record (0.2695ms)
+  ✔ the notice hedges, because the record may be empty (0.0508ms)
+  ✔ the notice forbids inventing a past conversation (0.0593ms)
+  ✔ wantsHistory survives rendering, which erases the placeholder (0.0578ms)
+  ✔ a fallback lets the prompt word the notice itself (0.0503ms)
+  ✔ history and combined_history are independent (0.0737ms)
+✔ history – the placeholder is the switch (1.0872ms)
+▶ history – off the critical path
+  ✔ no placeholder, no lookup at all (0.1533ms)
+  ✔ nothing to claim for a call that never started one (0.0386ms)
+  ✔ a lookup without a phone number is not started (0.053ms)
+  ✔ claiming consumes, so a second stream cannot re-send the record (1.092ms)
+✔ history – off the critical path (1.4434ms)
+▶ recall – the query does the work
+  ✔ a spoken query loses its punctuation, like the SQL does (0.2554ms)
+  ✔ single characters are dropped, because a spelled-out name is not a query (0.0416ms)
+  ✔ a match brings its neighbours, because a hit alone is unreadable (0.143ms)
+  ✔ a fuzzy match still returns something quotable (0.0621ms)
+  ✔ no subject returns the end of the conversation (0.0394ms)
+  ✔ excerpts are case-insensitive (1.6388ms)
+  ✔ a long transcript is clipped rather than read out whole (0.3265ms)
+  ✔ an empty body does not become an empty-looking quote (0.0758ms)
+  ✔ the tool asks for a subject, not a page of turns (0.2191ms)
+  ✔ an unusable date becomes no filter, not a wrong one (0.145ms)
+  ✔ without a caller it errors rather than claiming no history (0.2802ms)
+✔ recall – the query does the work (3.4978ms)
+▶ greeting – a one-off direction, not a standing one
+  ✔ asks for one response instead of leaving a message in the conversation (0.0963ms)
+  ✔ carries the system prompt, because response instructions replace it (0.0364ms)
+  ✔ persona comes before the direction (0.0371ms)
+  ✔ a missing greeting or prompt does not produce stray blank lines (0.0333ms)
+  ✔ the escape hatch is off by default and opt-in by name (0.0936ms)
+✔ greeting – a one-off direction, not a standing one (0.3887ms)
+▶ context – day boundaries
+  ✔ two instants on the same local day share one header (0.4444ms)
+  ✔ never labels two different days "today" (0.2099ms)
+  ✔ groups in the configured zone, not the server's (0.2274ms)
+✔ context – day boundaries (0.9474ms)
+▶ ending a call – hanging up, and not outstaying the welcome
+  ✔ the tool is offered on every call (0.1899ms)
+  ✔ the description tells it to say goodbye first (0.0512ms)
+  ✔ the description warns against hanging up on a pause (0.044ms)
+  ✔ it reports the intent rather than doing the hanging up (0.1091ms)
+  ✔ a call with no stated reason still ends (0.0517ms)
+  ✔ there is a time limit by default, and it is not the whole afternoon (0.0324ms)
+  ✔ the wrap-up warning lands before the limit, not on it (0.0298ms)
+  ✔ the warning tells it to close, without narrating a countdown (0.091ms)
+✔ ending a call – hanging up, and not outstaying the welcome (0.7331ms)
+▶ Communications v2 shared contract fixtures
+  ✔ defines the canonical inbound and terminal fixture set (1.9057ms)
+  ✔ keeps every fixture tenant scoped and terminal calls fully correlated (0.1552ms)
+  ✔ marks voicemail as unsuccessful and memory-ineligible (0.0843ms)
+✔ Communications v2 shared contract fixtures (2.9598ms)
+▶ persistence provider selection
+  ✔ explicit selection wins and Replit aliases select PostgreSQL (0.6018ms)
+  ✔ preserves the existing Supabase default before auto-detecting DATABASE_URL (0.0935ms)
+  ✔ rejects an unknown provider instead of silently using the wrong store (0.2651ms)
+✔ persistence provider selection (1.7669ms)
+▶ blank PostgreSQL database contract
+  ✔ defines every provider table required before feature migrations run (0.3743ms)
+  ✔ supports contact upsert, transcript-only recordings and leased claims (0.1874ms)
+✔ blank PostgreSQL database contract (0.7024ms)
+▶ ranked-threading publication contract
+  ✔ backfills identities before enforcing non-null and exposes a safe publisher default (0.2172ms)
+✔ ranked-threading publication contract (0.3139ms)
+▶ PostgreSQL compatibility adapter
+  ✔ keeps a transaction on one pooled connection and releases it after commit (1.7319ms)
+  ✔ rolls back a failed transaction and preserves the original error (0.3036ms)
+  ✔ discards a pooled connection when rollback fails (0.1736ms)
+  ✔ builds parameterised select, filter, order and pagination queries (0.338ms)
+  ✔ supports exact counts without returning rows for a head query (0.1404ms)
+  ✔ supports the allow-listed JSON text filter used by Ask lookup (0.0908ms)
+  ✔ maps supported embedded relations to PostgreSQL JSON (0.1445ms)
+  ✔ honours ignoreDuplicates with ON CONFLICT DO NOTHING (0.2837ms)
+  ✔ serialises JSON arrays without breaking native PostgreSQL arrays (0.183ms)
+  ✔ serialises JSON containment filters used by legacy email reply lookup (0.1074ms)
+  ✔ unwraps scalar RPCs and preserves set-returning RPC rows (0.2328ms)
+✔ PostgreSQL compatibility adapter (4.0924ms)
+▶ documentation stays aligned with the implemented HTTP surface
+  ✔ the README links to the checked-in API reference (0.8189ms)
+  ✔ the API reference names every implemented HTTP route (1.5403ms)
+  ✔ the README documents the core runtime configuration (0.1635ms)
+  ✔ the test console supplies an idempotency key for outbound actions (0.9784ms)
+  ✔ the production deployment applies migrations before starting the API (0.8705ms)
+  ✔ the Replit runtime satisfies production dependency requirements (0.4675ms)
+✔ documentation stays aligned with the implemented HTTP surface (5.8792ms)
+▶ tenant boundary
+  ✔ reads are filtered and writes are stamped structurally (1.8027ms)
+  ✔ tenant-aware RPCs receive the authenticated tenant (0.1234ms)
+✔ tenant boundary (2.6502ms)
+▶ inbound email routing
+  ✔ keeps the verified SMTP envelope recipient ahead of the retrieve response (0.2082ms)
+  ✔ stores attachments only in the attachment table (0.1105ms)
+  ✔ requeues the exact routing failures caused by the old recipient precedence (0.8131ms)
+  ✔ requeues legacy case-folded reply routes after the resolver fix (0.4444ms)
+  ✔ requeues the exact attachment-column failures exposed by reply recovery (0.5006ms)
+✔ inbound email routing (2.3545ms)
+▶ email adapter contract
+  ✔ preserves exact JSON bytes for webhook signature verification (115.6165ms)
+  ✔ accepts an exact signed provider body and rejects a changed body (3.0162ms)
+  ✔ normalises addresses and removes active HTML (2.2165ms)
+  ✔ requires a deliverable outbound envelope (0.1731ms)
+  ✔ bounces and automatic replies cannot feed Ask completion or memory (0.4496ms)
+  ✔ opaque reply tokens are extracted only from the dedicated route shape (0.2009ms)
+  ✔ new opaque reply tokens survive email address case folding (0.5029ms)
+  ✔ legacy case-folded tokens recover only through one recorded outbound route (0.3781ms)
+✔ email adapter contract (122.9456ms)
+▶ API client credentials
+  ✔ stores a salted one-way scrypt verifier (98.791ms)
+✔ API client credentials (98.9367ms)
+▶ migration contract
+  ✔ adds first-class tenants, provider connections, receipts, jobs and email records (1.7526ms)
+✔ migration contract (1.8555ms)
+Communications persistence disabled
+✔ shared transport policy restricts CEO and preserves other authorized tenants (1.6309ms)
+✔ malformed policy and missing tenant cannot reach the provider (0.8489ms)
+✔ provider boundary blocks configured tenant before adapter lookup (0.3596ms)
+✔ another tenant still reaches its provider when explicitly permitted (0.7198ms)
+✔ HTTP legacy wildcard cannot override tenant ceiling or spoof tenant via body (92.5089ms)
+✔ scoped client grants remain channel-specific and cannot cross tenant (100.4277ms)
+✔ account policy defaults safely, persists both modes and rejects stale writes (0.9462ms)
+✔ saved restriction wins over operator grant and operator ceiling wins over saved grant (0.2162ms)
+✔ policy HTTP routes authenticate and enforce tenant binding (8.5962ms)
+✔ concurrent policy updates cannot overwrite each other (0.6717ms)
+✔ ordinary scoped service client cannot change email authority (101.6462ms)
+▶ tenant-safe terminal event delivery
+  ✔ deduplicates outbound events with the tenant-scoped unique key (1.3719ms)
+  ✔ requeues terminal outcomes stranded by the obsolete conflict target (0.6461ms)
+  ✔ uses a non-partial composite index PostgreSQL can infer for ON CONFLICT (0.3801ms)
+✔ tenant-safe terminal event delivery (3.1937ms)
+✔ derives the tick endpoint while preserving the Vercel bypass parameter (1.265ms)
+✔ signs the empty scheduler request body with the shared V2 HMAC contract (0.3426ms)
+✔ posts one signed empty-body tick and does not expose the secret in the URL (1.3243ms)
+✔ stays disabled when durable HyperFlow event configuration is absent (0.1391ms)
+▶ connected mailbox credentials and OAuth state
+  ✔ encrypts OAuth material with tenant and connection associated data (5.8274ms)
+  ✔ signs a short-lived tenant and initiator-bound OAuth state (1.0221ms)
+  ✔ rejects a low-entropy OAuth state secret (0.2975ms)
+  ✔ requests offline Gmail read and compose access with the exact callback (1.0121ms)
+  ✔ binds Outlook OAuth state and requests delegated offline Mail.ReadWrite access (0.6985ms)
+✔ connected mailbox credentials and OAuth state (9.7173ms)
+▶ Gmail adapter contract
+  ✔ normalizes a full Gmail MIME message without trusting provider HTML (3.6758ms)
+  ✔ uses the connected mailbox as the recipient for Gmail inbox messages without a To header (0.2847ms)
+  ✔ exposes a distinct error type for per-message Gmail normalization failures (0.1789ms)
+  ✔ classifies a disappeared Gmail message as skippable provider churn (0.1919ms)
+  ✔ creates a Gmail draft MIME payload but exposes no send operation (1.5447ms)
+✔ Gmail adapter contract (6.171ms)
+▶ Outlook adapter contract
+  ✔ follows Graph delta pagination, de-duplicates messages and persists the opaque delta cursor (0.8367ms)
+  ✔ creates reply drafts with createReply followed by an update and never calls send (0.3334ms)
+  ✔ creates standalone Outlook drafts under messages and never sends them (0.1951ms)
+  ✔ normalizes Graph messages into the canonical email contract (0.4387ms)
+  ✔ uses the connected Outlook mailbox as a Bcc fallback (0.1646ms)
+  ✔ exposes a provider-specific Outlook normalization error (0.1652ms)
+✔ Outlook adapter contract (2.3216ms)
+▶ connected mailbox migration
+  ✔ keeps credentials, state, drafts and audit tenant-owned and backend-only (1.2128ms)
+  ✔ adds a provider-neutral cursor without removing Gmail history state (0.3995ms)
+✔ connected mailbox migration (1.7019ms)
+▶ calendar memory foundation
+  ✔ normalises canonical dates and rejects invalid ranges (1.8179ms)
+  ✔ ingestion is idempotent, resolves exact identities, and retains unknown participants (1.8239ms)
+  ✔ ambiguous nearby events remain candidates and are never auto-linked (7.3366ms)
+✔ calendar memory foundation (11.8244ms)
+▶ Plaud uses the existing recording pipeline contract
+  ✔ normalises correlation without inventing a Plaud API (0.2097ms)
+  ✔ provider requires an injected native adapter (0.4932ms)
+  ✔ existing queue deduplicates, skips transcription for supplied text, and projects recording context (1.9821ms)
+✔ Plaud uses the existing recording pipeline contract (2.9022ms)
+▶ commitment extraction
+  ✔ extracts an obvious promise and due weekday conservatively (8.3397ms)
+  ✔ does not manufacture a commitment from an ordinary statement (9.1882ms)
+  ✔ does not turn requests or assistant questions into commitments (1.8433ms)
+  ✔ does not store a counterparty question as a commitment (0.4533ms)
+  ✔ final re-enrichment removes obsolete open commitments but preserves completed work (0.2206ms)
+  ✔ rejects model commitments attributed to assistant speech or user preferences (0.0989ms)
+  ✔ stores only a verified counterparty promise from an outbound call (0.5556ms)
+  ✔ re-enrichment preserves a human-completed commitment (0.4196ms)
+✔ commitment extraction (21.467ms)
+▶ structured asynchronous enrichment
+  ✔ uses strict Responses API output with evidence IDs (0.6271ms)
+✔ structured asynchronous enrichment (0.6738ms)
+▶ thread-aware retrieval
+  ✔ labels direct matches and thread context separately and omits unrelated threads (2.37ms)
+  ✔ ranking explains person, project, thread and recency boosts (0.0973ms)
+✔ thread-aware retrieval (2.557ms)
+▶ memory read models
+  ✔ thread memory includes enrichment and provenance without requiring it (0.6957ms)
+  ✔ person memory assembles active work, evidence and upcoming events (0.5146ms)
+  ✔ memory read models exclude audit-only failed calls (0.3132ms)
+  ✔ project and event views assemble scoped context (0.7054ms)
+✔ memory read models (2.3595ms)
+▶ loose ends
+  ✔ returns open commitments and unresolved Asks, but not completed commitments (0.4617ms)
+✔ loose ends (0.5106ms)
+▶ fact lifecycle
+  ✔ a new value supersedes rather than deletes the old provenance (0.2966ms)
+  ✔ rejects facts cited only to assistant or missing evidence (0.0835ms)
+✔ fact lifecycle (0.4375ms)
+▶ migration contract
+  ✔ adds calendar, durable enrichment, provenance, lifecycle and recording correlation (2.9882ms)
+✔ migration contract (3.0396ms)
+✔ slow enrichment writes keep the evidence horizon before a concurrent correction (0.6198ms)
+✔ Twilio signatures default to enforce when credentials exist (0.9712ms)
+✔ safe fetch validates redirect destinations before following them (1.1356ms)
+✔ safe lookup returns every validated address when Undici requests all addresses (3.4905ms)
+✔ safe lookup preserves the single-address callback contract (0.158ms)
+✔ outbox diagnostics retain the native fetch failure cause (0.1205ms)
+✔ workflow project IDs stay external correlation (0.098ms)
+✔ HyperFlow voice context disables unscoped history and tools (0.2327ms)
+✔ Vercel protection bypass is scoped to the configured HyperFlow origin (0.2278ms)
+▶ HTTP – server health
+  ✖ GET / responds 200 with status message (106.9072ms)
+✖ HTTP – server health (109.0597ms)
+▶ HTTP – /incoming-call TwiML
+  ✖ POST /incoming-call returns 200 with XML content-type (147.7638ms)
+  ✔ GET /incoming-call also returns TwiML (Twilio uses both methods) (8.164ms)
+  ✖ TwiML response contains required XML elements (1.5177ms)
+  ✖ TwiML <Stream> URL points to /media-stream WebSocket endpoint (1.2512ms)
+✖ HTTP – /incoming-call TwiML (159.1666ms)
+▶ WebSocket – /media-stream
+  ✖ WebSocket connection to /media-stream opens successfully (8018.4462ms)
+  ✖ Server stays open after receiving Twilio "start" event (8019.0744ms)
+  ✖ Server stays open when "start" carries a callSid with no stored config (default fallback) (8015.61ms)
+  ✖ Server stays open after receiving Twilio "media" event (8016.2623ms)
+  ✖ Server handles Twilio "mark" event without error (8018.4399ms)
+  ✖ Server handles unknown event types without crashing (8003.8248ms)
+  ✖ Server handles malformed JSON without crashing (8004.9312ms)
+✖ WebSocket – /media-stream (56099.336ms)
+▶ HTTP – /outbound-call guard rails
+  ✖ rejects a request with no API key (11.7702ms)
+  ✖ rejects an incorrect API key (2.1724ms)
+  ✔ never places a call for an unauthenticated request (1.2876ms)
+✖ HTTP – /outbound-call guard rails (15.5133ms)
+▶ HTTP – /health
+  ✖ GET /health reports status and feature wiring (6.2105ms)
+✖ HTTP – /health (6.4182ms)
+▶ OpenAI Realtime API – connectivity
+  ✖ OPENAI_API_KEY environment variable is set (0.2137ms)
+  ✖ OpenAI Realtime API WebSocket connects and emits session.created (0.2226ms)
+  ✖ OpenAI Realtime API accepts a session.update configuration (0.1024ms)
+✖ OpenAI Realtime API – connectivity (0.621ms)
+▶ HTTP – management API auth
+  ✖ rejects a request with no API key (5.1078ms)
+  ✖ rejects an incorrect API key (4.777ms)
+  ✖ a key of the wrong length is rejected, not compared (3.9029ms)
+✖ HTTP – management API auth (14.0254ms)
+▶ HTTP – management API tool registry
+  ﹣ GET /api/tools lists every tool with its availability (0.2278ms) # API_KEY not set
+  ﹣ GET /api/tools/:name 404s on an unknown tool and says what is valid (0.0515ms) # API_KEY not set
+  ﹣ GET /api/tools/names is not shadowed by the :name route (0.0428ms) # API_KEY not set
+✔ HTTP – management API tool registry (0.4314ms)
+▶ HTTP – management API reads
+  ﹣ GET /api/contacts returns a paged envelope (0.0842ms) # API_KEY not set
+  ﹣ an over-large limit is clamped rather than refused (0.0465ms) # API_KEY not set
+  ﹣ a non-E.164 path is a 400, not a 404 (0.5907ms) # API_KEY not set
+  ﹣ an unknown but valid number is a 404 (0.0561ms) # API_KEY not set
+  ﹣ GET /api/calls accepts only known sort columns (0.0424ms) # API_KEY not set
+✔ HTTP – management API reads (0.9979ms)
+▶ HTTP – management API config preview
+  ﹣ GET /api/config/resolve rejects a bad direction (0.0747ms) # API_KEY not set
+  ﹣ GET /api/config/resolve requires at least one number (0.0428ms) # API_KEY not set
+  ﹣ GET /api/config/resolve returns a complete config and a tool audit (0.0763ms) # API_KEY not set
+✔ HTTP – management API config preview (0.2837ms)
+▶ HTTP – Twilio webhook signatures
+  ✖ GET /health reports the signature mode (4.8795ms)
+  ✖ an unsigned webhook is rejected under enforce and otherwise reaches tenant resolution (4.4325ms)
+  ﹣ a correctly signed webhook is accepted under every mode (0.3034ms) # TWILIO_AUTH_TOKEN or PUBLIC_URL not set
+  ﹣ a tampered body fails the signature under enforce (0.0814ms) # TWILIO_AUTH_TOKEN or PUBLIC_URL not set
+✖ HTTP – Twilio webhook signatures (9.8276ms)
+Ignoring unknown tool "no_such_tool"
+▶ end_call is offered on every call
+  ✔ the default empty configuration still advertises end_call (1.9284ms)
+  ✔ missing and malformed configured tool lists remain safe (0.2278ms)
+  ✔ configured tools preserve order without duplicating end_call (0.1983ms)
+  ✔ unknown tools are dropped without removing end_call (0.7926ms)
+  ✔ session.update carries the default tool to the Realtime model (2.6268ms)
+  ✔ the explicit deployment kill switch restores opt-in behavior (2.3096ms)
+  ✔ the always-on list has one canonical definition (0.1439ms)
+✔ end_call is offered on every call (9.9241ms)
+▶ call transcript teardown drain
+  ✔ finalizes immediately when no caller transcription is pending (0.6962ms)
+  ✔ waits for a committed caller turn to finish transcription (0.1201ms)
+  ✔ uses a bounded timeout when transcription never settles (0.1046ms)
+  ✔ waits for late VAD events even before a pending item is known (0.8069ms)
+  ✔ finalizes once when the provider closes during the grace window (0.1411ms)
+✔ call transcript teardown drain (2.7332ms)
+▶ transcripts – segments
+  ✔ keeps text, role and timing (0.1606ms)
+  ✔ drops an empty or whitespace-only turn (0.0917ms)
+  ✔ an unrecognised role becomes unknown rather than being dropped (0.1395ms)
+  ✔ trims text and rejects a negative or non-finite start (0.1165ms)
+  ✔ a numeric string is not a number (0.156ms)
+✔ transcripts – segments (0.9169ms)
+▶ transcripts – ordering
+  ✔ sorts by start time (0.9811ms)
+  ✔ equal start times keep arrival order (0.0767ms)
+  ✔ an untimed segment stays where it arrived (0.0723ms)
+  ✔ a fully untimed transcript keeps its original order (0.0791ms)
+✔ transcripts – ordering (1.3392ms)
+▶ transcripts – assembly
+  ✔ builds a versioned transcript and orders its segments (0.1592ms)
+  ✔ an unknown channel falls back to other rather than being kept (0.0471ms)
+  ✔ empty and malformed segments are dropped during assembly (0.0465ms)
+  ✔ counts turns that happened but produced no text (0.0708ms)
+  ✔ a clean transcript reports nothing lost (0.0386ms)
+  ✔ isEmpty distinguishes a silent call from a real one (0.0556ms)
+✔ transcripts – assembly (0.5491ms)
+▶ transcripts – flattening
+  ✔ renders speaker-labelled lines (0.123ms)
+  ✔ falls back to the role when there is no speaker label (0.0627ms)
+  ✔ an empty transcript flattens to an empty string, not "undefined" (0.0451ms)
+✔ transcripts – flattening (0.3227ms)
+▶ transcripts – external input
+  ✔ rejects anything that is not this shape (0.1821ms)
+  ✔ names the offending segment so a bad payload can be fixed (0.0936ms)
+  ✔ normalises second-based timings into milliseconds (0.1035ms)
+  ✔ accepts content as an alias for text (0.0419ms)
+  ✔ keeps the source speaker label alongside the normalised role (0.0408ms)
+✔ transcripts – external input (0.5733ms)
+ℹ tests 296
+ℹ suites 63
+ℹ pass 261
+ℹ fail 22
+ℹ cancelled 0
+ℹ skipped 13
+ℹ todo 0
+ℹ duration_ms 57157.7477
+
+✖ failing tests:
+
+test at test\suite.test.js:41:5
+✖ GET / responds 200 with status message (106.9072ms)
+  SyntaxError: Unexpected token '<', "
+  <!DOCTYPE "... is not valid JSON
+      at JSON.parse (<anonymous>)
+      at parseJSONFromBytes (node:internal/deps/undici/undici:4259:19)
+      at successSteps (node:internal/deps/undici/undici:6882:27)
+      at readAllBytes (node:internal/deps/undici/undici:5807:13)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+test at test\suite.test.js:92:5
+✖ POST /incoming-call returns 200 with XML content-type (147.7638ms)
+  AssertionError [ERR_ASSERTION]: Expected 200, got 404
+  
+  404 !== 200
+  
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:94:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1524:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 404,
+    expected: 200,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:104:5
+✖ TwiML response contains required XML elements (1.5177ms)
+  AssertionError [ERR_ASSERTION]: Missing XML declaration
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:108:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:114:5
+✖ TwiML <Stream> URL points to /media-stream WebSocket endpoint (1.2512ms)
+  AssertionError [ERR_ASSERTION]: <Stream> URL should contain /media-stream.
+  Got TwiML:
+  
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:117:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:132:5
+✖ WebSocket connection to /media-stream opens successfully (8018.4462ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:145:5
+✖ Server stays open after receiving Twilio "start" event (8019.0744ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:180:5
+✖ Server stays open when "start" carries a callSid with no stored config (default fallback) (8015.61ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:222:5
+✖ Server stays open after receiving Twilio "media" event (8016.2623ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:263:5
+✖ Server handles Twilio "mark" event without error (8018.4399ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:284:5
+✖ Server handles unknown event types without crashing (8003.8248ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:305:5
+✖ Server handles malformed JSON without crashing (8004.9312ms)
+  Error: WebSocket timed out after 8000ms (ws://localhost:3000/media-stream)
+      at Timeout.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:23:20)
+      at listOnTimeout (node:internal/timers:605:17)
+      at process.processTimers (node:internal/timers:541:7)
+
+test at test\suite.test.js:342:5
+✖ rejects a request with no API key (11.7702ms)
+  AssertionError [ERR_ASSERTION]: Expected 401 (key set) or 503 (outbound not configured), got 404
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:344:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1524:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:350:5
+✖ rejects an incorrect API key (2.1724ms)
+  AssertionError [ERR_ASSERTION]: Expected 401 or 503, got 404
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:352:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:368:5
+✖ GET /health reports status and feature wiring (6.2105ms)
+  SyntaxError: Unexpected token '<', "
+  <!DOCTYPE "... is not valid JSON
+      at JSON.parse (<anonymous>)
+      at parseJSONFromBytes (node:internal/deps/undici/undici:4259:19)
+      at successSteps (node:internal/deps/undici/undici:6882:27)
+      at readAllBytes (node:internal/deps/undici/undici:5807:13)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+test at test\suite.test.js:385:5
+✖ OPENAI_API_KEY environment variable is set (0.2137ms)
+  AssertionError [ERR_ASSERTION]: OPENAI_API_KEY is not set — add it to Replit Secrets
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:386:16)
+      at Test.runInAsyncScope (node:async_hooks:212:14)
+      at Test.run (node:internal/test_runner/test:1109:25)
+      at Test.start (node:internal/test_runner/test:1006:17)
+      at node:internal/test_runner/test:1522:71
+      at node:internal/per_context/primordials:466:82
+      at new Promise (<anonymous>)
+      at new SafePromise (node:internal/per_context/primordials:435:3)
+      at node:internal/per_context/primordials:466:9
+      at Array.map (<anonymous>) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:393:5
+✖ OpenAI Realtime API WebSocket connects and emits session.created (0.2226ms)
+  AssertionError [ERR_ASSERTION]: Skipping: OPENAI_API_KEY not set
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:394:16)
+      at Test.runInAsyncScope (node:async_hooks:212:14)
+      at Test.run (node:internal/test_runner/test:1109:25)
+      at Suite.processPendingSubtests (node:internal/test_runner/test:786:18)
+      at Test.postRun (node:internal/test_runner/test:1238:19)
+      at Test.run (node:internal/test_runner/test:1166:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1524:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:423:5
+✖ OpenAI Realtime API accepts a session.update configuration (0.1024ms)
+  AssertionError [ERR_ASSERTION]: Skipping: OPENAI_API_KEY not set
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:424:16)
+      at Test.runInAsyncScope (node:async_hooks:212:14)
+      at Test.run (node:internal/test_runner/test:1109:25)
+      at Suite.processPendingSubtests (node:internal/test_runner/test:786:18)
+      at Test.postRun (node:internal/test_runner/test:1238:19)
+      at Test.run (node:internal/test_runner/test:1166:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:487:5
+✖ rejects a request with no API key (5.1078ms)
+  AssertionError [ERR_ASSERTION]: Unauthenticated reads must be rejected
+  
+  200 !== 401
+  
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:489:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1524:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 200,
+    expected: 401,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:492:5
+✖ rejects an incorrect API key (4.777ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  200 !== 401
+  
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:494:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 200,
+    expected: 401,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:497:5
+✖ a key of the wrong length is rejected, not compared (3.9029ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  200 !== 401
+  
+      at TestContext.<anonymous> (file:///C:/Users/joria/Documents/Codex/phase01-20260908/communications-service/test/suite.test.js:501:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1116:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:786:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 200,
+    expected: 401,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test\suite.test.js:658:5
+✖ GET /health reports the signature mode (4.8795ms)
+  SyntaxError: Unexpected token '<', "
+  <!DOCTYPE "... is not valid JSON
+      at JSON.parse (<anonymous>)
+      at parseJSONFromBytes (node:internal/deps/undici/undici:4259:19)
+      at successSteps (node:internal/deps/undici/undici:6882:27)
+      at readAllBytes (node:internal/deps/undici/undici:5807:13)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+test at test\suite.test.js:663:5
+✖ an unsigned webhook is rejected under enforce and otherwise reaches tenant resolution (4.4325ms)
+  SyntaxError: Unexpected token '<', "
+  <!DOCTYPE "... is not valid JSON
+      at JSON.parse (<anonymous>)
+      at parseJSONFromBytes (node:internal/deps/undici/undici:4259:19)
+      at successSteps (node:internal/deps/undici/undici:6882:27)
+      at readAllBytes (node:internal/deps/undici/undici:5807:13)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
