@@ -107,3 +107,15 @@ test('meeting notes remain available after the meeting and private meetings stay
  await sql.query("update calendar_events set metadata=metadata || $2::jsonb where id=$1",[event.id,JSON.stringify({private:true})]);
  assert.equal((await read()).status,404);
 });
+
+test('report evidence remains current without importing stale summaries, private or other-project sources',async()=>{
+ const r=await request('POST','/v1/context/memory',{kind:'evidence',external_project_id:'alpha',allowed_project_ids:['alpha'],limit:30});
+ assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(r.body.memory_status.state,'current');
+ const ids=r.body.data.communications.map(row=>row.communication_id);assert.ok(ids.includes(one.communication_id));assert.ok(!ids.includes(two.communication_id));assert.ok(!ids.includes(hidden.communication_id));
+ assert.equal(r.body.data.facts,undefined);assert.equal(r.body.data.threads,undefined);assert.equal(r.body.data.coverage.exhaustive,false);
+ assert.equal((await request('POST','/v1/context/memory',{kind:'evidence'})).status,400);
+ const denied=await request('POST','/v1/context/memory',{kind:'evidence',external_project_id:'alpha',allowed_project_ids:['beta']});assert.equal(denied.body.data.communications.length,0);
+ await sql.query('update communications set memory_eligible=false where communication_id=$1',[one.communication_id]);
+ const revoked=await request('POST','/v1/context/memory',{kind:'evidence',external_project_id:'alpha'});assert.ok(!revoked.body.data.communications.some(row=>row.communication_id===one.communication_id));
+ await sql.query('update communications set memory_eligible=true where communication_id=$1',[one.communication_id]);
+});

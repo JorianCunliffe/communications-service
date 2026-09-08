@@ -1,4 +1,4 @@
-import { safeMemory } from './memorySafety.js';
+import { safeMemory, sourceAllowed } from './memorySafety.js';
 const DEFAULT_LIMIT = 20;
 
 function weight(name, fallback) {
@@ -335,3 +335,16 @@ export const getPersonMemory = async (db,id,scope={}) => safeMemory(db,await get
 export const getProjectMemory = async (db,id,scope={}) => safeMemory(db,await getProjectMemoryRaw(db,id),{...scope,project_id:id});
 export const getEventContext = async (db,id,scope={}) => safeMemory(db,await getEventContextRaw(db,id),{...scope,calendar_event_id:id});
 export const getLooseEnds = async (db,body={}) => safeMemory(db,await getLooseEndsRaw(db,body),{...body,person_id:body.personId,project_id:body.projectId});
+
+// Reports need current source messages, not derived summaries whose stale state can
+// legitimately hold a broad memory view. Scope before the bounded read, then apply
+// the same current-source checks again to detect revocation during preparation.
+export async function getReportEvidence(db, scope = {}) {
+    if (!scope.external_project_id) throw new Error('Report evidence requires an external project');
+    const rows = check(await db.from('communications').select('*')
+        .eq('memory_eligible', true).eq('correlation->>external_project_id', scope.external_project_id)
+        .order('occurred_at', { ascending: false }).limit(100), 'Report source evidence');
+    const selected = rows.filter(row => sourceAllowed(row, scope)).slice(0, limitOf(scope.limit, 30));
+    const safe = await safeMemory(db, { communications: selected }, scope);
+    return { ...safe, coverage: { scope: 'current_source_messages', scanned_limit: 100, returned_limit: limitOf(scope.limit, 30), exhaustive: false } };
+}

@@ -8,7 +8,7 @@ import { enqueueEvent } from './eventOutbox.js';
 import { randomUUID } from 'node:crypto';
 import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, rankThreadCandidates, resolveCommunicationThread, resolveParticipantPerson } from './communicationModel.js';
 import { calendarCandidates, ingestCalendarEvent, resolveCalendarEvent, resolveCalendarEventId } from './calendar.js';
-import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, searchMemory } from './memory.js';
+import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, searchMemory, getReportEvidence } from './memory.js';
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 import { tenantDatabase } from './tenantContext.js';
 import { emailEnabled } from './emailWebhook.js';
@@ -1036,9 +1036,9 @@ export default async function v1Routes(fastify, options = {}) {
     fastify.post('/context/memory', async (request, reply) => {
         const db=database(reply); if (!db) return reply;
         const body=request.body || {};
-        const kinds=['search','person','thread','project','meeting','loose_ends'];
+        const kinds=['search','evidence','person','thread','project','meeting','loose_ends'];
         if (!kinds.includes(body.kind)) return reply.code(400).send({error:'Unknown memory context kind'});
-        if (!['search','loose_ends'].includes(body.kind) && (typeof body.id!=='string' || !body.id.trim())) return reply.code(400).send({error:'Context id is required'});
+        if (!['search','evidence','loose_ends'].includes(body.kind) && (typeof body.id!=='string' || !body.id.trim())) return reply.code(400).send({error:'Context id is required'});
         if (body.allowed_project_ids!==undefined && (!Array.isArray(body.allowed_project_ids) || body.allowed_project_ids.length>200 || body.allowed_project_ids.some(id=>typeof id!=='string' || !id))) return reply.code(400).send({error:'allowed_project_ids must contain at most 200 project references'});
         const scope={include_private:body.include_private===true};
         for (const name of ['project_id','external_project_id','person_id','thread_id','calendar_event_id','since','until']) {
@@ -1046,9 +1046,11 @@ export default async function v1Routes(fastify, options = {}) {
             if (body[name]) scope[name]=body[name];
         }
         if (body.allowed_project_ids) scope.allowed_project_ids=body.allowed_project_ids;
+        if (body.kind==='evidence' && !scope.external_project_id) return reply.code(400).send({error:'Report evidence requires an external project'});
         try {
             let data;
-            if (body.kind==='person') data=await getPersonMemory(db,body.id,scope);
+            if (body.kind==='evidence') data=await getReportEvidence(db,{...scope,limit:body.limit});
+            else if (body.kind==='person') data=await getPersonMemory(db,body.id,scope);
             else if (body.kind==='thread') data=await getThreadMemory(db,body.id,scope);
             else if (body.kind==='project') data=await getProjectMemory(db,body.id,scope);
             else if (body.kind==='meeting') data=await getEventContext(db,body.id,scope);
