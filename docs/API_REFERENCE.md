@@ -2,7 +2,7 @@
 
 Phase 01 adds account email authority and separate sms:send / voice:call capabilities. All unconfigured accounts default to draft-only. See [authority contract](architecture/BOUNDARIES.md).
 
-Updated: 8 September 2026. Contract release: `2.4.0`.
+Updated: 8 September 2026. Contract release: `2.5.0`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -57,7 +57,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `020`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `023`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
 
 ### Twilio webhooks
 
@@ -1295,3 +1295,25 @@ A move between known projects requires `reason_code: "wrong_project"`. Migration
 ### POST `/v1/context/memory`
 
 Phase 03 source-validated context. Request kind: search, person, thread, project, meeting or loose_ends; id for resource views. Optional external_project_id, allowed_project_ids and include_private (requires memory:private) narrow the context. Uses communications:read. Returns memory-context.v1, data and memory_status. Unavailable memory returns 503, missing resource 404. Dates without explicit timezone-bearing source timestamps are candidates requiring confirmation.
+# Transcribed meeting ingestion
+
+`POST /v1/meetings` accepts an already-transcribed meeting with `source`, stable `externalId`, `sourceVersion`, `title`, ISO `occurredAt` including offset, `attendees`, and 1–20 `topics`. Each topic has a stable `id`, `title`, `projectId`, optional existing `threadId`, and `segments` with stable `id`, `text`, optional `speakerId`/`speaker` and millisecond timing. Attendee IDs are source-local; supplied email/phone identities enrich against canonical contacts. Matching an attendee never verifies speaker attribution or accepts a promise.
+
+Optional `references` preserve `calendarEventId`, `sourceUrl` and `recordingUrl`; only the calendar ID is resolved locally. URLs are never fetched. The limit is 1 MB, 100 attendees and 1000 segments. Existing recordings and topic communications remain canonical; revision receipts are stored in `recording_revisions` (migration 022). Each topic creates a separate thread unless explicitly linked to an accessible thread in its project.
+
+The result includes `id`, `version`, `duplicate` and topic receipts. Reusing the same source version/content returns 200 without new evidence. Corrections need a new `sourceVersion` and the current `expectedVersion`; success returns 201. Conflicting revisions return 409. Identical content under another meeting/provider returns 409 with `details.status=needs_duplicate_review`; creating a separate meeting requires `duplicateDecision=separate` plus `duplicateReason`. A removed topic is retracted from eligible memory while retaining its history. Changing existing project/thread associations requires the audited thread correction API.
+
+`GET /v1/meetings?offset=0` lists at most 50 non-private manifests and an optional next offset. `GET /v1/meetings/:id` returns one manifest plus revision history. `GET /v1/meetings/by-source?source=...&externalId=...` retrieves the same record by provider identity. Standard communications read/write capabilities and tenant authentication apply. Private reads/writes require `memory:private`; `initiator_id` requires `threads:actor:assert`. The authenticated client identity remains in the revision actor. Optional service-supplied `allowedProjectIds` narrows both prior and new topic scope atomically.
+
+Source instructions are data only. Ingestion does not send messages, grant authority, accept commitments, download audio or invoke transcription. Extracted promises remain evidence for HyperFlow review.
+
+### Calendar observations (Phase 08)
+
+Apply migration `023_calendar_observation_order.sql` before deploying this release. Calendar provider access, proposals, approvals and booking stay in HyperFlow. Communications accepts normalized observations and enriches exact participant identities; it does not become a booking engine.
+
+Supply `metadata.observed_at` as the provider-read timestamp, `metadata.external_project_id` for the HyperFlow project, and `metadata.status` (`confirmed` or `cancelled`). Event and participant snapshots update atomically. An older or equal observation returns the current event with `stale: true`; it cannot resurrect a cancelled event or restore removed participants. Once an event has a timestamped observation, an unversioned replacement is rejected. Timestamps more than five minutes in the future are rejected. Cancelled events are excluded from automatic calendar candidates. Contact, project and thread references must belong to the authenticated tenant.
+## Phase 09 report source evidence
+
+`POST /v1/context/memory` additionally accepts `kind: "evidence"` with required `external_project_id`, optional `allowed_project_ids`, `include_private` under existing capability enforcement, and `limit` capped at 30. It reads at most the latest 100 memory-eligible messages within that external project before audience filtering, then revalidates current source records. The response retains `memory-context.v1`, current/stale status, source provenance and explicit non-exhaustive coverage.
+
+This projection contains source communications only: no derived thread summaries, facts or extracted commitments. Excluding an intentionally private/out-of-scope source before projection does not make current permitted sources stale. A revocation during source revalidation still suppresses that source and reports stale. Existing search/person/thread freshness semantics are unchanged. HyperFlow continues to own accepted operational obligations and report jobs. No schema migration is required.
