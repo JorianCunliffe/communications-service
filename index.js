@@ -80,7 +80,7 @@ const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js',
-        'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
+        'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',

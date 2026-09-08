@@ -2,7 +2,7 @@
 
 Phase 01 adds account email authority and separate sms:send / voice:call capabilities. All unconfigured accounts default to draft-only. See [authority contract](architecture/BOUNDARIES.md).
 
-Updated: 8 September 2026. Contract release: `2.4.0`.
+Updated: 8 September 2026. Contract release: `2.5.0`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
