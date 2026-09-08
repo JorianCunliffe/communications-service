@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { createPostgresClient, requestedDatabaseProvider } from '../database.js';
 
 const coreMigration = readFileSync(new URL('../migrations/000_core.sql', import.meta.url), 'utf8');
+const rankedThreadMigration = readFileSync(new URL('../migrations/019_ranked_thread_resolution.sql', import.meta.url), 'utf8');
+const publishCompatibilityMigration = readFileSync(new URL('../migrations/021_identity_normalized_publish_compatibility.sql', import.meta.url), 'utf8');
 
 function capture(responses = []) {
     const calls = [];
@@ -47,6 +49,18 @@ describe('blank PostgreSQL database contract', () => {
         assert.match(coreMigration, /unique index if not exists contacts_phone_number_unique\s+on public\.contacts\(phone_number\)/);
         assert.match(coreMigration, /media_url\s+text,/);
         assert.match(coreMigration, /claimed_at\s+timestamptz/);
+    });
+});
+
+describe('ranked-threading publication contract', () => {
+    test('backfills identities before enforcing non-null and exposes a safe publisher default', () => {
+        const addAt = rankedThreadMigration.indexOf('add column if not exists normalized_value text');
+        const backfillAt = rankedThreadMigration.indexOf('update public.communication_identities set normalized_value=');
+        const nonNullAt = rankedThreadMigration.indexOf('alter column normalized_value set not null');
+
+        assert.ok(addAt >= 0 && addAt < backfillAt && backfillAt < nonNullAt);
+        assert.match(publishCompatibilityMigration, /alter column normalized_value set default ''/);
+        assert.doesNotMatch(publishCompatibilityMigration, /\b(?:delete|truncate|drop)\b/i);
     });
 });
 
