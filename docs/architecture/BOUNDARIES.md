@@ -1,44 +1,38 @@
-# Application boundaries and authority â€” Phase 01
+# Application boundaries and authority — Phase 01
 
-Contract version: email authority 1.0. Application ownership is unchanged.
+Contract version: email authority 1.1. Memory remains in Communications Service.
 
-| Authoritative owner | Owns | Must not own |
-|---|---|---|
-| Communications Service | Canonical people/identities, communications and cross-channel threads, providers, mailbox credentials/drafts, transcripts, existing facts/promise extraction, memory/search/enrichment, delivery receipts | HyperFlow project permissions, accepted business obligations, workflow decisions, reports or publication workflows |
-| HyperFlow | Organization membership/project scope, business intent and delegation, Asks and run transitions, schedules, operational obligations, business integration actions and product UI | Duplicate people/thread authority, provider transport clients or a second memory database |
+| Authoritative owner | Responsibility |
+|---|---|
+| Communications Service | Canonical people/identities, cross-channel threads, providers, mailbox credentials/drafts, transcripts, existing memory/extraction/search/enrichment, delivery receipts and persisted account email authority |
+| HyperFlow | Organization membership and project access, delegation and business approval, Asks, accepted operational commitments, workflow/run transitions, schedules, reporting and product UI |
 
-Services exchange scoped REST requests and signed canonical events; neither reads or writes the other's database. Explicit thread/Ask bindings win over inferred similarity. A transport acknowledgement, extracted promise or successful phone outcome cannot itself constitute workflow approval or verified fulfillment.
+Services exchange scoped REST requests and signed canonical events. Neither accesses the other's database. HyperFlow displays Communications context without creating a competing contact, thread or memory authority. Explicit thread/Ask bindings take precedence over inferred similarity. An extracted promise, delivery receipt or phone outcome is evidence; it does not itself approve a workflow or prove a business commitment fulfilled. Calendar context remains in Communications; booking decisions and business integration actions remain in HyperFlow.
 
-## Email ceiling
+## Account email authority
 
-Both backends accept the non-secret server setting `EMAIL_SEND_POLICY_BY_TENANT`, a JSON object keyed by exact tenant/organization ID. Values are `draft_only` or `allow_send`. Example for isolated fixtures:
+Every organization can select `draft_only` or `allow_send`. This is an organization/account setting, not a hard-coded CEO exception or an individual mailbox setting. Unconfigured accounts default to draft-only. HyperFlow Settings exposes the option; verified organization owners/admins may save it, members may read it. The CEO's first organization therefore starts draft-only without having to guess its ID.
 
-```json
-{"ceo":"draft_only","sender":"allow_send"}
-```
+Communications stores the selection in existing `tenants.metadata.email_send_policy`, with an opaque `email_policy_version`. No new service or schema migration is needed. HyperFlow accesses this through REST, not Firebase duplication. GET returns `{mode, configuredMode, version}`; POST accepts `{mode, version}`. Compare-and-swap against the previous metadata prevents lost updates; stale writes return 409 and require reload. Unrelated metadata is preserved.
 
-Configure the real CEO ID as draft_only in **both** deployments before claiming end-to-end production enforcement. Never place this in browser settings, Project Data, a request body or a VITE variable. Do not copy the literal fixture ID into production.
+The optional backend `EMAIL_SEND_POLICY_BY_TENANT` JSON map remains an operator override: exact tenant values are `draft_only` or `allow_send`. A draft-only restriction in either the saved setting or either backend wins. An explicit operator allow can initialize an account's authority but cannot broaden a saved draft-only setting. Unset maps default to `{}`; malformed configuration fails closed with 503. UI shows both selected and effective modes so an operator ceiling is visible.
 
-HyperFlow defaults unlisted organizations to draft-only. An explicit server allow_send entry is only a ceiling; existing route authentication, tenant checks and action/review policy still apply. Communications preserves existing independent tenants' behavior when unlisted, with its existing email:send capability requirement. This compatibility difference is deliberate and pinned in `contracts/email-authority.v1.json`. A configured Communications restriction wins over wildcard/admin credentials. Malformed configuration fails closed with HTTP 503; configured denial uses 403.
+HyperFlow reads the authoritative policy before outgoing email. Communications checks at the HTTP send handler and immediately before provider dispatch. Policy denial returns 403 with actionable draft-only text. Send-only actions/Ask deliveries fail explicitly; they do not claim delivery or silently become drafts. Existing mailbox draft paths remain available. Policy changes govern subsequent checks; they cannot recall a provider request already in flight.
 
-HyperFlow checks its shared outgoing email client, covering direct send requests, workflow actions, Ask emails and agent/digest send fallback. Provider-native drafting is unchanged. Send-only paths are held as errors with actionable draft-only text; they are not silently converted into drafts or reported delivered. Existing mailbox draft paths remain available. Communications checks before send processing and again at the provider boundary.
+`allow_send` grants no new project access or workflow approval. Existing recipient, purpose, capability, review and idempotency checks still apply. SMS and phone grants remain separate. The existing automatic reply policy also remains separate from this account email ceiling.
 
-The transport setting cannot replace HyperFlow's business approval. Conversely, HyperFlow cannot override a Communications ceiling. Both configurations must agree for the same tenant. Pending send requests must be reconciled before replay after policy changes.
+## Authentication and API
 
-## Authentication and scope
+- HyperFlow GET/POST `/api/communications/email-policy` uses verified Firebase organization membership. Writes require owner/admin. Body-supplied organization IDs, approval and policy claims confer no additional authority.
+- Communications GET/POST `/v1/tenant-policy/email` uses authenticated tenant scope. Reads require `communications:read`; writes require `communications:write` plus `tenant:policy:manage`. These are service-client grants; HyperFlow separately checks the human role. Legacy wildcard access remains single-tenant.
+- POST `/v1/messages` additionally requires `sms:send`; POST `/v1/calls` additionally requires `voice:call`; POST `/v1/emails` requires `email:send`. Draft creation uses `email:draft`. Wildcard clients remain subject to saved email authority.
+- Direct HyperFlow task and email requests verify the project belongs to the authenticated organization. Existing person/project grants and private voice-context guards remain in force. Tenant-wide `communications:read` is not a project-scoped end-user grant; the P03 context audit must close remaining read-surface gaps before expansion.
+- Shared canonical event fixtures remain owned by Communications; HyperFlow consumes them. Keep shared fixtures semantically identical. Prefer additive fields; breaking changes require a versioned fixture and consumer verification in both repositories. The Phase 01 OpenAPI files supplement the existing full API references.
 
-- HyperFlow derives organization membership from verified Firebase identity. Direct task execution requires a project in that organization; direct email dispatch verifies its project as well. Body-supplied tenant/approval/policy values confer no authority.
-- Communications derives tenant scope from the authenticated client. Named clients require allowed_tenants and capabilities; legacy credentials remain single-tenant. Ordinary read/write requirements still apply.
-- POST /v1/messages additionally requires sms:send. POST /v1/calls additionally requires voice:call. POST /v1/emails already requires email:send. Draft creation uses email:draft. Wildcard clients retain their channel capabilities, subject to the email ceiling.
-- Before upgrading scoped clients, grant only the channels they are intended to use. A draft-only client should never receive wildcard merely to resolve an authorization error.
-- communications:read is a tenant-wide service grant, not a project-limited end-user grant. HyperFlow must validate person/project access before selecting context; this phase does not introduce a new external memory UI. The P03 audit must verify bounded memory views before expanding them.
-- Existing person-project grants, voice context guards, signed webhook verification and idempotency remain authoritative. SMS/voice capabilities permit channel access, not arbitrary financial or commercial decisions.
+## Release and recovery
 
-## Compatibility and release order
+This branch starts from current remote main, preserving newer Communications `end_call` support and HyperFlow acceptance documentation. Unpublished ranked-threading/Register work remains in the original checkouts for Phase 02.
 
-This phase branches from current GitHub main, preserving the newer Communications end_call change and HyperFlow acceptance documentation. Unpublished ranked-threading changes remain in their original checkout for Phase 02; the policy branch does not pretend to include them.
+Deploy Communications first, then HyperFlow. Existing unconfigured sending accounts will become draft-only: inventory accounts and explicitly retain `allow_send` only where already authorized before rollout. Do not grant wildcard to bypass missing scoped capabilities. Confirm the intended client has policy-management permission before enabling the settings UI.
 
-Deploy Communications support and configure the real tenant restriction first, then HyperFlow. Check config agreement and run non-delivery authorization probes. Test actual delivery only against controlled authorized targets. No schema migration or memory extraction is required.
-
-API callers should handle 403 as a policy denial rather than retry indefinitely, and 503 as invalid/unavailable configuration. Existing accepted operations retain their receipts. Rollback must preserve a transport-side draft-only restriction; never restore an unrestricted sender simply to remove a UI error.
-
+Missing policy storage/support fails closed. Handle 403 without automatic retry; 409 requires reload; 503 indicates configuration/storage/service availability. Keep Communications enforcement during HyperFlow rollback. Reconcile uncertain provider receipts before retrying an accepted operation. Local fixtures prove contracts and enforcement paths, not production configuration or provider delivery.

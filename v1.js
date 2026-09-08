@@ -12,7 +12,7 @@ import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getTh
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 import { tenantDatabase } from './tenantContext.js';
 import { emailEnabled } from './emailWebhook.js';
-import { assertEmailSendAllowed } from './emailPolicy.js';
+import { assertEmailSendAllowed, readEmailPolicy, saveEmailPolicy } from './emailPolicy.js';
 import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { outboundEmailRequest } from './email.js';
@@ -116,9 +116,10 @@ function parseSemantic(body = {}) {
     };
 }
 
-export default async function v1Routes(fastify) {
+export default async function v1Routes(fastify, options = {}) {
+    const policyDatabase = () => options.database || getDatabase();
     fastify.addHook('preHandler', async (request, reply) => {
-        const rejected = await rejectUnauthorizedTenant(request, reply, getDatabase(), 'Communications API');
+        const rejected = await rejectUnauthorizedTenant(request, reply, policyDatabase(), 'Communications API');
         if (rejected) return rejected;
         const capability = request.method === 'GET' ? 'communications:read' : 'communications:write';
         const denied = rejectMissingCapability(request, reply, capability);
@@ -142,6 +143,17 @@ export default async function v1Routes(fastify) {
             };
         }
         return null;
+    });
+
+    fastify.get('/tenant-policy/email', async (request, reply) => {
+        try { return await readEmailPolicy(policyDatabase(), request.tenantId); }
+        catch (error) { return reply.code(error.statusCode || 503).send({ error: error.message }); }
+    });
+    fastify.post('/tenant-policy/email', async (request, reply) => {
+        const denied = rejectMissingCapability(request, reply, 'tenant:policy:manage');
+        if (denied) return denied;
+        try { return await saveEmailPolicy(policyDatabase(), request.tenantId, request.body); }
+        catch (error) { return reply.code(error.statusCode || 503).send({ error: error.message }); }
     });
 
     fastify.get('/mailboxes', async (request, reply) => {
@@ -509,7 +521,7 @@ export default async function v1Routes(fastify) {
     });
 
     fastify.post('/emails', async (request, reply) => {
-        try { assertEmailSendAllowed(request.tenantId); }
+        try { const policy = await readEmailPolicy(policyDatabase(), request.tenantId); assertEmailSendAllowed(request.tenantId, policy.mode); }
         catch (error) { return reply.code(error.statusCode || 503).send({ error: error.message, code: error.code }); }
         if (!emailEnabled()) return reply.code(503).send({ error: 'Email delivery is disabled' });
         const db = database(reply); if (!db) return reply;

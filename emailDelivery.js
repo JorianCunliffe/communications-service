@@ -1,5 +1,6 @@
 import { emailProvider } from './emailProviders.js';
-import { assertEmailSendAllowed } from './emailPolicy.js';
+import { assertEmailSendAllowed, readEmailPolicy } from './emailPolicy.js';
+import { getDatabase } from './database.js';
 import { normaliseAddress, outboundEmailRequest } from './email.js';
 
 export async function loadEmailConnection(db, tenantId, { connectionId = null, serviceIdentityId = null, from = null } = {}) {
@@ -20,8 +21,9 @@ export async function loadEmailConnection(db, tenantId, { connectionId = null, s
     return { connection: connection.data, serviceIdentity };
 }
 
-export async function sendEmailWithProvider({ connection, request, idempotencyKey }) {
-    assertEmailSendAllowed(connection?.tenant_id);
+export async function sendEmailWithProvider({ connection, request, idempotencyKey, database = getDatabase() }) {
+    const policy = await readEmailPolicy(database, connection?.tenant_id);
+    assertEmailSendAllowed(connection?.tenant_id, policy.mode);
     const email = outboundEmailRequest(request);
     const result = await emailProvider(connection).send(connection, email, idempotencyKey);
     if (!result?.id) throw new Error('Email provider accepted the request without returning an email ID');

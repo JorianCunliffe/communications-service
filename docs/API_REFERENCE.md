@@ -1,6 +1,6 @@
 # Communications Service API Reference
 
-Phase 01 authorization addition: POST `/v1/messages` requires `sms:send` and POST `/v1/calls` requires `voice:call`, in addition to `communications:write`. Wildcard clients retain access. POST `/v1/emails` requires `email:send` and respects the backend tenant ceiling even for wildcard clients. Configure the CEO tenant in `EMAIL_SEND_POLICY_BY_TENANT`; a denial returns 403 with `code: email_draft_only`, invalid policy returns 503. Other tenants are unchanged unless configured. See [authority contract](architecture/BOUNDARIES.md) and [API fragment](../contracts/phase01.openapi.json).
+Phase 01 adds account email authority and separate sms:send / voice:call capabilities. All unconfigured accounts default to draft-only. See [authority contract](architecture/BOUNDARIES.md).
 
 Updated: 31 August 2026. Contract release: `2.3.0`.
 
@@ -1232,3 +1232,7 @@ Errors are JSON unless the endpoint is a Twilio webhook rejection:
 - Native Plaud polling requires an injected authenticated adapter; external Plaud pushes are supported immediately.
 - `/v1/calls` trusts authenticated `overrides`; the legacy call route has the stricter allow-list.
 - Inbound email attachment metadata is persisted, but no protected endpoint currently lists that metadata or returns attachment content.
+
+## Account email authority
+
+GET `/v1/tenant-policy/email` returns `{mode, configuredMode, version}` for the authenticated tenant; requires `communications:read`. POST `/v1/tenant-policy/email` accepts `{mode, version}` and additionally requires `tenant:policy:manage` and `communications:write`. Mode is `draft_only` or `allow_send`; version is the opaque value from GET. Success returns the updated policy, 400 invalid input, 401 unauthenticated, 403 denied, 409 stale update, 503 unavailable storage/configuration. This is a synchronous, version-checked setting change, not a communication operation. Re-read after an uncertain save before retrying. No provider delivery occurs.

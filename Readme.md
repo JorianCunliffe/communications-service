@@ -1,6 +1,6 @@
 # Communications Service
 
-Phase 01 adds tenant email ceilings and explicit `sms:send` / `voice:call` capabilities for named API clients. Configure the CEO tenant as `draft_only` in backend `EMAIL_SEND_POLICY_BY_TENANT` before rollout. Other unlisted tenants retain their existing capability-based behavior. Memory remains in this service. See [boundaries and authority](docs/architecture/BOUNDARIES.md).
+Phase 01 adds an organization-wide email option: Draft only (default) or Allow authorized sending. Owners/admins manage it in HyperFlow Settings; Communications stores and enforces it. SMS/voice permissions remain separate. See [boundaries and rollout](docs/architecture/BOUNDARIES.md).
 
 Current contract release: `2.3.0`.
 

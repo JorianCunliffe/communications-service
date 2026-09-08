@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "environment": "EMAIL_SEND_POLICY_BY_TENANT",
   "policies": {
     "ceo": "draft_only",
@@ -19,7 +19,7 @@
     {
       "tenant": "unconfigured",
       "hyperflow": false,
-      "communications": true
+      "communications": false
     }
   ]
 }
