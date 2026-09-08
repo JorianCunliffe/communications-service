@@ -12,6 +12,7 @@ import { assertContactable, resolveConfig, resolveInboundCall, resolveTenantForP
 import { databaseProvider, getDatabase } from './database.js';
 import { recordAnswerDetection, recordCall, tenantForCall, updateCallStatus, recordToolCall, updateCallProjectContext, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
+import { createTranscriptDrain } from './transcriptDrain.js';
 import { recordMessage, tenantForMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
@@ -78,7 +79,7 @@ const VERSION = (() => {
 const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
-        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
+        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
@@ -840,6 +841,9 @@ fastify.register(async (fastify) => {
         let wrapUpTimer = null;
         let limitTimer = null;
         let drainTimer = null;
+        let transcriptDrain = null;
+        let mediaClosed = false;
+        let receivedMedia = false;
 
         const clearCallTimers = () => {
             for (const timer of [wrapUpTimer, limitTimer, drainTimer]) if (timer) clearTimeout(timer);
@@ -854,11 +858,6 @@ fastify.register(async (fastify) => {
             goodbyeReason = null;
             clearCallTimers();
             console.log(`Ending call ${callSid || '(no CallSid)'}: ${reason}`);
-            try {
-                if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-            } catch (error) {
-                console.warn(`Closing the OpenAI socket failed: ${error.message}`);
-            }
             try {
                 connection.close();
             } catch (error) {
@@ -937,6 +936,7 @@ fastify.register(async (fastify) => {
         // item id, and the committed event has the item id but not the timing.
         let pendingSpeechStartMs = null;
         const turnStartMs = new Map(); // item_id -> stream ms when it began
+        const pendingInputTranscriptions = new Set();
 
         // A call long enough to hit this has other problems, but an unbounded
         // array on a connection that stays open is not something to leave to
@@ -1263,6 +1263,7 @@ fastify.register(async (fastify) => {
                 if (response.type === 'session.updated') at('sessionUpdated');
 
                 if (response.type === 'response.output_audio.delta' && response.delta) {
+                    if (mediaClosed || connection.readyState !== WebSocket.OPEN) return;
                     const audioDelta = {
                         event: 'media',
                         streamSid: streamSid,
@@ -1309,6 +1310,7 @@ fastify.register(async (fastify) => {
                 // transcript will arrive under.
                 if (response.type === 'input_audio_buffer.committed' && response.item_id) {
                     turnStartMs.set(response.item_id, pendingSpeechStartMs ?? streamMs());
+                    pendingInputTranscriptions.add(response.item_id);
                     pendingSpeechStartMs = null;
                 }
 
@@ -1321,6 +1323,15 @@ fastify.register(async (fastify) => {
                         startMs: turnStartMs.get(response.item_id) ?? null,
                     });
                     turnStartMs.delete(response.item_id);
+                    pendingInputTranscriptions.delete(response.item_id);
+                    transcriptDrain?.pendingSettled();
+                }
+
+                if (response.type === 'conversation.item.input_audio_transcription.failed') {
+                    console.warn(`Input transcription failed for ${callSid || '(no callSid)'}`);
+                    turnStartMs.delete(response.item_id);
+                    pendingInputTranscriptions.delete(response.item_id);
+                    transcriptDrain?.pendingSettled();
                 }
 
                 // Iris's own words. Note this is what she generated, which is
@@ -1366,6 +1377,7 @@ fastify.register(async (fastify) => {
 
                 switch (data.event) {
                     case 'media':
+                        receivedMedia = true;
                         latestMediaTimestamp = data.media.timestamp;
                         if (SHOW_TIMING_MATH) console.log(`Received media message with timestamp: ${latestMediaTimestamp}ms`);
                         if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
@@ -1428,8 +1440,8 @@ fastify.register(async (fastify) => {
             // fire against a closed socket for every call the process has ever
             // handled.
             clearCallTimers();
-            if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-            flushTranscript();
+            mediaClosed = true;
+            transcriptDrain.mediaClosed();
             console.log('Client disconnected.');
         });
 
@@ -1457,9 +1469,23 @@ fastify.register(async (fastify) => {
                 .catch((error) => console.warn(`Post-call processing failed for ${callSid}: ${error.message}`));
         };
 
+        transcriptDrain = createTranscriptDrain({
+            hasPending: () => pendingSpeechStartMs !== null || pendingInputTranscriptions.size > 0,
+            shouldWait: () => config.liveTranscript && receivedMedia,
+            finalize: () => {
+                flushTranscript();
+                try {
+                    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+                } catch (error) {
+                    console.warn(`Closing the OpenAI socket failed: ${error.message}`);
+                }
+            },
+        });
+
         // Handle WebSocket close and errors
         const handleOpenAiClose = () => {
             console.log('Disconnected from the OpenAI Realtime API');
+            transcriptDrain.providerClosed();
         };
 
         const handleOpenAiError = (error) => {

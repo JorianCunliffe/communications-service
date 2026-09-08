@@ -19,6 +19,94 @@ import {
     validate,
     fromExternal,
 } from '../transcripts.js';
+import { createTranscriptDrain } from '../transcriptDrain.js';
+
+describe('call transcript teardown drain', () => {
+    test('finalizes immediately when no caller transcription is pending', () => {
+        let finalized = 0;
+        const drain = createTranscriptDrain({ hasPending: () => false, finalize: () => finalized++ });
+        drain.mediaClosed();
+        drain.mediaClosed();
+        assert.equal(finalized, 1);
+    });
+
+    test('waits for a committed caller turn to finish transcription', () => {
+        let pending = true;
+        let finalized = 0;
+        let timeout;
+        let cancelled = false;
+        const drain = createTranscriptDrain({
+            hasPending: () => pending,
+            finalize: () => finalized++,
+            schedule: (fn) => { timeout = fn; return 1; },
+            cancel: () => { cancelled = true; },
+        });
+
+        drain.mediaClosed();
+        assert.equal(finalized, 0);
+        pending = false;
+        drain.pendingSettled();
+        assert.equal(finalized, 1);
+        assert.equal(cancelled, true);
+        timeout();
+        assert.equal(finalized, 1);
+    });
+
+    test('uses a bounded timeout when transcription never settles', () => {
+        let finalized = 0;
+        let timeout;
+        const drain = createTranscriptDrain({
+            hasPending: () => true,
+            finalize: () => finalized++,
+            schedule: (fn, delay) => { timeout = fn; assert.equal(delay, 2000); return 1; },
+        });
+
+        drain.mediaClosed();
+        assert.equal(finalized, 0);
+        timeout();
+        assert.equal(finalized, 1);
+    });
+
+    test('waits for late VAD events even before a pending item is known', () => {
+        let pending = false;
+        let finalized = 0;
+        let timeout;
+        const drain = createTranscriptDrain({
+            hasPending: () => pending,
+            shouldWait: () => true,
+            finalize: () => finalized++,
+            schedule: (fn) => { timeout = fn; return 1; },
+        });
+
+        drain.mediaClosed();
+        assert.equal(finalized, 0);
+        pending = true;
+        drain.pendingSettled();
+        assert.equal(finalized, 0);
+        pending = false;
+        drain.pendingSettled();
+        assert.equal(finalized, 1);
+        timeout();
+        assert.equal(finalized, 1);
+    });
+
+    test('finalizes once when the provider closes during the grace window', () => {
+        let finalized = 0;
+        let timeout;
+        const drain = createTranscriptDrain({
+            hasPending: () => true,
+            shouldWait: () => true,
+            finalize: () => finalized++,
+            schedule: (fn) => { timeout = fn; return 1; },
+        });
+
+        drain.mediaClosed();
+        drain.providerClosed();
+        timeout();
+        drain.pendingSettled();
+        assert.equal(finalized, 1);
+    });
+});
 
 describe('transcripts – segments', () => {
     test('keeps text, role and timing', () => {
