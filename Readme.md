@@ -1,5 +1,7 @@
 # Communications Service
 
+Phase 01 adds tenant email ceilings and explicit `sms:send` / `voice:call` capabilities for named API clients. Configure the CEO tenant as `draft_only` in backend `EMAIL_SEND_POLICY_BY_TENANT` before rollout. Other unlisted tenants retain their existing capability-based behavior. Memory remains in this service. See [boundaries and authority](docs/architecture/BOUNDARIES.md).
+
 Current contract release: `2.3.0`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.

@@ -1,5 +1,7 @@
 # Communications Service API Reference
 
+Phase 01 authorization addition: POST `/v1/messages` requires `sms:send` and POST `/v1/calls` requires `voice:call`, in addition to `communications:write`. Wildcard clients retain access. POST `/v1/emails` requires `email:send` and respects the backend tenant ceiling even for wildcard clients. Configure the CEO tenant in `EMAIL_SEND_POLICY_BY_TENANT`; a denial returns 403 with `code: email_draft_only`, invalid policy returns 503. Other tenants are unchanged unless configured. See [authority contract](architecture/BOUNDARIES.md) and [API fragment](../contracts/phase01.openapi.json).
+
 Updated: 31 August 2026. Contract release: `2.3.0`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.

@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "environment": "EMAIL_SEND_POLICY_BY_TENANT",
+  "policies": {
+    "ceo": "draft_only",
+    "sender": "allow_send"
+  },
+  "cases": [
+    {
+      "tenant": "ceo",
+      "hyperflow": false,
+      "communications": false
+    },
+    {
+      "tenant": "sender",
+      "hyperflow": true,
+      "communications": true
+    },
+    {
+      "tenant": "unconfigured",
+      "hyperflow": false,
+      "communications": true
+    }
+  ]
+}

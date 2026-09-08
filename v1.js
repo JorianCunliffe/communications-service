@@ -12,6 +12,7 @@ import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getTh
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
 import { tenantDatabase } from './tenantContext.js';
 import { emailEnabled } from './emailWebhook.js';
+import { assertEmailSendAllowed } from './emailPolicy.js';
 import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { outboundEmailRequest } from './email.js';
@@ -424,6 +425,8 @@ export default async function v1Routes(fastify) {
     });
 
     fastify.post('/messages', async (request, reply) => {
+        const denied = rejectMissingCapability(request, reply, 'sms:send');
+        if (denied) return denied;
         const db = database(reply); if (!db) return reply;
         const { to, from, body } = request.body || {};
         if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 phone number' });
@@ -506,6 +509,8 @@ export default async function v1Routes(fastify) {
     });
 
     fastify.post('/emails', async (request, reply) => {
+        try { assertEmailSendAllowed(request.tenantId); }
+        catch (error) { return reply.code(error.statusCode || 503).send({ error: error.message, code: error.code }); }
         if (!emailEnabled()) return reply.code(503).send({ error: 'Email delivery is disabled' });
         const db = database(reply); if (!db) return reply;
         const body = request.body || {};
@@ -662,6 +667,8 @@ export default async function v1Routes(fastify) {
     });
 
     fastify.post('/calls', async (request, reply) => {
+        const denied = rejectMissingCapability(request, reply, 'voice:call');
+        if (denied) return denied;
         const db = database(reply); if (!db) return reply;
         const { to, from, overrides = {} } = request.body || {};
         if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 phone number' });
