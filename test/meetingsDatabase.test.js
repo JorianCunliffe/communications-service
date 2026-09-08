@@ -64,6 +64,9 @@ test("transcribed meeting imports preserve topic isolation, versions, duplicates
     const first = await request("POST", "/meetings", payload());
     assert.equal(first.statusCode, 201, first.body);
     const imported = first.json();
+    const listed = await request("GET", "/meetings");
+    assert.equal(listed.statusCode, 200, listed.body);
+    assert.equal(listed.json().data[0].id, imported.id);
     assert.equal(imported.topics.length, 2);
     assert.notEqual(imported.topics[0].threadId, imported.topics[1].threadId);
     const duplicate = await request("POST", "/meetings", payload());

@@ -350,7 +350,7 @@ export async function listMeetings(db, offset = 0) {
     .from("recordings")
     .select("id,title,recorded_at,metadata,updated_at")
     .eq("metadata->>kind", "meeting_manifest")
-    .neq("metadata->>visibility", "private")
+    .eq("metadata->>visibility", "project")
     .order("created_at", { ascending: false })
     .range(offset, offset + 50);
   if (result.error) throw new MeetingError(503, "Meetings are unavailable");
