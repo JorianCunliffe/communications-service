@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "owner": "communications-service",
+  "tenant": "phase02_contract",
+  "person": {
+    "name": "Alex",
+    "identities": [
+      {
+        "type": "email",
+        "value": "alex@example.com"
+      },
+      {
+        "type": "phone",
+        "value": "+61400000111"
+      }
+    ]
+  },
+  "journey": [
+    {
+      "channel": "email",
+      "identity": "alex@example.com",
+      "subject": "Alpha settlement",
+      "correlation": {
+        "external_project_id": "alpha"
+      }
+    },
+    {
+      "channel": "sms",
+      "identity": "+61400000111",
+      "subject": "Alpha settlement",
+      "correlation": {
+        "external_project_id": "alpha"
+      }
+    },
+    {
+      "channel": "voice",
+      "identity": "+61400000111",
+      "subject": "Alpha settlement",
+      "correlation": {
+        "external_project_id": "alpha"
+      }
+    }
+  ],
+  "unrelated": {
+    "channel": "email",
+    "identity": "alex@example.com",
+    "subject": "Beta design",
+    "correlation": {
+      "external_project_id": "beta"
+    }
+  },
+  "correction": {
+    "create_new": true,
+    "reason_code": "wrong_topic",
+    "reason_detail": "Separate settlement follow-up"
+  }
+}

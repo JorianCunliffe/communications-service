@@ -17,6 +17,8 @@ export const TENANT_TABLES = new Set([
     'communication_attachments', 'email_messages', 'email_reply_routes',
     'mailbox_oauth_credentials', 'mailbox_sync_state', 'mailbox_oauth_states',
     'mailbox_drafts', 'mailbox_audit_events',
+    'communication_thread_participants', 'thread_resolution_decisions',
+    'thread_resolution_feedback',
 ]);
 
 const TENANT_RPCS = new Set([
@@ -24,6 +26,9 @@ const TENANT_RPCS = new Set([
     'resolve_communication_ask', 'search_communications', 'suggest_terms',
     'consume_mailbox_oauth_state',
     'claim_mailbox_sync',
+    'correct_communication_thread',
+    'update_communication_thread_register',
+    'read_communication_thread_register',
 ]);
 
 function withTenant(value, tenantId) {

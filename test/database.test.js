@@ -51,6 +51,50 @@ describe('blank PostgreSQL database contract', () => {
 });
 
 describe('PostgreSQL compatibility adapter', () => {
+    test('keeps a transaction on one pooled connection and releases it after commit', async () => {
+        const connection = capture([{ rows: [] }, { rows: [{ id: 'person-1' }] }, { rows: [] }]);
+        const releases = [];
+        connection.release = error => releases.push(error);
+        const pool = { query: async () => assert.fail('Transaction must not use pool.query'), connect: async () => connection };
+        const value = await createPostgresClient(pool).transaction(async client => {
+            assert.equal(client.transaction, undefined, 'A bound client must not acquire another connection');
+            const result = await client.from('contacts').select('id');
+            assert.equal(result.error, null);
+            return result.data[0].id;
+        });
+        assert.equal(value, 'person-1');
+        assert.equal(connection.calls[0].sql, 'begin');
+        assert.match(connection.calls[1].sql, /from public\."contacts"/);
+        assert.equal(connection.calls[2].sql, 'commit');
+        assert.deepEqual(releases, [undefined]);
+    });
+
+    test('rolls back a failed transaction and preserves the original error', async () => {
+        const connection = capture();
+        const releases = [];
+        connection.release = error => releases.push(error);
+        const failure = new Error('Resolution failed');
+        const client = createPostgresClient({ query: async () => assert.fail('Unexpected pool query'), connect: async () => connection });
+        await assert.rejects(client.transaction(async () => { throw failure; }), error => error === failure);
+        assert.deepEqual(connection.calls.map(call => call.sql), ['begin', 'rollback']);
+        assert.deepEqual(releases, [undefined]);
+    });
+
+    test('discards a pooled connection when rollback fails', async () => {
+        const statements = [];
+        const releases = [];
+        const rollbackError = new Error('Connection lost during rollback');
+        const workError = new Error('Original resolution error');
+        const connection = {
+            async query(sql) { statements.push(sql); if (sql === 'rollback') throw rollbackError; return { rows: [] }; },
+            release(error) { releases.push(error); }
+        };
+        const client = createPostgresClient({ query: async () => assert.fail('Unexpected pool query'), connect: async () => connection });
+        await assert.rejects(client.transaction(async () => { throw workError; }), error => error === workError);
+        assert.deepEqual(statements, ['begin', 'rollback']);
+        assert.deepEqual(releases, [rollbackError]);
+    });
+
     test('builds parameterised select, filter, order and pagination queries', async () => {
         const database = capture([{ rows: [{ id: 'contact-1', name: 'Alex' }] }]);
         const client = createPostgresClient(database);

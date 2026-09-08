@@ -110,6 +110,9 @@ export async function recordMessage({
             participantIdentity: otherParty,
             serviceIdentity: twilioNumber,
             direction,
+            channel: 'sms',
+            content: body,
+            communicationId,
             threadId,
             purpose: canonicalPurpose,
             correlation: canonicalCorrelation,
@@ -131,11 +134,19 @@ export async function recordMessage({
                 correlation: semantic.correlation,
                 communication_thread_id: semantic.threadId,
                 thread_link_type: semantic.linkType,
+                person_id: semantic.personId || null,
+                resolution: semantic.resolution,
             }),
             'SMS message insert'
         );
 
         if (error) throw new Error(error.message);
+        const resolution = await withTimeout(
+            db.from('communications').update({ resolution: semantic.resolution })
+                .eq('tenant_id', scopedTenant).eq('communication_id', communicationId),
+            'SMS thread resolution update'
+        );
+        if (resolution.error) throw new Error(resolution.error.message);
         return {
             communicationId,
             threadId: semantic.threadId,

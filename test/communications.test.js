@@ -8,7 +8,11 @@ import {
     canonicalCommunication,
     normaliseCorrelation,
     normalisePurpose,
+    normaliseThreadIdentity,
     prefixedId,
+    scoreThreadCandidate,
+    THREAD_SCORE_MARGIN,
+    THREAD_SCORE_THRESHOLD,
     resolveCommunicationThread,
 } from '../communicationModel.js';
 
@@ -102,7 +106,10 @@ class FakeQuery {
 
 class FakeDb {
     constructor() {
-        this.tables = { communication_threads: [], ask_bindings: [], communication_identities: [] };
+        this.tables = {
+            communication_threads: [], ask_bindings: [], communication_identities: [],
+            communication_thread_participants: [], thread_resolution_decisions: [], thread_resolution_feedback: [],
+        };
     }
     from(table) { return new FakeQuery(this, table); }
 }
@@ -215,8 +222,8 @@ describe('Ask-aware cross-channel threading', () => {
     test('an inbound email joins the one open SMS thread for the same person', async () => {
         const db = new FakeDb();
         db.tables.communication_identities.push(
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000', provider: 'twilio' },
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com', provider: 'gmail' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000', normalized_value: '+61400000000', provider: 'twilio' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com', normalized_value: 'person@example.com', provider: 'gmail' },
         );
         const outboundSms = await resolveCommunicationThread({
             db, tenantId: 'tenant_1', participantIdentity: '+61400000000', direction: 'outbound',
@@ -238,8 +245,8 @@ describe('Ask-aware cross-channel threading', () => {
     test('an exact channel thread wins when the person has another open channel thread', async () => {
         const db = new FakeDb();
         db.tables.communication_identities.push(
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000' },
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000', normalized_value: '+61400000000' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com', normalized_value: 'person@example.com' },
         );
         db.tables.communication_threads.push(
             { tenant_id: 'tenant_1', thread_id: 'thread_sms', person_id: 'person_1', participant_identity: '+61400000000', status: 'open' },
@@ -257,9 +264,9 @@ describe('Ask-aware cross-channel threading', () => {
     test('person-wide inference remains ambiguous when a new channel has two candidates', async () => {
         const db = new FakeDb();
         db.tables.communication_identities.push(
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000' },
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com' },
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'slack', value: 'U_PERSON_1' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'phone', value: '+61400000000', normalized_value: '+61400000000' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'person@example.com', normalized_value: 'person@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'slack', value: 'U_PERSON_1', normalized_value: 'u_person_1' },
         );
         db.tables.communication_threads.push(
             { tenant_id: 'tenant_1', thread_id: 'thread_sms', person_id: 'person_1', participant_identity: '+61400000000', status: 'open' },
@@ -270,15 +277,17 @@ describe('Ask-aware cross-channel threading', () => {
             db, tenantId: 'tenant_1', participantIdentity: 'U_PERSON_1', direction: 'inbound', correlation: {},
         });
 
-        assert.equal(inbound.threadId, null);
+        assert.notEqual(inbound.threadId, 'thread_sms');
+        assert.notEqual(inbound.threadId, 'thread_email');
         assert.equal(inbound.personId, 'person_1');
+        assert.equal(inbound.resolution.method, 'below_threshold');
     });
 
     test('workflow person correlation stays opaque while the internal person comes from identity', async () => {
         const db = new FakeDb();
         db.tables.communication_identities.push({
             tenant_id: 'tenant_1', person_id: '0f63d010-4fca-4cd4-8ad5-b9de136f28d4',
-            type: 'phone', value: '+61400000000', provider: 'twilio',
+            type: 'phone', value: '+61400000000', normalized_value: '+61400000000', provider: 'twilio',
         });
 
         const result = await resolveCommunicationThread({
@@ -295,8 +304,8 @@ describe('Ask-aware cross-channel threading', () => {
     test('an identity mapped to two people never falls back to raw-address inference', async () => {
         const db = new FakeDb();
         db.tables.communication_identities.push(
-            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'shared@example.com' },
-            { tenant_id: 'tenant_1', person_id: 'person_2', type: 'email', value: 'shared@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_1', type: 'email', value: 'shared@example.com', normalized_value: 'shared@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_2', type: 'email', value: 'shared@example.com', normalized_value: 'shared@example.com' },
         );
         db.tables.communication_threads.push({
             tenant_id: 'tenant_1', thread_id: 'thread_raw', participant_identity: 'shared@example.com', status: 'open',
@@ -306,8 +315,9 @@ describe('Ask-aware cross-channel threading', () => {
             db, tenantId: 'tenant_1', participantIdentity: 'shared@example.com', direction: 'inbound', correlation: {},
         });
 
-        assert.equal(inbound.threadId, null);
+        assert.notEqual(inbound.threadId, 'thread_raw');
         assert.equal(inbound.personId, null);
+        assert.equal(inbound.resolution.method, 'ambiguous_identity_new_thread');
     });
 
     test('an explicit thread cannot be reassigned to a different person', async () => {
@@ -330,8 +340,10 @@ describe('Ask-aware cross-channel threading', () => {
         const inbound = await resolveCommunicationThread({
             db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'inbound', purpose: null, correlation: {},
         });
-        assert.equal(inbound.threadId, null);
+        assert.notEqual(inbound.threadId, 'thread_one');
+        assert.notEqual(inbound.threadId, 'thread_two');
         assert.equal(inbound.purpose, null);
+        assert.equal(inbound.resolution.method, 'below_threshold');
     });
 
     test('terminal threads and Ask bindings cannot be reopened', async () => {
@@ -355,7 +367,176 @@ describe('Ask-aware cross-channel threading', () => {
         const result = await resolveCommunicationThread({
             db, tenantId: 'tenant_test', participantIdentity: '+61400000000', direction: 'inbound', correlation: {},
         });
-        assert.equal(result.threadId, null);
+        assert.notEqual(result.threadId, 'thread_other');
+        assert.equal(result.resolution.method, 'below_threshold');
+    });
+});
+
+describe('ranked and correctable threading', () => {
+    const now = '2026-09-02T10:00:00.000Z';
+    const input = {
+        identity: 'alex@example.com', personIds: ['person_alex'], channel: 'email', occurredAt: now,
+        externalProjectId: 'project_alpha', subject: 'Alpha funding approval', content: 'Can we confirm settlement?',
+    };
+
+    test('scores transparent person, project, topic, channel and recency signals', () => {
+        const scored = scoreThreadCandidate({
+            thread_id: 'thread_alpha', person_id: 'person_alex', participant_identity: 'alex@example.com',
+            external_project_id: 'project_alpha', primary_channel: 'email', last_subject: 'Alpha funding settlement',
+            last_activity_at: '2026-09-02T09:00:00.000Z', status: 'open',
+        }, input);
+        assert.ok(scored.score >= THREAD_SCORE_THRESHOLD);
+        assert.deepEqual(scored.signals.map((signal) => signal.name), [
+            'exact_identity', 'person_overlap', 'same_project', 'same_channel', 'topic_overlap', 'recent_6h',
+        ]);
+        assert.ok(scored.confidence > 0.9);
+    });
+
+    test('a different known person is a hard exclusion even on the same project', () => {
+        const scored = scoreThreadCandidate({
+            thread_id: 'thread_other_person', person_id: 'person_blair', external_project_id: 'project_alpha',
+            last_activity_at: '2026-09-02T09:30:00.000Z', status: 'open',
+        }, input);
+        assert.equal(scored.excluded, true);
+        assert.equal(scored.signals[0].name, 'different_person');
+    });
+
+    test('a different known project is a hard exclusion even for the same person and topic', () => {
+        const scored = scoreThreadCandidate({
+            thread_id: 'thread_other_project', person_id: 'person_alex', participant_identity: 'alex@example.com',
+            external_project_id: 'project_beta', last_subject: 'Alpha funding approval settlement',
+            last_activity_at: '2026-09-02T09:59:00.000Z', status: 'open',
+        }, input);
+        assert.equal(scored.excluded, true);
+        assert.equal(scored.signals[0].name, 'different_project');
+    });
+
+    test('normalizes equivalent email and phone channel identities', () => {
+        assert.equal(normaliseThreadIdentity(' Person@Example.COM '), 'person@example.com');
+        assert.equal(normaliseThreadIdentity('tel:+61 (400) 000-000'), '+61400000000');
+        assert.equal(normaliseThreadIdentity('0061400000000'), '+61400000000');
+    });
+
+    test('a human correction permanently blocks the rejected thread and prefers the destination', () => {
+        const feedback = [{
+            active: true, identity_value: 'alex@example.com', person_id: 'person_alex', channel: 'email',
+            external_project_id: 'project_alpha', from_thread_id: 'thread_wrong', to_thread_id: 'thread_right',
+        }];
+        const wrong = scoreThreadCandidate({
+            thread_id: 'thread_wrong', person_id: 'person_alex', participant_identity: 'alex@example.com',
+            external_project_id: 'project_alpha', last_activity_at: '2026-09-02T09:59:00.000Z',
+        }, input, feedback);
+        const right = scoreThreadCandidate({
+            thread_id: 'thread_right', person_id: 'person_alex', participant_identity: 'alex@example.com',
+            external_project_id: 'project_alpha', last_activity_at: '2026-08-30T09:59:00.000Z',
+        }, input, feedback);
+        assert.equal(wrong.excluded, true);
+        assert.equal(wrong.signals[0].name, 'human_rejected');
+        assert.equal(right.signals[0].name, 'human_preferred');
+        assert.ok(right.score >= THREAD_SCORE_THRESHOLD + THREAD_SCORE_MARGIN);
+    });
+
+    test('stale person-only contact creates a new temporal conversation', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push({ tenant_id: 'tenant_1', person_id: 'person_alex', type: 'email', value: 'alex@example.com', normalized_value: 'alex@example.com' });
+        db.tables.communication_threads.push({
+            tenant_id: 'tenant_1', thread_id: 'thread_old', person_id: 'person_alex', participant_identity: 'alex@example.com',
+            primary_channel: 'email', status: 'open', last_activity_at: '2026-06-01T00:00:00.000Z', correlation: {},
+        });
+        const result = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'alex@example.com', direction: 'inbound', channel: 'email',
+            occurredAt: now, communicationId: 'comm_new', correlation: {},
+        });
+        assert.notEqual(result.threadId, 'thread_old');
+        assert.equal(result.resolution.method, 'below_threshold');
+        assert.equal(db.tables.thread_resolution_decisions[0].action, 'created');
+    });
+
+    test('two equally plausible recent threads remain ambiguous and create a new conversation', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push({
+            tenant_id: 'tenant_1', person_id: 'person_alex', type: 'email',
+            value: 'alex@example.com', normalized_value: 'alex@example.com',
+        });
+        db.tables.communication_threads.push(
+            { tenant_id: 'tenant_1', thread_id: 'thread_one', person_id: 'person_alex', participant_identity: 'alex@example.com', primary_channel: 'email', status: 'open', last_activity_at: '2026-09-02T09:30:00.000Z', correlation: {} },
+            { tenant_id: 'tenant_1', thread_id: 'thread_two', person_id: 'person_alex', participant_identity: 'alex@example.com', primary_channel: 'email', status: 'open', last_activity_at: '2026-09-02T09:31:00.000Z', correlation: {} },
+        );
+        const result = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'alex@example.com', direction: 'inbound', channel: 'email',
+            occurredAt: now, communicationId: 'comm_ambiguous', correlation: {},
+        });
+        assert.ok(!['thread_one', 'thread_two'].includes(result.threadId));
+        assert.equal(result.resolution.method, 'ambiguous_margin');
+        assert.equal(result.resolution.candidates.length, 2);
+        assert.ok(result.resolution.score_margin < THREAD_SCORE_MARGIN);
+    });
+
+    test('multi-person evidence rediscovers and prefers the thread covering the whole group', async () => {
+        const db = new FakeDb();
+        db.tables.communication_identities.push(
+            { tenant_id: 'tenant_1', person_id: 'person_alex', type: 'email', value: 'alex@example.com', normalized_value: 'alex@example.com' },
+            { tenant_id: 'tenant_1', person_id: 'person_blair', type: 'email', value: 'blair@example.com', normalized_value: 'blair@example.com' },
+        );
+        db.tables.communication_threads.push(
+            { tenant_id: 'tenant_1', thread_id: 'thread_group', person_id: 'person_alex', participant_identity: 'alex@example.com', primary_channel: 'email', status: 'open', last_activity_at: '2026-09-02T09:00:00.000Z', correlation: {} },
+            { tenant_id: 'tenant_1', thread_id: 'thread_alex_only', person_id: 'person_alex', participant_identity: 'alex@example.com', primary_channel: 'email', status: 'open', last_activity_at: '2026-09-02T09:00:00.000Z', correlation: {} },
+        );
+        db.tables.communication_thread_participants.push(
+            { tenant_id: 'tenant_1', thread_id: 'thread_group', person_id: 'person_alex', normalized_identity: 'alex@example.com' },
+            { tenant_id: 'tenant_1', thread_id: 'thread_group', person_id: 'person_blair', normalized_identity: 'blair@example.com' },
+        );
+        const result = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'blair@example.com', direction: 'inbound', channel: 'email',
+            occurredAt: now, communicationId: 'comm_group', participants: [{ identity: 'alex@example.com', channel: 'email' }],
+            correlation: {},
+        });
+        assert.equal(result.threadId, 'thread_group');
+        const selected = result.resolution.candidates.find((item) => item.thread_id === 'thread_group');
+        assert.ok(selected.signals.some((signal) => signal.name === 'full_person_coverage'));
+        assert.ok(selected.signals.some((signal) => signal.name === 'additional_person_overlap'));
+    });
+
+    test('trusted native correlation can add a new person to an existing group thread', async () => {
+        const db = new FakeDb();
+        db.tables.communication_threads.push({
+            tenant_id: 'tenant_1', thread_id: 'thread_native_email', person_id: 'person_alex',
+            participant_identity: 'alex@example.com', status: 'open', correlation: {},
+        });
+        const result = await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'blair@example.com', personId: 'person_blair',
+            direction: 'inbound', channel: 'email', threadId: 'thread_native_email',
+            allowParticipantExpansion: true, communicationId: 'comm_group_reply', correlation: {},
+        });
+        assert.equal(result.threadId, 'thread_native_email');
+        assert.ok(db.tables.communication_thread_participants.some((item) => item.person_id === 'person_blair'));
+    });
+
+    test('late historical ingestion does not replace the thread latest channel or activity', async () => {
+        const db = new FakeDb();
+        db.tables.communication_threads.push({
+            tenant_id: 'tenant_1', thread_id: 'thread_history', person_id: 'person_alex',
+            participant_identity: 'alex@example.com', primary_channel: 'sms', last_channel: 'email',
+            status: 'open', last_activity_at: '2026-09-02T10:00:00.000Z', correlation: {},
+        });
+        await resolveCommunicationThread({
+            db, tenantId: 'tenant_1', participantIdentity: 'alex@example.com', personId: 'person_alex',
+            direction: 'inbound', channel: 'recording', occurredAt: '2026-09-01T10:00:00.000Z',
+            threadId: 'thread_history', communicationId: 'comm_historical', correlation: {},
+        });
+        const thread = db.tables.communication_threads[0];
+        assert.equal(thread.last_activity_at, '2026-09-02T10:00:00.000Z');
+        assert.equal(thread.last_channel, 'email');
+    });
+
+    test('unscoped feedback does not train the resolver across a whole tenant', () => {
+        const feedback = [{ active: true, from_thread_id: 'thread_alpha', to_thread_id: 'thread_other', reason_code: 'other' }];
+        const scored = scoreThreadCandidate({
+            thread_id: 'thread_alpha', person_id: 'person_alex', participant_identity: 'alex@example.com',
+            external_project_id: 'project_alpha', last_activity_at: '2026-09-02T09:59:00.000Z',
+        }, input, feedback);
+        assert.equal(scored.excluded, false);
+        assert.ok(!scored.signals.some((signal) => signal.name === 'human_rejected'));
     });
 });
 
@@ -376,6 +557,17 @@ describe('database contract', () => {
             'count(distinct i.person_id)=1', 'communication_threads_tenant_person_fk',
             'communication_threads_tenant_person_open',
         ]) assert.match(sql, new RegExp(required.replace(/[()]/g, '\\$&')));
+    });
+
+    test('ranked-thread migration provides a register, decisions, feedback and atomic correction', () => {
+        const sql = readFileSync(new URL('../migrations/019_ranked_thread_resolution.sql', import.meta.url), 'utf8');
+        for (const required of [
+            'communication_thread_participants', 'thread_resolution_decisions', 'thread_resolution_feedback',
+            'candidate_scores', 'correct_communication_thread', 'human_correction', 'wrong_project',
+            'communication_threads_tenant_project_open', 'normalize_communication_identity',
+            'update_communication_thread_register', 'communication_row_id=communication.id',
+            'project_recording_to_communications', 'thread_link_type',
+        ]) assert.match(sql, new RegExp(required));
     });
 });
 

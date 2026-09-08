@@ -32,6 +32,7 @@ import { validate as validateTranscript, fromExternal as fromExternalTranscript,
 import { getContext, renderContext, renderForPrompt, CHANNELS, PLANNED_CHANNELS } from './context.js';
 import { normaliseParticipant, resolveCalendarEvent, resolveExactIdentity } from './calendar.js';
 import { normalisePlaudRecording } from './plaud.js';
+import { normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -445,6 +446,12 @@ export default async function apiRoutes(fastify) {
         if (body.source === 'twilio') {
             return reply.code(400).send({ error: 'Twilio recordings are ingested through /recording-status, not here' });
         }
+        if (body.externalId !== undefined && body.externalId !== null) {
+            const known = await db.from('recordings').select('id,status').eq('source', body.source)
+                .eq('external_id', body.externalId).maybeSingle();
+            if (known.error) return dbError(reply, known.error, 'check the recording identity');
+            if (known.data) return reply.code(200).send({ duplicate: true, source: body.source, externalId: body.externalId });
+        }
 
         const hasAudio = typeof body.mediaUrl === 'string' || typeof body.mediaBase64 === 'string';
         if (!hasAudio && !body.transcript) {
@@ -511,11 +518,43 @@ export default async function apiRoutes(fastify) {
             return reply.code(400).send({ error: '"calendarEventId" did not resolve to exactly one calendar event' });
         }
 
+        const communicationId = prefixedId('comm');
+        const semanticCorrelation = normaliseCorrelation({
+            ...(body.metadata?.correlation || {}),
+            tenant_id: request.tenantId,
+            ...(calendarEventId ? { calendar_event_id: calendarEventId } : {}),
+        });
+        const semanticParticipants = participantInputs.map((item) => ({
+            identity: item.identityValue,
+            personId: item.contactId,
+            channel: 'recording',
+            role: item.metadata?.role || 'participant',
+        }));
+        const semantic = await resolveCommunicationThread({
+            db,
+            tenantId: request.tenantId,
+            participantIdentity: phone || participantInputs[0]?.identityValue || null,
+            direction: 'inbound',
+            channel: 'recording',
+            occurredAt: body.recordedAt || new Date().toISOString(),
+            subject: contextual.title,
+            content: transcript ? toText(transcript) : null,
+            communicationId,
+            participants: semanticParticipants,
+            personId: contactId,
+            projectId: contextual.projectId || calendarEvent?.project_id || null,
+            threadId: contextual.threadId || calendarEvent?.communication_thread_id || null,
+            purpose: normalisePurpose(body.purpose),
+            correlation: semanticCorrelation,
+            allowParticipantExpansion: Boolean(contextual.threadId || calendarEvent?.communication_thread_id),
+        });
+
         const result = await enqueueRecording({
             tenantId: request.tenantId,
+            communicationId,
             source: body.source,
             externalId: body.externalId ?? null,
-            contactId,
+            contactId: semantic.personId || contactId,
             phoneNumber: phone,
             mediaUrl: body.mediaUrl ?? null,
             mediaAuth: body.useProviderAuth === true ? 'provider' : null,
@@ -528,16 +567,18 @@ export default async function apiRoutes(fastify) {
             })),
             calendarEventId,
             projectId: contextual.projectId || calendarEvent?.project_id || null,
-            threadId: contextual.threadId || calendarEvent?.communication_thread_id || null,
+            threadId: semantic.threadId,
+            threadLinkType: semantic.linkType,
+            resolution: semantic.resolution,
             title: contextual.title,
             meetingType: contextual.meetingType,
             metadata: {
                 ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
                 correlation: {
-                    ...(body.metadata?.correlation || {}),
+                    ...semantic.correlation,
                     ...(calendarEventId ? { calendar_event_id: calendarEventId } : {}),
                     ...(contextual.projectId || calendarEvent?.project_id ? { project_id: contextual.projectId || calendarEvent.project_id } : {}),
-                    ...(contextual.threadId || calendarEvent?.communication_thread_id ? { thread_id: contextual.threadId || calendarEvent.communication_thread_id } : {}),
+                    thread_id: semantic.threadId,
                 },
             },
         });

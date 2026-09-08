@@ -1177,11 +1177,12 @@ fastify.register(async (fastify) => {
 
             if (name === 'select_hyperflow_project' && !error && output?.routing?.kind === 'routed' && output.routing.projectId) {
                 try {
-                    await updateCallProjectContext({
+                    const selectedCorrelation = await updateCallProjectContext({
                         callSid,
                         projectId: output.routing.projectId,
                         tenantId: config.tenantId || null,
                     });
+                    config.threadId = selectedCorrelation.thread_id || config.threadId;
                     config.hyperflowRouting = output.routing;
                 } catch (contextError) {
                     console.warn(`Could not persist selected HyperFlow project for ${callSid}: ${contextError.message}`);

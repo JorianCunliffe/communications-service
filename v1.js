@@ -6,7 +6,7 @@ import { recordMessage } from './smsLog.js';
 import { recordCall } from './callLog.js';
 import { enqueueEvent } from './eventOutbox.js';
 import { randomUUID } from 'node:crypto';
-import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
+import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, rankThreadCandidates, resolveCommunicationThread, resolveParticipantPerson } from './communicationModel.js';
 import { calendarCandidates, ingestCalendarEvent, resolveCalendarEvent, resolveCalendarEventId } from './calendar.js';
 import { getEventContext, getLooseEnds, getPersonMemory, getProjectMemory, getThreadMemory, searchMemory } from './memory.js';
 import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperations.js';
@@ -15,7 +15,7 @@ import { emailEnabled } from './emailWebhook.js';
 import { assertEmailSendAllowed, readEmailPolicy, saveEmailPolicy } from './emailPolicy.js';
 import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
-import { outboundEmailRequest } from './email.js';
+import { normaliseAddresses, outboundEmailRequest } from './email.js';
 import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
 import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncMailbox } from './mailboxService.js';
 
@@ -25,17 +25,21 @@ const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'can
 const CALL_OVERRIDE_FIELDS = ['model', 'effort', 'voice', 'temperature', 'systemMessage', 'introMessage', 'introMessage2', 'introVoice', 'greetingText', 'aiSpeaksFirst', 'liveTranscript'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INBOX_DISPOSITIONS = ['candidate_human_response', 'human', 'spam', 'bounce', 'automatic_reply', 'mailing_list', 'unsubscribe_intent', 'system_generated', 'archived', 'unassigned'];
+const THREAD_STATUSES = ['open', 'resolved', 'closed'];
+const THREAD_CORRECTION_REASONS = ['wrong_person', 'wrong_project', 'wrong_topic', 'time_gap', 'channel_boundary', 'duplicate_thread', 'other'];
+
+function participantMetadata(primaryIdentity, participants = []) {
+    const identities = [primaryIdentity, ...participants.map((item) => item?.identity)].filter((item) => typeof item === 'string' && item.trim());
+    return {
+        ...(primaryIdentity ? { participant_identity: primaryIdentity } : {}),
+        ...(identities.length ? { participant_identities: [...new Set(identities)] } : {}),
+    };
+}
 
 export function providerCallbackUrl(baseUrl, path, tenantId) {
     const url = new URL(path, `${String(baseUrl).replace(/\/$/, '')}/`);
     url.searchParams.set('tenant_id', tenantId);
     return url.toString();
-}
-
-function database(reply) {
-    const db = getDatabase();
-    if (!db) reply.code(503).send({ error: 'Communications persistence is not configured' });
-    return db ? tenantDatabase(db, reply.request.tenantId) : null;
 }
 
 function errorReply(reply, error, status = 400) {
@@ -117,9 +121,17 @@ function parseSemantic(body = {}) {
 }
 
 export default async function v1Routes(fastify, options = {}) {
+    // Dependency injection keeps the real HTTP/auth/SQL path testable without
+    // a provider connection. Production registration uses getDatabase().
     const policyDatabase = () => options.database || getDatabase();
+    const rawDatabase = () => options.database || getDatabase();
+    const database = (reply) => {
+        const db = rawDatabase();
+        if (!db) reply.code(503).send({ error: 'Communications persistence is not configured' });
+        return db ? tenantDatabase(db, reply.request.tenantId) : null;
+    };
     fastify.addHook('preHandler', async (request, reply) => {
-        const rejected = await rejectUnauthorizedTenant(request, reply, policyDatabase(), 'Communications API');
+        const rejected = await rejectUnauthorizedTenant(request, reply, rawDatabase(), 'Communications API');
         if (rejected) return rejected;
         const capability = request.method === 'GET' ? 'communications:read' : 'communications:write';
         const denied = rejectMissingCapability(request, reply, capability);
@@ -277,6 +289,13 @@ export default async function v1Routes(fastify, options = {}) {
         const body = request.body || {};
         if (!CHANNELS.includes(body.channel)) return reply.code(400).send({ error: 'Unknown channel' });
         if (!DIRECTIONS.includes(body.direction)) return reply.code(400).send({ error: 'Unknown direction' });
+        if (body.occurred_at !== undefined && (typeof body.occurred_at !== 'string' || !Number.isFinite(Date.parse(body.occurred_at)))) {
+            return reply.code(400).send({ error: 'occurred_at must be a valid timestamp' });
+        }
+        if (body.participants !== undefined && (!Array.isArray(body.participants) || body.participants.length > 100
+            || body.participants.some(item => !item || typeof item.identity !== 'string' || !item.identity.trim()))) {
+            return reply.code(400).send({ error: 'participants must contain at most 100 objects with a non-empty identity' });
+        }
         let semantic;
         try { semantic = parseSemantic(body); } catch (error) { return errorReply(reply, error); }
 
@@ -300,11 +319,19 @@ export default async function v1Routes(fastify, options = {}) {
                 ...(projectId ? { project_id: projectId } : {}),
                 ...(calendarEventId ? { calendar_event_id: calendarEventId } : {}),
             };
+            const suppliedParticipants = Array.isArray(body.participants) ? body.participants : [];
             const thread = await resolveCommunicationThread({
                 db,
                 participantIdentity: body.identity || body.person_id || null,
                 serviceIdentity: body.service_identity || null,
                 direction: body.direction,
+                channel: body.channel,
+                occurredAt: body.occurred_at || new Date().toISOString(),
+                subject: body.subject || null,
+                content: body.content || null,
+                communicationId,
+                participants: suppliedParticipants,
+                projectId,
                 personId: body.person_id || null,
                 purpose: semantic.purpose,
                 correlation: resolvedCorrelation,
@@ -317,8 +344,8 @@ export default async function v1Routes(fastify, options = {}) {
                 direction: body.direction,
                 source_table: 'communications_api',
                 source_id: randomUUID(),
-                contact_id: body.person_id || null,
-                person_id: body.person_id || null,
+                contact_id: thread.personId || null,
+                person_id: thread.personId || null,
                 project_id: projectId,
                 occurred_at: body.occurred_at || new Date().toISOString(),
                 subject: body.subject || null,
@@ -331,8 +358,12 @@ export default async function v1Routes(fastify, options = {}) {
                 correlation: thread.correlation,
                 thread_id: thread.threadId,
                 thread_link_type: thread.linkType,
+                resolution: thread.resolution,
                 calendar_event_id: calendarEventId,
-                metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
+                metadata: {
+                    ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+                    ...participantMetadata(body.identity || null, suppliedParticipants),
+                },
             };
             const { data, error } = await db.from('communications').insert(row).select('*').single();
             if (error?.code === '23505' && body.provider && body.provider_id) {
@@ -376,6 +407,91 @@ export default async function v1Routes(fastify, options = {}) {
             if (!row) return reply.code(404).send({ error: 'Communication not found' });
             return toCanonical(row);
         } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.get('/communications/:communicationId/thread-candidates', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const communication = await getCommunication(db, request.params.communicationId);
+            if (!communication) return reply.code(404).send({ error: 'Communication not found' });
+            const current = communication.thread_id
+                ? await db.from('communication_threads').select('*').eq('thread_id', communication.thread_id).maybeSingle()
+                : { data: null, error: null };
+            if (current.error) throw new Error(current.error.message);
+            const metadataIdentities = Array.isArray(communication.metadata?.participant_identities)
+                ? communication.metadata.participant_identities.filter((item) => typeof item === 'string') : [];
+            const participantIdentity = communication.metadata?.participant_identity
+                || metadataIdentities[0] || current.data?.participant_identity || null;
+            const participantPeople = await Promise.all(metadataIdentities.map(identity => resolveParticipantPerson({
+                db, tenantId: request.tenantId, participantIdentity: identity,
+            })));
+            const candidates = await rankThreadCandidates({
+                db,
+                tenantId: request.tenantId,
+                participantIdentity,
+                participantIdentities: metadataIdentities,
+                personIds: [...new Set([communication.person_id || communication.contact_id, ...participantPeople].filter(Boolean))],
+                channel: communication.channel,
+                occurredAt: communication.occurred_at,
+                subject: communication.subject,
+                content: communication.body_them || communication.body,
+                projectId: communication.project_id || null,
+                correlation: communication.correlation || {},
+            });
+            return {
+                communication_id: communication.communication_id,
+                current_thread_id: communication.thread_id,
+                candidates: candidates.map(({ thread, ...score }) => ({
+                    ...score,
+                    thread: {
+                        thread_id: thread.thread_id, title: thread.title, status: thread.status,
+                        person_id: thread.person_id, external_project_id: thread.external_project_id,
+                        project_id: thread.project_id,
+                        primary_channel: thread.primary_channel, last_subject: thread.last_subject,
+                        last_activity_at: thread.last_activity_at,
+                    },
+                })),
+            };
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/communications/:communicationId/rethread', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const body = request.body || {};
+        if (body.initiator_id && rejectMissingCapability(request, reply, 'threads:actor:assert')) return reply;
+        if (!THREAD_CORRECTION_REASONS.includes(body.reason_code)) return reply.code(400).send({ error: `reason_code must be one of: ${THREAD_CORRECTION_REASONS.join(', ')}` });
+        const hasThread = typeof body.thread_id === 'string' && body.thread_id.trim();
+        const createNew = body.create_new === true;
+        if (Boolean(hasThread) === createNew) {
+            return reply.code(400).send({ error: 'Supply exactly one of thread_id or create_new=true' });
+        }
+        if (body.person_id && !UUID.test(body.person_id)) return reply.code(400).send({ error: 'person_id must be a Communications contact UUID' });
+        if (body.update_identity === true && !body.person_id) {
+            return reply.code(400).send({ error: 'update_identity=true requires person_id' });
+        }
+        if (body.project_id !== undefined && body.project_id !== null && !UUID.test(body.project_id)) {
+            return reply.code(400).send({ error: 'project_id must be an internal project UUID or null' });
+        }
+        if (body.external_project_id !== undefined && body.external_project_id !== null
+            && (typeof body.external_project_id !== 'string' || !body.external_project_id.trim())) {
+            return reply.code(400).send({ error: 'external_project_id must be a non-empty string or null' });
+        }
+        try {
+            const corrected = await db.rpc('correct_communication_thread', {
+                p_communication_id: request.params.communicationId,
+                p_to_thread_id: hasThread ? body.thread_id.trim() : null,
+                p_create_new: createNew,
+                p_reason_code: body.reason_code,
+                p_reason_detail: typeof body.reason_detail === 'string' ? body.reason_detail.slice(0, 1000) : null,
+                p_actor_id: JSON.stringify({ client_id: request.authContext.keyId, user_id: typeof body.initiator_id === 'string' ? body.initiator_id.slice(0, 200) : null }),
+                p_person_id: body.person_id || null,
+                p_update_identity: body.update_identity === true,
+                p_project_id: body.project_id || null,
+                p_external_project_id: typeof body.external_project_id === 'string' ? body.external_project_id.trim() : null,
+            });
+            if (corrected.error) throw new Error(corrected.error.message);
+            return corrected.data;
+        } catch (error) { return errorReply(reply, error, 400); }
     });
 
     fastify.post('/communications/:communicationId/disposition', async (request, reply) => {
@@ -534,6 +650,12 @@ export default async function v1Routes(fastify, options = {}) {
         let operation = null;
         let communicationId = prefixedId('comm');
         try {
+            const recipients = [
+                ...normaliseAddresses(body.to, { required: true }),
+                ...normaliseAddresses(body.cc),
+                ...normaliseAddresses(body.bcc),
+            ];
+            const recipientParticipants = recipients.map((item) => ({ identity: item.address, channel: 'email', role: 'recipient' }));
             const { connection, serviceIdentity } = await loadEmailConnection(db, request.tenantId, {
                 connectionId: body.provider_connection_id || null,
                 serviceIdentityId: body.service_identity_id || null,
@@ -542,11 +664,16 @@ export default async function v1Routes(fastify, options = {}) {
             const thread = await resolveCommunicationThread({
                 db,
                 tenantId: request.tenantId,
-                participantIdentity: body.to?.[0] || body.to || body.person_id || null,
+                participantIdentity: recipients[0]?.address || body.person_id || null,
                 serviceIdentity: serviceIdentity.address,
                 direction: 'outbound',
+                channel: 'email',
+                subject: body.subject,
+                content: body.text || body.html || null,
+                communicationId,
+                participants: recipientParticipants,
                 personId: body.person_id || null,
-                threadId: semantic.threadId || prefixedId('thread'),
+                threadId: semantic.threadId || null,
                 purpose: semantic.purpose,
                 correlation: semantic.correlation,
                 callbackUrl: semantic.callbackUrl || connection.default_callback_url || null,
@@ -562,7 +689,7 @@ export default async function v1Routes(fastify, options = {}) {
                     tenantId: request.tenantId,
                     threadId: thread.threadId,
                     askId: thread.purpose?.type === 'human_ask' ? thread.purpose.ask_id : null,
-                    personId: body.person_id || null,
+                    personId: thread.personId || null,
                     serviceIdentityId: serviceIdentity.id,
                 });
                 providerRequest.reply_to = [`reply+${reply.token}@${serviceIdentity.reply_domain}`];
@@ -605,7 +732,7 @@ export default async function v1Routes(fastify, options = {}) {
                 id: sourceId,
                 communication_id: communicationId,
                 thread_id: thread.threadId,
-                person_id: body.person_id || null,
+                person_id: thread.personId || null,
                 purpose: thread.purpose,
                 correlation: thread.correlation,
                 callback_url: thread.callbackUrl,
@@ -629,12 +756,15 @@ export default async function v1Routes(fastify, options = {}) {
             const communicationRow = await db.from('communications').insert({
                 communication_id: communicationId,
                 channel: 'email', direction: 'outbound', source_table: 'email_messages', source_id: sourceId,
-                contact_id: body.person_id || null, person_id: body.person_id || null,
+                contact_id: thread.personId || null, person_id: thread.personId || null,
                 occurred_at: new Date().toISOString(), subject: delivered.subject,
                 body: delivered.text || delivered.html, provider: connection.provider, provider_id: sent.providerId,
                 purpose: thread.purpose, correlation: thread.correlation, thread_id: thread.threadId,
-                thread_link_type: 'explicit', memory_eligible: true,
-                metadata: { provider_connection_id: connection.id },
+                thread_link_type: thread.linkType, resolution: thread.resolution, memory_eligible: true,
+                metadata: {
+                    provider_connection_id: connection.id,
+                    ...participantMetadata(recipients[0]?.address || null, recipientParticipants),
+                },
             });
             if (communicationRow.error) throw new Error(communicationRow.error.message);
 
@@ -644,7 +774,7 @@ export default async function v1Routes(fastify, options = {}) {
                 threadId: thread.threadId,
                 channel: 'email', direction: 'outbound', content: delivered.text || delivered.html,
                 provider: connection.provider, providerId: sent.providerId,
-                correlation: thread.correlation, purpose: thread.purpose,
+                correlation: thread.correlation, purpose: thread.purpose, resolution: thread.resolution,
             });
             await enqueueEvent({
                 tenantId: request.tenantId,
@@ -875,6 +1005,68 @@ export default async function v1Routes(fastify, options = {}) {
             const memory = await getThreadMemory(db, request.params.threadId);
             if (!memory) return reply.code(404).send({ error: 'Thread not found' });
             return { ...memory.thread, ...memory, communications: memory.communications.map(toCanonical) };
+        } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.patch('/threads/:threadId', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const body = request.body || {};
+        if (body.initiator_id && rejectMissingCapability(request, reply, 'threads:actor:assert')) return reply;
+        const fields = ['title', 'summary', 'status', 'project_id', 'external_project_id'];
+        const patch = Object.fromEntries(fields.filter((field) => Object.hasOwn(body, field)).map((field) => [field, body[field]]));
+        if (!Object.keys(patch).length) return reply.code(400).send({ error: `Supply at least one editable field: ${fields.join(', ')}` });
+        if (patch.status !== undefined && !THREAD_STATUSES.includes(patch.status)) {
+            return reply.code(400).send({ error: `status must be one of: ${THREAD_STATUSES.join(', ')}` });
+        }
+        for (const field of ['title', 'summary', 'external_project_id']) {
+            if (patch[field] !== undefined && patch[field] !== null && typeof patch[field] !== 'string') {
+                return reply.code(400).send({ error: `${field} must be a string or null` });
+            }
+        }
+        if (typeof patch.title === 'string') patch.title = patch.title.trim().slice(0, 500) || null;
+        if (typeof patch.summary === 'string') patch.summary = patch.summary.trim().slice(0, 5000) || null;
+        if (typeof patch.external_project_id === 'string') patch.external_project_id = patch.external_project_id.trim().slice(0, 500) || null;
+        if (patch.project_id !== undefined && patch.project_id !== null && !UUID.test(patch.project_id)) {
+            return reply.code(400).send({ error: 'project_id must be an internal project UUID or null' });
+        }
+        try {
+            const updated = await db.rpc('update_communication_thread_register', {
+                p_thread_id: request.params.threadId,
+                p_patch: patch,
+                p_actor_id: JSON.stringify({ client_id: request.authContext.keyId, user_id: typeof body.initiator_id === 'string' ? body.initiator_id.slice(0, 200) : null }),
+            });
+            if (updated.error) throw new Error(updated.error.message);
+            return updated.data;
+        } catch (error) { return errorReply(reply, error, 400); }
+    });
+
+    fastify.get('/thread-register', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        const { limit = 50, offset = 0, communication_offset: communicationOffset = 0 } = request.query;
+        if ([limit, offset, communicationOffset].some(value => !Number.isSafeInteger(Number(value)))
+            || Number(limit) < 1 || Number(offset) < 0 || Number(communicationOffset) < 0
+            || Number(offset) > 2147483647 || Number(communicationOffset) > 2147483647) {
+            return reply.code(400).send({ error: 'limit must be a positive integer; offsets must be non-negative integers' });
+        }
+        for (const field of ['person_id', 'project_id']) {
+            if (request.query[field] && !UUID.test(request.query[field])) return reply.code(400).send({ error: `${field} must be a UUID` });
+        }
+        if (request.query.status && request.query.status !== 'all' && !THREAD_STATUSES.includes(request.query.status)) {
+            return reply.code(400).send({ error: `status must be all or one of: ${THREAD_STATUSES.join(', ')}` });
+        }
+        try {
+            const result = await db.rpc('read_communication_thread_register', {
+                p_status: request.query.status || 'open',
+                p_person_id: request.query.person_id || null,
+                p_project_id: request.query.project_id || null,
+                p_external_project_id: request.query.external_project_id || null,
+                p_thread_id: request.query.thread_id || null,
+                p_limit: Math.min(Number(limit), 200),
+                p_offset: Number(offset),
+                p_communication_offset: Number(communicationOffset),
+            });
+            if (result.error) throw new Error(result.error.message);
+            return result.data;
         } catch (error) { return errorReply(reply, error, 500); }
     });
 
