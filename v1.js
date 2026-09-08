@@ -1,4 +1,5 @@
 import twilio from 'twilio';
+import { tenantClientOperation, TenantOperationError } from './tenantOperations.js';
 import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.js';
 import { assertContactable, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
 import { getDatabase } from './database.js';
@@ -161,6 +162,36 @@ export default async function v1Routes(fastify, options = {}) {
         }
         return null;
     });
+
+    fastify.route({method:['GET','POST'],url:'/tenant/clients',handler:async(request,reply)=>{
+        try{return await tenantClientOperation(rawDatabase(),request);}
+        catch(error){return reply.code(error instanceof TenantOperationError?error.status:503).send({error:error instanceof TenantOperationError?error.message:'Tenant administration unavailable'});}
+    }});
+    fastify.get('/tenant/audit',async(request,reply)=>{
+        if(!request.authContext.roles.includes('admin'))return reply.code(403).send({error:'Tenant administrator capability required'});
+        if(rejectMissingCapability(request,reply,'tenant:manage'))return reply;
+        const db=database(reply);if(!db)return reply;
+        const offset=Number(request.query.offset||0);
+        if(!Number.isInteger(offset)||offset<0||offset>100000)return reply.code(422).send({error:'Invalid audit offset'});
+        const result=await db.from('tenant_admin_audit').select('*').order('created_at',{ascending:false}).order('id',{ascending:false}).range(offset,offset+49);
+        if(result.error)return reply.code(503).send({error:'Audit history unavailable'});
+        return {owner:'communications-service',items:result.data||[],offset,limit:50};
+    });
+    fastify.route({method:['GET','POST'],url:'/tenant/usage',handler:async(request,reply)=>{
+        if(!request.authContext.roles.includes('admin'))return reply.code(403).send({error:'Tenant administrator required'});
+        if(rejectMissingCapability(request,reply,'tenant:manage'))return reply;
+        const db=database(reply);if(!db)return reply;
+        if(request.method==='POST'){
+            const b=request.body||{};
+            if(!Number.isInteger(b.revision)||!Number.isInteger(b.dailyLimit)||b.dailyLimit<0||b.dailyLimit>1000000)return reply.code(422).send({error:'Current revision and daily request limit from 0 to 1,000,000 required'});
+            const result=await rawDatabase().rpc('set_tenant_api_budget',{p_tenant_id:request.tenantId,p_actor:request.authContext.keyId,p_revision:b.revision,p_daily_limit:b.dailyLimit});
+            if(result.error)return reply.code(result.error.code==='40001'?409:503).send({error:'Budget update unavailable or version changed'});
+            return {owner:'communications-service',policy:result.data};
+        }
+        const [policy,usage]=await Promise.all([db.from('tenant_api_budgets').select('*').maybeSingle(),db.from('tenant_api_usage').select('*').gte('day',new Date(Date.now()-90*86400000).toISOString().slice(0,10)).order('day',{ascending:true})]);
+        if(policy.error||usage.error)return reply.code(503).send({error:'Usage view unavailable'});
+        return {owner:'communications-service',policy:policy.data||{daily_limit:0,revision:1},days:usage.data||[],windowDays:90,coverage:'Managed API client business requests only; excludes legacy credentials, administration and provider charges'};
+    }});
 
     fastify.get('/meetings', async (request, reply) => {
         const db=database(reply); if(!db)return reply;

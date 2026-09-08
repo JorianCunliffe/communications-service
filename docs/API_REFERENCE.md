@@ -57,7 +57,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `023`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `024`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
 
 ### Twilio webhooks
 
@@ -1317,3 +1317,21 @@ Supply `metadata.observed_at` as the provider-read timestamp, `metadata.external
 `POST /v1/context/memory` additionally accepts `kind: "evidence"` with required `external_project_id`, optional `allowed_project_ids`, `include_private` under existing capability enforcement, and `limit` capped at 30. It reads at most the latest 100 memory-eligible messages within that external project before audience filtering, then revalidates current source records. The response retains `memory-context.v1`, current/stale status, source provenance and explicit non-exhaustive coverage.
 
 This projection contains source communications only: no derived thread summaries, facts or extracted commitments. Excluding an intentionally private/out-of-scope source before projection does not make current permitted sources stale. A revocation during source revalidation still suppresses that source and reports stale. Existing search/person/thread freshness semantics are unchanged. HyperFlow continues to own accepted operational obligations and report jobs. No schema migration is required.
+
+## Managed tenant API clients
+
+Apply migration `024_tenant_client_lifecycle.sql` before starting this release. These endpoints require the authenticated tenant, administrator role and `tenant:manage`, plus the usual read/write capability. Existing legacy and multi-tenant operator credentials remain outside this managed registry.
+
+| Endpoint | Behavior |
+| --- | --- |
+| GET /v1/tenant/clients | List redacted managed clients, 50 per page; pass the returned `next` as `after`. |
+| POST /v1/tenant/clients | `create`, `rotate` or `revoke` a stable `keyId`; rotation/revocation require current client `revision`. |
+| GET /v1/tenant/usage | Return budget/revision and the last 90 days of request counts. |
+| POST /v1/tenant/usage | Set `dailyLimit` (0 means unlimited, maximum 1000000) using current policy `revision`. |
+| GET /v1/tenant/audit | Return tenant administration history, 50 records per page, with bounded `offset`. |
+
+Create supplies `name`, `roles`, `capabilities`, `secret` and ISO `expiresAt`. Capabilities must be supported and held by the caller. Secrets must be 32–256 characters with expiry within 366 days. Rotate supplies a replacement secret and expiry; revoke cannot revoke the credential authenticating that request. Secrets are salted scrypt hashes at rest and never returned. Repeating identical creation or rotation does not create another revision or audit entry. Conflicts return 409; expired/revoked credentials return 401. Existing in-flight effects are not recalled.
+
+Daily counts cover authenticated managed-client business requests across `/v1` and `/api`, including requests subsequently denied by a capability check. Tenant administration endpoints are exempt so budgets remain recoverable. Legacy credentials, browser traffic and provider charges are not measured. Concurrent budget claims are atomic; exhausted requests return 429. The usage response shows a 90-day window; historical database rows are not automatically deleted.
+
+The [OpenAPI supplement](../contracts/phase11.openapi.json) describes these additions. The [standalone JavaScript client](../client/communications.js) pins origin and tenant, accepts an abort signal and never automatically retries an uncertain write. This supplement is not a complete inventory of the product's older endpoints. Whole-tenant export, erasure and retention workflows remain separate Phase 11 work.
