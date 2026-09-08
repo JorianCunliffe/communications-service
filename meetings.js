@@ -165,7 +165,9 @@ export function normalizeMeeting(raw = {}) {
     externalId,
     sourceVersion,
     key: hash([source, externalId]),
-    fingerprint: hash(content),
+    // A resolved thread is an association, not a change to the source notes.
+    // GET returns that association; importing it again must remain idempotent.
+    fingerprint: hash({...content,topics:topics.map(topic=>({...topic,threadId:null}))}),
     expectedVersion: raw.expectedVersion ?? 0,
     allowedProjectIds: Array.isArray(raw.allowedProjectIds)
       ? raw.allowedProjectIds

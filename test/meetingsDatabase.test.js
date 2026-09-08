@@ -83,6 +83,8 @@ test("transcribed meeting imports preserve topic isolation, versions, duplicates
     );
     const get = await request("GET", "/meetings/" + imported.id);
     assert.equal(get.statusCode, 200, get.body);
+    const editorRetry = await request('POST','/meetings',get.json().metadata);
+    assert.equal(editorRetry.statusCode,200,editorRetry.body);
     assert.equal(
       get.json().metadata.attendees[0].identityStatus,
       "matched_exact",
