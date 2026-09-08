@@ -1,3 +1,4 @@
+import { safeMemory } from './memorySafety.js';
 const DEFAULT_LIMIT = 20;
 
 function weight(name, fallback) {
@@ -102,7 +103,7 @@ async function queryCalendar(db, body, limit) {
     return check(await query, 'Calendar search');
 }
 
-export async function searchMemory(db, body = {}) {
+async function searchMemoryRaw(db, body = {}) {
     const limit = limitOf(body.limit);
     const include = includeOptions(body.include);
     const personId = body.person_id || body.contact_id || null;
@@ -149,6 +150,7 @@ export async function searchMemory(db, body = {}) {
             const matches = direct.filter((row) => row.thread_id === thread.thread_id);
             const best = Math.max(...matches.map((row) => row.score), 0);
             return {
+                ...thread,
                 thread_id: thread.thread_id,
                 title: thread.title,
                 summary: thread.summary,
@@ -179,7 +181,7 @@ async function contactsByIds(db, ids) {
     return unique.length ? check(await db.from('contacts').select('*').in('id', unique), 'Participant lookup') : [];
 }
 
-export async function getThreadMemory(db, threadId) {
+async function getThreadMemoryRaw(db, threadId) {
     const result = await db.from('communication_threads').select('*').eq('thread_id', threadId).maybeSingle();
     if (result.error) throw new Error(`Thread lookup: ${result.error.message}`);
     if (!result.data) return null;
@@ -227,7 +229,7 @@ export async function getThreadMemory(db, threadId) {
     };
 }
 
-export async function getLooseEnds(db, { personId = null, projectId = null, limit = 100 } = {}) {
+async function getLooseEndsRaw(db, { personId = null, projectId = null, limit = 100 } = {}) {
     let scopedThreadIds = null;
     if (projectId || personId) {
         let scope = db.from('communications').select('thread_id').eq('memory_eligible', true).not('thread_id', 'is', null).limit(500);
@@ -251,7 +253,7 @@ export async function getLooseEnds(db, { personId = null, projectId = null, limi
         .filter((row) => !scopedThreadIds || scopedThreadIds.includes(row.thread_id));
     return [
         ...commitments.map((row) => ({
-            type: 'commitment', description: row.description, due_at: row.due_at,
+            ...row, type: 'commitment', description: row.description, due_at: row.due_at,
             contact_id: row.promisor_contact_id, thread_id: row.thread_id,
             source_communication_ids: [row.communication_id], confidence: row.confidence,
         })),
@@ -260,13 +262,13 @@ export async function getLooseEnds(db, { personId = null, projectId = null, limi
             due_at: null, contact_id: null, thread_id: row.thread_id, source_communication_ids: [], ask_id: row.ask_id,
         })),
         ...threads.map((row) => ({
-            type: 'outstanding_state', description: row.outstanding_dependency, due_at: null,
+            type: 'outstanding_state', description: row.outstanding_dependency, due_at: null, updated_at: row.current_state_updated_at,
             contact_id: null, thread_id: row.thread_id, source_communication_ids: row.outstanding_source_ids || [],
         })),
     ].slice(0, limitOf(limit, 200));
 }
 
-export async function getPersonMemory(db, personId) {
+async function getPersonMemoryRaw(db, personId) {
     const person = await db.from('contacts').select('*').eq('id', personId).maybeSingle();
     if (person.error) throw new Error(`Contact lookup: ${person.error.message}`);
     if (!person.data) return null;
@@ -284,7 +286,7 @@ export async function getPersonMemory(db, personId) {
         recent_communications: check(communications, 'Recent communications'), upcoming_calendar_events: check(calendar, 'Upcoming calendar') };
 }
 
-export async function getProjectMemory(db, projectId) {
+async function getProjectMemoryRaw(db, projectId) {
     const project = await db.from('projects').select('*').eq('id', projectId).maybeSingle();
     if (project.error) throw new Error(`Project lookup: ${project.error.message}`);
     if (!project.data) return null;
@@ -303,15 +305,13 @@ export async function getProjectMemory(db, projectId) {
         open_commitments: commitments, recent_communications: communicationRows, calendar_events: check(events, 'Project calendar') };
 }
 
-export async function getEventContext(db, eventId) {
+async function getEventContextRaw(db, eventId) {
     const event = await db.from('calendar_events').select('*').eq('id', eventId).maybeSingle();
     if (event.error) throw new Error(`Calendar event lookup: ${event.error.message}`);
     if (!event.data) return null;
     const participants = check(await db.from('calendar_event_participants').select('*').eq('event_id', eventId), 'Event participants');
     const personIds = [...new Set(participants.map((row) => row.contact_id).filter(Boolean))];
-    let communications = [];
-    if (personIds.length) communications = check(await db.from('communications').select('*').in('person_id', personIds).eq('memory_eligible', true)
-        .lte('occurred_at', event.data.starts_at).order('occurred_at', { ascending: false }).limit(50), 'Pre-meeting communications');
+    const communications = check(await db.from('communications').select('*').eq('calendar_event_id', eventId).eq('memory_eligible', true).order('occurred_at', { ascending: false }).limit(100), 'Meeting communications');
     const threadIds = [...new Set([event.data.communication_thread_id, ...communications.map((row) => row.thread_id)].filter(Boolean))];
     const [threads, commitmentsResult, factsResult] = await Promise.all([
         threadIds.length ? db.from('communication_threads').select('*').in('thread_id', threadIds).order('last_activity_at', { ascending: false }).limit(20) : Promise.resolve({ data: [] }),
@@ -328,3 +328,10 @@ export async function getEventContext(db, eventId) {
     return { event: event.data, participants, recent_threads: check(threads, 'Recent threads'), open_commitments: commitments,
         recent_facts: facts, recent_communications: communications };
 }
+
+export const searchMemory = async (db, body={}) => safeMemory(db,await searchMemoryRaw(db,body),body);
+export const getThreadMemory = async (db,id,scope={}) => safeMemory(db,await getThreadMemoryRaw(db,id),{...scope,thread_id:id});
+export const getPersonMemory = async (db,id,scope={}) => safeMemory(db,await getPersonMemoryRaw(db,id),{...scope,person_id:id});
+export const getProjectMemory = async (db,id,scope={}) => safeMemory(db,await getProjectMemoryRaw(db,id),{...scope,project_id:id});
+export const getEventContext = async (db,id,scope={}) => safeMemory(db,await getEventContextRaw(db,id),{...scope,calendar_event_id:id});
+export const getLooseEnds = async (db,body={}) => safeMemory(db,await getLooseEndsRaw(db,body),{...body,person_id:body.personId,project_id:body.projectId});

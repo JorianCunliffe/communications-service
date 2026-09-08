@@ -348,7 +348,7 @@ export async function getContext({
     until = null,
 } = {}) {
     const db = getDatabase();
-    if (!db) return { subject: null, turns: [], dropped: 0, errors: [], unavailable: PLANNED_CHANNELS };
+    if (!db) return { subject: null, turns: [], dropped: 0, errors: [{ channel: 'all', error: 'History persistence unavailable' }], unavailable: [...CHANNELS, ...PLANNED_CHANNELS], status: 'unavailable' };
     if (!phoneNumber && !contactId) throw new Error('getContext needs a phoneNumber or a contactId');
 
     const subject = await resolveSubject(db, { phoneNumber, contactId });
@@ -664,14 +664,15 @@ export async function historyForPrompt({
     });
 
     try {
-        const { turns } = await Promise.race([
+        const { turns, errors, status } = await Promise.race([
             getContext({ phoneNumber, contactId, limit, maxChars, since }),
             timeout,
         ]);
+        if (status==='unavailable' || errors?.length) return '[Communication history unavailable or incomplete. Do not assume there is no prior history.]';
         return renderForPrompt(turns) ?? NO_HISTORY_BLOCK;
     } catch (error) {
-        console.warn(`History for prompt unavailable (${error.message}) — sending the empty record instead`);
-        return NO_HISTORY_BLOCK;
+        console.warn(`History for prompt unavailable (${error.message}) — withholding unavailable context`);
+        return '[Communication history unavailable. Do not assume there is no prior history.]';
     } finally {
         clearTimeout(timer);
     }

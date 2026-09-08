@@ -133,7 +133,11 @@ export default async function v1Routes(fastify, options = {}) {
     fastify.addHook('preHandler', async (request, reply) => {
         const rejected = await rejectUnauthorizedTenant(request, reply, rawDatabase(), 'Communications API');
         if (rejected) return rejected;
-        const capability = request.method === 'GET' ? 'communications:read' : 'communications:write';
+        const memoryRead = /\/context\/(search|memory)(?:\?|$)/.test(request.url);
+        if (request.query && Object.hasOwn(request.query,'include_private')) request.query.include_private = request.query.include_private === 'true';
+        const capability = request.method === 'GET' || memoryRead ? 'communications:read' : 'communications:write';
+        if ((request.body?.include_private === true || request.query?.include_private === true)
+            && rejectMissingCapability(request, reply, 'memory:private')) return reply;
         const denied = rejectMissingCapability(request, reply, capability);
         if (denied) return denied;
         if (request.method === 'POST' && request.url.split('?')[0].endsWith('/emails')) {
@@ -947,7 +951,7 @@ export default async function v1Routes(fastify, options = {}) {
     fastify.get('/contacts/:personId/memory', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try {
-            const memory = await getPersonMemory(db, request.params.personId);
+            const memory = await getPersonMemory(db, request.params.personId, request.query);
             if (!memory) return reply.code(404).send({ error: 'Contact not found' });
             return memory;
         } catch (error) { return errorReply(reply, error, 500); }
@@ -956,7 +960,7 @@ export default async function v1Routes(fastify, options = {}) {
     fastify.get('/projects/:projectId/memory', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try {
-            const memory = await getProjectMemory(db, request.params.projectId);
+            const memory = await getProjectMemory(db, request.params.projectId, request.query);
             if (!memory) return reply.code(404).send({ error: 'Project not found' });
             return memory;
         } catch (error) { return errorReply(reply, error, 500); }
@@ -988,9 +992,35 @@ export default async function v1Routes(fastify, options = {}) {
         try {
             const eventId = await resolveCalendarEventId(db, request.params.eventId);
             if (!eventId) return reply.code(404).send({ error: 'Calendar event not found' });
-            const context = await getEventContext(db, eventId);
+            const context = await getEventContext(db, eventId, request.query);
             return context;
         } catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    fastify.post('/context/memory', async (request, reply) => {
+        const db=database(reply); if (!db) return reply;
+        const body=request.body || {};
+        const kinds=['search','person','thread','project','meeting','loose_ends'];
+        if (!kinds.includes(body.kind)) return reply.code(400).send({error:'Unknown memory context kind'});
+        if (!['search','loose_ends'].includes(body.kind) && (typeof body.id!=='string' || !body.id.trim())) return reply.code(400).send({error:'Context id is required'});
+        if (body.allowed_project_ids!==undefined && (!Array.isArray(body.allowed_project_ids) || body.allowed_project_ids.length>200 || body.allowed_project_ids.some(id=>typeof id!=='string' || !id))) return reply.code(400).send({error:'allowed_project_ids must contain at most 200 project references'});
+        const scope={include_private:body.include_private===true};
+        for (const name of ['project_id','external_project_id','person_id','thread_id','calendar_event_id','since','until']) {
+            if (body[name]!==undefined && (typeof body[name]!=='string' || !body[name].trim())) return reply.code(400).send({error:`${name} must be a non-empty string`});
+            if (body[name]) scope[name]=body[name];
+        }
+        if (body.allowed_project_ids) scope.allowed_project_ids=body.allowed_project_ids;
+        try {
+            let data;
+            if (body.kind==='person') data=await getPersonMemory(db,body.id,scope);
+            else if (body.kind==='thread') data=await getThreadMemory(db,body.id,scope);
+            else if (body.kind==='project') data=await getProjectMemory(db,body.id,scope);
+            else if (body.kind==='meeting') data=await getEventContext(db,body.id,scope);
+            else if (body.kind==='loose_ends') data=await getLooseEnds(db,{...scope,personId:scope.person_id,projectId:scope.project_id,limit:body.limit});
+            else data=await searchMemory(db,{...scope,query:typeof body.query==='string'?body.query.slice(0,2000):'',limit:body.limit,include:{commitments:true}});
+            if (!data) return reply.code(404).send({error:'Context not found'});
+            return {contract_version:'memory-context.v1',data,memory_status:data.memory_status || {state:'current',retrieved_at:new Date().toISOString(),evidence_only:true}};
+        } catch (error) { request.log.warn({err:error}, 'Memory context unavailable'); return reply.code(503).send({error:'Memory context unavailable'}); }
     });
 
     fastify.post('/context/search', async (request, reply) => {
@@ -1002,7 +1032,7 @@ export default async function v1Routes(fastify, options = {}) {
     fastify.get('/threads/:threadId', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try {
-            const memory = await getThreadMemory(db, request.params.threadId);
+            const memory = await getThreadMemory(db, request.params.threadId, request.query);
             if (!memory) return reply.code(404).send({ error: 'Thread not found' });
             return { ...memory.thread, ...memory, communications: memory.communications.map(toCanonical) };
         } catch (error) { return errorReply(reply, error, 500); }

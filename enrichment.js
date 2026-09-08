@@ -172,7 +172,7 @@ async function fail(db, job, error) {
     }).eq('id', job.id).eq('lease_token', job.lease_token);
 }
 
-export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id]), evidenceById = new Map([[communication.communication_id, communication]]), reconcile = false) {
+export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id]), evidenceById = new Map([[communication.communication_id, communication]]), reconcile = false, evidenceAt = new Date().toISOString()) {
     const deterministic = extractExplicitCommitments(counterpartyContent(communication), communication.occurred_at);
     const modelItems = (extracted.commitments || []).flatMap((item) => {
         const sourceCommunicationId = (item.source_communication_ids || []).find((id) => validIds.has(id));
@@ -204,7 +204,7 @@ export async function storeCommitments(db, communication, extracted, validIds = 
             communication_id: sourceCommunicationId, thread_id: sourceCommunication.thread_id,
             promisor_contact_id: promisor, description: item.description.slice(0, 1000),
             due_at: parsedDue, confidence: Math.min(1, Math.max(0, Number(item.confidence) || 0)),
-            source_excerpt: item.source_excerpt?.slice(0, 1000) || null, updated_at: new Date().toISOString(),
+            source_excerpt: item.source_excerpt?.slice(0, 1000) || null, updated_at: evidenceAt,
         };
         const write = existing.data
             ? (['open', 'unknown'].includes(existing.data.status)
@@ -229,7 +229,7 @@ export async function storeCommitments(db, communication, extracted, validIds = 
     }
 }
 
-export async function storeFactVersions(db, communication, facts, validIds, evidenceById = new Map([[communication.communication_id, communication]])) {
+export async function storeFactVersions(db, communication, facts, validIds, evidenceById = new Map([[communication.communication_id, communication]]), evidenceAt = new Date().toISOString()) {
     for (const fact of facts || []) {
         if (!fact.fact_key || !fact.text) continue;
         const sourceIds = [...new Set((fact.source_communication_ids || []).filter((id) => {
@@ -250,7 +250,7 @@ export async function storeFactVersions(db, communication, facts, validIds, evid
         if (current.data?.text === fact.text) {
             const mergedSources = [...new Set([...(current.data.source_communication_ids || []), ...sourceIds])];
             const updated = await db.from('communication_facts').update({ source_communication_ids: mergedSources,
-                confidence: fact.confidence, updated_at: new Date().toISOString() }).eq('id', current.data.id);
+                confidence: fact.confidence, updated_at: evidenceAt }).eq('id', current.data.id);
             if (updated.error) throw new Error(`Fact update: ${updated.error.message}`);
             continue;
         }
@@ -258,7 +258,7 @@ export async function storeFactVersions(db, communication, facts, validIds, evid
             fact_key: fact.fact_key.slice(0, 200), text: fact.text.slice(0, 2000),
             contact_id: attributed.person_id || attributed.contact_id, project_id: attributed.project_id,
             thread_id: attributed.thread_id, source_communication_ids: sourceIds,
-            confidence: Math.min(1, Math.max(0, Number(fact.confidence) || 0)), status: 'active',
+            confidence: Math.min(1, Math.max(0, Number(fact.confidence) || 0)), status: 'active', updated_at: evidenceAt,
         }).select('*').single();
         if (inserted.error) throw new Error(`Fact storage: ${inserted.error.message}`);
         if (current.data) {
@@ -270,6 +270,9 @@ export async function storeFactVersions(db, communication, facts, validIds, evid
 }
 
 async function processJob(db, job) {
+    // DB claim time precedes source reads. A later source edit must not look older
+    // than a slow model's derived write; read-time checks use this evidence horizon.
+    const evidenceAt = job.claimed_at || new Date().toISOString();
     const communication = await db.from('communications').select('*').eq('communication_id', job.communication_id).maybeSingle();
     if (communication.error) throw new Error(communication.error.message);
     if (!communication.data) throw new Error(`Communication ${job.communication_id} no longer exists`);
@@ -291,19 +294,19 @@ async function processJob(db, job) {
     }
     // Obvious explicit promises are useful even if the model provider is
     // temporarily unavailable; richer extraction remains retryable.
-    await storeCommitments(db, communication.data, { commitments: [] });
+    await storeCommitments(db, communication.data, { commitments: [] }, undefined, undefined, false, evidenceAt);
     const extracted = await extractMemoryWithModel(evidence);
     const validIds = new Set(evidence.map((row) => row.communication_id));
     const evidenceById = new Map(evidence.map((row) => [row.communication_id, row]));
     const sourceIds = [...new Set((extracted.source_communication_ids || []).filter((id) => validIds.has(id)))];
     if (!sourceIds.length) sourceIds.push(communication.data.communication_id);
 
-    await storeCommitments(db, communication.data, extracted, validIds, evidenceById, true);
-    await storeFactVersions(db, communication.data, extracted.facts, validIds, evidenceById);
+    await storeCommitments(db, communication.data, extracted, validIds, evidenceById, true, evidenceAt);
+    await storeFactVersions(db, communication.data, extracted.facts, validIds, evidenceById, evidenceAt);
     if (communication.data.thread_id) {
         const update = await db.from('communication_threads').update({
-            summary: extracted.summary || null, summary_updated_at: new Date().toISOString(), summary_source_ids: sourceIds,
-            current_state: extracted.current_state || null, current_state_updated_at: new Date().toISOString(),
+            summary: extracted.summary || null, summary_updated_at: evidenceAt, summary_source_ids: sourceIds,
+            current_state: extracted.current_state || null, current_state_updated_at: evidenceAt,
             current_state_source_ids: sourceIds, outstanding_dependency: extracted.outstanding_dependency || null,
             outstanding_source_ids: extracted.outstanding_dependency ? sourceIds : [],
         }).eq('thread_id', communication.data.thread_id);

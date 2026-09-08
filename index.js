@@ -81,7 +81,7 @@ const BUILD = (() => {
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
-        'calendar.js', 'calendarProviders.js', 'memory.js', 'enrichment.js',
+        'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',
         'tenantContext.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
         'emailDelivery.js', 'emailTriage.js', 'emailReplyRoutes.js',

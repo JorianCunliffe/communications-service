@@ -1,0 +1,48 @@
+
+> communications-service@2.4.0 test:db
+> node --test --test-reporter=spec test/threadDatabase.test.js test/memoryDatabase.test.js
+
+Communications persistence disabled
+✔ person context restricts projects and private source expansion with source-linked promises (1424.5126ms)
+✔ search does not expand into another person/project or disclose private thread summary (18.9918ms)
+✔ retracted facts and edited evidence disappear from person and loose-end views (23.6534ms)
+✔ eligibility revocation hides derived promises and facts immediately (9.5206ms)
+✔ a correction suppresses stale derived thread associations without deleting raw evidence (22.9389ms)
+✔ untrusted private grants and other tenants are rejected (141.0317ms)
+✔ memory failure is explicit and raw ingestion remains available (35.6824ms)
+✔ only a matching explicit timezone timestamp is labelled explicit (0.2452ms)
+✔ failed calls, automated messages and private flags fail closed (0.1981ms)
+✔ meeting notes remain available after the meeting and private meetings stay hidden (30.4745ms)
+▶ PostgreSQL-backed thread story
+  ✔ applies the entire migration sequence and normalizes identities on real inserts (2.5135ms)
+Communications persistence disabled
+  ✔ email, SMS, voice and recording join one project thread and persist scores and group participants (120.6956ms)
+  ✔ another project and a stale topic create separate threads (64.4324ms)
+  ✔ ordinary outbound replies can join, while explicit IDs and new Asks never fall through to inference (55.8035ms)
+  ✔ an atomic correction moves only the selected row, repairs identity and trains the next match (54.6562ms)
+  ✔ thread detail edits persist without resolving an Ask or leaking across tenants (35.0845ms)
+  ✔ moving an inferred Ask reply cannot rebind the Ask or move its outbound request (22.0103ms)
+  ✔ SMS source corrections survive later provider updates without changing sibling messages (25.6608ms)
+  ✔ recording projection preserves its correction after transcript reprocessing (29.1255ms)
+  ✔ recording workflow project changes are rejected while ordinary edits preserve correlation (26.0704ms)
+  ✔ an unknown participant is not attributed to the thread owner and project alone is not enough (31.2314ms)
+  ✔ moving a group communication carries every participant and removes stale participant evidence (40.4787ms)
+  ✔ voice source correction survives later transcript and provider status updates (29.3725ms)
+  ✔ native email replies follow corrected parents, exclude reply aliases, and scope provider IDs to a mailbox connection (60.2934ms)
+  ✔ a corrected outbound email keeps its own reply address without moving sibling routes or inheriting another Ask (47.5863ms)
+  ✔ register pages threads and older communications without hiding quiet threads (32.1196ms)
+  ✔ a live call project switch moves only the call and preserves the other project thread (47.7142ms)
+  ✔ simultaneous communications in a new conversation do not create competing threads (31.6858ms)
+  ✔ more than 100 threads page without gaps and deep history remains accessible (15.3617ms)
+  ✔ cross-project moves require an explicit reason and cannot move workflow ownership (52.5919ms)
+  ✔ audit attributes the authenticated client and rejects untrusted user assertions (114.8543ms)
+  ✔ failed resolution rolls back thread, participant and decision writes (6.8711ms)
+✔ PostgreSQL-backed thread story (2310.773ms)
+ℹ tests 32
+ℹ suites 1
+ℹ pass 32
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2786.8038

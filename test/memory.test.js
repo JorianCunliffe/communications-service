@@ -236,7 +236,7 @@ describe('thread-aware retrieval', () => {
     test('labels direct matches and thread context separately and omits unrelated threads', async () => {
         const hit = { communication_id: 'comm_1', thread_id: 'thread_1', contact_id: 'person_1', project_id: 'project_1', occurred_at: '2026-08-10T00:00:00Z', rank: 0.12, body: 'valuation Monday', memory_eligible: true };
         const db = new FakeDb({
-            communications: [hit, { communication_id: 'comm_2', thread_id: 'thread_1', occurred_at: '2026-08-09T00:00:00Z', body: 'earlier context', memory_eligible: true }, { communication_id: 'comm_x', thread_id: 'thread_x', body: 'unrelated', memory_eligible: true }],
+            communications: [hit, { communication_id: 'comm_2', thread_id: 'thread_1', contact_id: 'person_1', project_id: 'project_1', occurred_at: '2026-08-09T00:00:00Z', body: 'earlier context', memory_eligible: true }, { communication_id: 'comm_x', thread_id: 'thread_x', body: 'unrelated', memory_eligible: true }],
             communication_threads: [{ thread_id: 'thread_1', title: 'Valuation', summary: 'Waiting for report' }, { thread_id: 'thread_x', title: 'Unrelated' }],
             communication_facts: [
                 { id: 'fact_old', status: 'superseded', text: 'Valuation expected Friday', contact_id: 'person_1', project_id: 'project_1', updated_at: '2026-08-09' },
@@ -278,7 +278,7 @@ describe('memory read models', () => {
             contacts: [{ id: 'p1', name: 'Jim' }],
             communications: [{ communication_id: 'comm_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10', memory_eligible: true }],
             communication_threads: [{ thread_id: 't1', status: 'open' }],
-            communication_commitments: [{ id: 'c1', status: 'open', promisor_contact_id: 'p1', updated_at: '2026-08-10' }],
+            communication_commitments: [{ id: 'c1', communication_id:'comm_1', status: 'open', promisor_contact_id: 'p1', updated_at: '2026-08-10' }],
             communication_facts: [{ id: 'f1', status: 'active', contact_id: 'p1', updated_at: '2026-08-10' }],
             calendar_event_participants: [{ event_id: 'e1', contact_id: 'p1' }],
             calendar_events: [{ id: 'e1', starts_at: '2099-08-13T10:00:00Z' }],
@@ -308,9 +308,9 @@ describe('memory read models', () => {
         const db = new FakeDb({
             projects: [{ id: 'project_1', name: 'Smith Street' }],
             project_contacts: [{ project_id: 'project_1', role: 'valuer', contacts: { id: 'p1' } }],
-            communications: [{ communication_id: 'comm_1', project_id: 'project_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10', memory_eligible: true }],
+            communications: [{ communication_id: 'comm_1', calendar_event_id:'e1', project_id: 'project_1', person_id: 'p1', thread_id: 't1', occurred_at: '2026-08-10', memory_eligible: true }],
             communication_threads: [{ thread_id: 't1', status: 'open', last_activity_at: '2026-08-10' }],
-            communication_commitments: [{ id: 'c1', status: 'open', thread_id: 't1', updated_at: '2026-08-10' }],
+            communication_commitments: [{ id: 'c1', communication_id:'comm_1', status: 'open', thread_id: 't1', updated_at: '2026-08-10' }],
             communication_facts: [{ id: 'f1', status: 'active', project_id: 'project_1', thread_id: 't1', contact_id: 'p1', updated_at: '2026-08-10' }],
             calendar_events: [{ id: 'e1', project_id: 'project_1', communication_thread_id: 't1', starts_at: '2026-08-13' }],
             calendar_event_participants: [{ event_id: 'e1', contact_id: 'p1' }],
@@ -325,6 +325,7 @@ describe('memory read models', () => {
 describe('loose ends', () => {
     test('returns open commitments and unresolved Asks, but not completed commitments', async () => {
         const db = new FakeDb({
+            communications:[{communication_id:'comm_1',thread_id:'t1',memory_eligible:true},{communication_id:'comm_ask',thread_id:'t2',memory_eligible:true,purpose:{ask_id:'ask_1'}}],
             communication_commitments: [
                 { id: 'c1', communication_id: 'comm_1', status: 'open', description: 'Send valuation', thread_id: 't1' },
                 { id: 'c2', communication_id: 'comm_2', status: 'completed', description: 'Already done', thread_id: 't1' },
@@ -370,4 +371,15 @@ describe('migration contract', () => {
         const sql = files.map((name) => readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), 'utf8')).join('\n');
         for (const token of ['calendar_events', 'calendar_event_participants', 'communication_commitments', 'communication_facts', 'source_communication_ids', 'superseded', 'communication_enrichment_jobs', 'rerun_requested', 'participant_identities', 'calendar_event_id', 'outbound_operations', 'lease_token', 'communication_row_id', 'call_outcome_jobs', 'memory_eligible', 'disposition', "exception when others"]) assert.match(sql, new RegExp(token));
     });
+});
+
+
+test('slow enrichment writes keep the evidence horizon before a concurrent correction',async()=>{
+ const communication={communication_id:'slow',thread_id:'thread_slow',person_id:'p1',direction:'inbound',body:'I will deliver Friday.',occurred_at:'2026-09-01T00:00:00Z'};
+ const db=new FakeDb({communication_commitments:[],communication_facts:[]});
+ const horizon='2026-09-08T00:00:00Z';const ids=new Set(['slow']);const sources=new Map([['slow',communication]]);
+ await storeCommitments(db,communication,{commitments:[]},ids,sources,false,horizon);
+ await storeFactVersions(db,communication,[{fact_key:'delivery',text:'Delivery promised',source_communication_ids:['slow'],confidence:0.9}],ids,sources,horizon);
+ assert.equal(db.tables.communication_commitments[0].updated_at,horizon);
+ assert.equal(db.tables.communication_facts[0].updated_at,horizon);
 });

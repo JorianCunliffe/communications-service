@@ -1290,3 +1290,8 @@ See [Phase 02 record](implementation/P02.md) for migration 020, actor assertion 
 Correction and thread-edit requests with `initiator_id` additionally require `threads:actor:assert` (or `*`); otherwise HTTP 403. Without that field, the authenticated API client is the actor. Persisted actor values contain JSON `{ "client_id": "...", "user_id": "..." }`; the user is an assertion by an authorized client. Body tenant values never broaden authority.
 
 A move between known projects requires `reason_code: "wrong_project"`. Migration 020 rejects project changes when the communication/thread has Ask, run or task ownership; use the owning workflow to reconcile those records. Invalid corrections return 400 without partial movement. Offsets must fit a non-negative signed 32-bit integer. Register count is the returned page count, not the tenant total.
+
+
+### POST `/v1/context/memory`
+
+Phase 03 source-validated context. Request kind: search, person, thread, project, meeting or loose_ends; id for resource views. Optional external_project_id, allowed_project_ids and include_private (requires memory:private) narrow the context. Uses communications:read. Returns memory-context.v1, data and memory_status. Unavailable memory returns 503, missing resource 404. Dates without explicit timezone-bearing source timestamps are candidates requiring confirmation.
