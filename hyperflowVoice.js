@@ -54,7 +54,7 @@ export async function requestHyperFlowVoiceContext({
             ...hyperflowProtectionHeaders(url, process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL),
         },
         body,
-        signal: AbortSignal.timeout(4500),
+        signal: AbortSignal.timeout(8000),
     }, { scope: 'HYPERFLOW_AGENT_CONTEXT', allowedHosts, maxRedirects: 0 });
     const text = (await response.text()).slice(0, 128 * 1024);
     let parsed;
