@@ -1,0 +1,57 @@
+
+> communications-service@2.8.0 test:db
+> node --test --test-reporter=spec test/threadDatabase.test.js test/memoryDatabase.test.js test/meetingsDatabase.test.js test/calendarObservationsDatabase.test.js test/tenantOperationsDatabase.test.js test/tenantLifecycleDatabase.test.js
+
+✔ calendar observations are monotonic and tenant scoped, with exact contact enrichment and cancelled candidate exclusion (6594.6369ms)
+✔ transcribed meeting imports preserve topic isolation, versions, duplicates and uncertain speakers (6320.2864ms)
+Communications persistence disabled
+✔ person context restricts projects and private source expansion with source-linked promises (6754.9091ms)
+✔ search does not expand into another person/project or disclose private thread summary (68.8561ms)
+✔ retracted facts and edited evidence disappear from person and loose-end views (52.4729ms)
+✔ eligibility revocation hides derived promises and facts immediately (20.312ms)
+✔ a correction suppresses stale derived thread associations without deleting raw evidence (69.2338ms)
+✔ untrusted private grants and other tenants are rejected (301.0921ms)
+✔ memory failure is explicit and raw ingestion remains available (86.1657ms)
+✔ only a matching explicit timezone timestamp is labelled explicit (2.8711ms)
+✔ failed calls, automated messages and private flags fail closed (0.4854ms)
+✔ meeting notes remain available after the meeting and private meetings stay hidden (79.2101ms)
+✔ report evidence remains current without importing stale summaries, private or other-project sources (24.1972ms)
+Communications persistence disabled
+✔ tenant suspension, scoped export, local erasure and late-write tombstone use real PostgreSQL (6577.0429ms)
+✔ REST lifecycle enforces authority, revision and recovery while paused jobs do not starve another tenant (1980.1064ms)
+✔ portable exports remove nested authentication material while preserving source text (0.5263ms)
+✔ lifecycle tables and functions remain server-only under deployment roles (1536.9416ms)
+✔ tenant client lifecycle persists one audited claim, rotates, expires and isolates credentials (6882.4956ms)
+▶ PostgreSQL-backed thread story
+  ✔ applies the entire migration sequence and normalizes identities on real inserts (4.4867ms)
+Communications persistence disabled
+  ✔ email, SMS, voice and recording join one project thread and persist scores and group participants (280.8257ms)
+  ✔ another project and a stale topic create separate threads (156.5308ms)
+  ✔ ordinary outbound replies can join, while explicit IDs and new Asks never fall through to inference (135.5072ms)
+  ✔ an atomic correction moves only the selected row, repairs identity and trains the next match (155.8356ms)
+  ✔ thread detail edits persist without resolving an Ask or leaking across tenants (87.4375ms)
+  ✔ moving an inferred Ask reply cannot rebind the Ask or move its outbound request (72.4341ms)
+  ✔ SMS source corrections survive later provider updates without changing sibling messages (76.259ms)
+  ✔ recording projection preserves its correction after transcript reprocessing (87.7737ms)
+  ✔ recording workflow project changes are rejected while ordinary edits preserve correlation (66.8821ms)
+  ✔ an unknown participant is not attributed to the thread owner and project alone is not enough (82.3058ms)
+  ✔ moving a group communication carries every participant and removes stale participant evidence (119.33ms)
+  ✔ voice source correction survives later transcript and provider status updates (74.5592ms)
+  ✔ native email replies follow corrected parents, exclude reply aliases, and scope provider IDs to a mailbox connection (157.6335ms)
+  ✔ a corrected outbound email keeps its own reply address without moving sibling routes or inheriting another Ask (123.846ms)
+  ✔ register pages threads and older communications without hiding quiet threads (88.3557ms)
+  ✔ a live call project switch moves only the call and preserves the other project thread (157.9929ms)
+  ✔ simultaneous communications in a new conversation do not create competing threads (74.4087ms)
+  ✔ more than 100 threads page without gaps and deep history remains accessible (47.6402ms)
+  ✔ cross-project moves require an explicit reason and cannot move workflow ownership (161.732ms)
+  ✔ audit attributes the authenticated client and rejects untrusted user assertions (281.7228ms)
+  ✔ failed resolution rolls back thread, participant and decision writes (20.6521ms)
+✔ PostgreSQL-backed thread story (8849.2695ms)
+ℹ tests 40
+ℹ suites 1
+ℹ pass 40
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 11369.5586
