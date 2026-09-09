@@ -1,4 +1,5 @@
 import twilio from 'twilio';
+import { tenantLifecycleOperation } from './tenantLifecycle.js';
 import { tenantClientOperation, TenantOperationError } from './tenantOperations.js';
 import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.js';
 import { assertContactable, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
@@ -163,6 +164,10 @@ export default async function v1Routes(fastify, options = {}) {
         return null;
     });
 
+    fastify.route({method:['GET','POST'],url:'/tenant/lifecycle',handler:async(request,reply)=>{
+        try{return await tenantLifecycleOperation(rawDatabase(),request);}
+        catch(error){return reply.code(error instanceof TenantOperationError?error.status:503).send({error:error instanceof TenantOperationError?error.message:'Tenant lifecycle unavailable'});}
+    }});
     fastify.route({method:['GET','POST'],url:'/tenant/clients',handler:async(request,reply)=>{
         try{return await tenantClientOperation(rawDatabase(),request);}
         catch(error){return reply.code(error instanceof TenantOperationError?error.status:503).send({error:error instanceof TenantOperationError?error.message:'Tenant administration unavailable'});}

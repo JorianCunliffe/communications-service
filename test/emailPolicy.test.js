@@ -87,7 +87,7 @@ test('scoped client grants remain channel-specific and cannot cross tenant', asy
 });
 
 function policyDb() {
-    const rows = new Map(['ceo', 'sender'].map(id => [id, { metadata: { retained: true }, updated_at: '2026-09-08T00:00:00.000Z' }]));
+    const rows = new Map(['ceo', 'sender'].map(id => [id, { status: 'active', metadata: { retained: true }, updated_at: '2026-09-08T00:00:00.000Z' }]));
     return { from(table) {
         assert.equal(table, 'tenants');
         let tenant, metadata, patch;

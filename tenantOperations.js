@@ -6,7 +6,7 @@ export class TenantOperationError extends Error {
 }
 const fail=(status,message)=>{throw new TenantOperationError(status,message);};
 const columns='key_id,name,allowed_tenants,roles,capabilities,created_at,revoked_at,last_used_at,revision,expires_at';
-const supported=new Set(['communications:read','communications:write','memory:private','email:draft','email:send','mailbox:manage','tenant:manage']);
+const supported=new Set(['communications:read','communications:write','memory:private','email:draft','email:send','mailbox:manage','tenant:manage','tenant:erase']);
 /** Lifecycle is restricted to credentials created for this one tenant. Legacy/multi-tenant operator keys are never exposed. */
 export async function tenantClientOperation(db,request){
   if(!hasCapability(request,'tenant:manage') || !request.authContext?.roles?.includes('admin')) fail(403,'Tenant administrator capability required');

@@ -128,8 +128,13 @@ export async function rejectUnauthorizedTenant(request, reply, db, feature) {
     if (!result.ok) return reply.code(result.status).send({ error: result.error });
     request.tenantId = result.tenantId;
     request.authContext = result;
-    const controlPaths=['/v1/tenant/clients','/v1/tenant/audit','/v1/tenant/usage'];
+    const controlPaths=['/v1/tenant/clients','/v1/tenant/audit','/v1/tenant/usage','/v1/tenant/lifecycle'];
     const path=String(request.routeOptions?.url||request.url||'').split('?')[0];
+    if(db && path!=='/v1/tenant/lifecycle'){
+        const tenant=await db.from('tenants').select('status').eq('tenant_id',result.tenantId).maybeSingle();
+        if(tenant.error)return reply.code(503).send({error:'Tenant access state unavailable'});
+        if(!tenant.data||tenant.data.status!=='active')return reply.code(403).send({error:'Tenant access is suspended or closed'});
+    }
     if(result.managedTenant && !controlPaths.includes(path)){
         const claim=await db.rpc('claim_tenant_api_request',{p_tenant_id:result.tenantId,p_key_id:result.keyId,p_revision:result.revision});
         if(claim.error)return reply.code(claim.error.code==='P0001'?429:claim.error.code==='28000'?401:503).send({error:claim.error.code==='P0001'?'Organization API request budget exhausted':claim.error.code==='28000'?'API credential changed':'API usage control unavailable'});

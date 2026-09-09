@@ -18,7 +18,7 @@ export const TENANT_TABLES = new Set([
     'mailbox_oauth_credentials', 'mailbox_sync_state', 'mailbox_oauth_states',
     'mailbox_drafts', 'mailbox_audit_events',
     'communication_thread_participants', 'thread_resolution_decisions',
-    'thread_resolution_feedback', 'recording_revisions', 'tenant_admin_audit', 'tenant_api_budgets', 'tenant_api_usage',
+    'thread_resolution_feedback', 'recording_revisions', 'tenant_admin_audit', 'tenant_api_budgets', 'tenant_api_usage', 'tenant_lifecycle_receipts',
 ]);
 
 const TENANT_RPCS = new Set([

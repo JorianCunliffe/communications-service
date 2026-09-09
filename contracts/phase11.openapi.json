@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Communications Service tenant controls API",
-    "version": "2026-09-09.1",
+    "version": "2026-09-09.2",
     "description": "Phase 11 tenant-operation supplement. Existing business operations remain documented in the application API reference and phase contracts. This is not yet the final whole-product parity inventory."
   },
   "paths": {
@@ -524,6 +524,246 @@
             }
           }
         ]
+      }
+    },
+    "/v1/tenant/lifecycle": {
+      "get": {
+        "operationId": "readCommunicationsLifecycle",
+        "description": "Read local lifecycle state and the export catalogue; dataset requests require memory:private and a current suspended revision. Credential stores are excluded, capability URLs and authentication fields are redacted. At most 50 records and 3.5 MB per page. This is not an operator backup.",
+        "security": [
+          {
+            "ApiKey": [],
+            "Tenant": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative app-owned result; not proof of an external provider effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired authentication",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope, role or membership denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version conflict or held operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request budget exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dependency unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Export page exceeds the bounded REST response; operator file export required"
+          }
+        },
+        "parameters": [
+          {
+            "name": "dataset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "changeCommunicationsLifecycle",
+        "description": "Administrator tenant:manage only. Stable request IDs replay the original receipt. Suspension rejects held provider operations. erase_local additionally requires tenant:erase and the exact confirmation; it retains a tombstone and audit/usage, and does not erase HyperFlow or provider resources.",
+        "security": [
+          {
+            "ApiKey": [],
+            "Tenant": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative app-owned result; not proof of an external provider effect",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired authentication",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope, role or membership denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version conflict or held operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request budget exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dependency unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "operation",
+                  "revision",
+                  "requestId"
+                ],
+                "properties": {
+                  "operation": {
+                    "enum": [
+                      "suspend",
+                      "resume",
+                      "erase_local"
+                    ]
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "requestId": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9_-]{8,100}$"
+                  },
+                  "confirmation": {
+                    "type": "string",
+                    "const": "Erase Communications local tenant data"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   },

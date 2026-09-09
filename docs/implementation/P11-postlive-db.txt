@@ -1,0 +1,52 @@
+
+> communications-service@2.7.0 test:db
+> node --test --test-reporter=spec test/threadDatabase.test.js test/memoryDatabase.test.js test/meetingsDatabase.test.js test/calendarObservationsDatabase.test.js test/tenantOperationsDatabase.test.js
+
+✔ calendar observations are monotonic and tenant scoped, with exact contact enrichment and cancelled candidate exclusion (10170.0072ms)
+✔ transcribed meeting imports preserve topic isolation, versions, duplicates and uncertain speakers (10598.6007ms)
+Communications persistence disabled
+✔ person context restricts projects and private source expansion with source-linked promises (9568.0661ms)
+✔ search does not expand into another person/project or disclose private thread summary (116.703ms)
+✔ retracted facts and edited evidence disappear from person and loose-end views (103.972ms)
+✔ eligibility revocation hides derived promises and facts immediately (45.9041ms)
+✔ a correction suppresses stale derived thread associations without deleting raw evidence (123.0975ms)
+✔ untrusted private grants and other tenants are rejected (512.326ms)
+✔ memory failure is explicit and raw ingestion remains available (130.0487ms)
+✔ only a matching explicit timezone timestamp is labelled explicit (0.3804ms)
+✔ failed calls, automated messages and private flags fail closed (0.4317ms)
+✔ meeting notes remain available after the meeting and private meetings stay hidden (147.0836ms)
+✔ report evidence remains current without importing stale summaries, private or other-project sources (35.3544ms)
+✔ tenant client lifecycle persists one audited claim, rotates, expires and isolates credentials (11285.6632ms)
+▶ PostgreSQL-backed thread story
+  ✔ applies the entire migration sequence and normalizes identities on real inserts (11.5975ms)
+Communications persistence disabled
+  ✔ email, SMS, voice and recording join one project thread and persist scores and group participants (422.0793ms)
+  ✔ another project and a stale topic create separate threads (153.2059ms)
+  ✔ ordinary outbound replies can join, while explicit IDs and new Asks never fall through to inference (119.9303ms)
+  ✔ an atomic correction moves only the selected row, repairs identity and trains the next match (114.4655ms)
+  ✔ thread detail edits persist without resolving an Ask or leaking across tenants (79.2847ms)
+  ✔ moving an inferred Ask reply cannot rebind the Ask or move its outbound request (50.1135ms)
+  ✔ SMS source corrections survive later provider updates without changing sibling messages (66.8762ms)
+  ✔ recording projection preserves its correction after transcript reprocessing (59.4996ms)
+  ✔ recording workflow project changes are rejected while ordinary edits preserve correlation (55.0957ms)
+  ✔ an unknown participant is not attributed to the thread owner and project alone is not enough (64.3688ms)
+  ✔ moving a group communication carries every participant and removes stale participant evidence (87.3236ms)
+  ✔ voice source correction survives later transcript and provider status updates (56.9745ms)
+  ✔ native email replies follow corrected parents, exclude reply aliases, and scope provider IDs to a mailbox connection (103.6901ms)
+  ✔ a corrected outbound email keeps its own reply address without moving sibling routes or inheriting another Ask (87.2521ms)
+  ✔ register pages threads and older communications without hiding quiet threads (66.8067ms)
+  ✔ a live call project switch moves only the call and preserves the other project thread (88.1288ms)
+  ✔ simultaneous communications in a new conversation do not create competing threads (62.574ms)
+  ✔ more than 100 threads page without gaps and deep history remains accessible (28.9163ms)
+  ✔ cross-project moves require an explicit reason and cannot move workflow ownership (107.0163ms)
+  ✔ audit attributes the authenticated client and rejects untrusted user assertions (187.457ms)
+  ✔ failed resolution rolls back thread, participant and decision writes (14.1605ms)
+✔ PostgreSQL-backed thread story (12322.5712ms)
+ℹ tests 36
+ℹ suites 1
+ℹ pass 36
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 13753.636
