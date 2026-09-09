@@ -481,7 +481,19 @@ export default async function v1Routes(fastify, options = {}) {
         try {
             const row = await getCommunication(db, request.params.communicationId);
             if (!row) return reply.code(404).send({ error: 'Communication not found' });
-            return toCanonical(row);
+            const canonical = toCanonical(row);
+            if (row.channel === 'sms' && row.source_table === 'sms_messages' && row.source_id) {
+                const message = await db.from('sms_messages').select('thread_id').eq('id',row.source_id).maybeSingle();
+                if (message.error) throw new Error('SMS reply route unavailable');
+                const thread = message.data?.thread_id ? await db.from('sms_threads').select('phone_number,twilio_number')
+                    .eq('id',message.data.thread_id).maybeSingle() : {data:null};
+                if (thread.error) throw new Error('SMS reply route unavailable');
+                if (thread.data) {
+                    canonical.sender = row.direction === 'inbound' ? thread.data.phone_number : thread.data.twilio_number;
+                    canonical.recipients = [row.direction === 'inbound' ? thread.data.twilio_number : thread.data.phone_number];
+                }
+            }
+            return canonical;
         } catch (error) { return errorReply(reply, error, 500); }
     });
 
@@ -1077,7 +1089,7 @@ export default async function v1Routes(fastify, options = {}) {
         if (!['search','evidence','loose_ends'].includes(body.kind) && (typeof body.id!=='string' || !body.id.trim())) return reply.code(400).send({error:'Context id is required'});
         if (body.allowed_project_ids!==undefined && (!Array.isArray(body.allowed_project_ids) || body.allowed_project_ids.length>200 || body.allowed_project_ids.some(id=>typeof id!=='string' || !id))) return reply.code(400).send({error:'allowed_project_ids must contain at most 200 project references'});
         const scope={include_private:body.include_private===true};
-        for (const name of ['project_id','external_project_id','person_id','thread_id','calendar_event_id','since','until']) {
+        for (const name of ['project_id','external_project_id','person_id','thread_id','conversation_thread_id','calendar_event_id','since','until']) {
             if (body[name]!==undefined && (typeof body[name]!=='string' || !body[name].trim())) return reply.code(400).send({error:`${name} must be a non-empty string`});
             if (body[name]) scope[name]=body[name];
         }

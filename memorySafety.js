@@ -6,8 +6,14 @@ export function sourceAllowed(row, scope = {}) {
   if (row.channel === 'voice' && (row.metadata?.successful === false || row.metadata?.memory_eligible === false)) return false;
   if (scope.include_private !== true && (row.metadata?.private === true || ['private','restricted'].includes(row.metadata?.visibility))) return false;
   if (scope.project_id && row.project_id !== scope.project_id) return false;
-  if (scope.external_project_id && row.correlation?.external_project_id !== scope.external_project_id) return false;
-  if (scope.allowed_project_ids && !scope.allowed_project_ids.includes(row.correlation?.external_project_id)) return false;
+  // An active, person-scoped conversation may contain a new message that has
+  // not yet been assigned to a project. Never include another project's rows.
+  const unassignedConversation = !row.project_id && !row.correlation?.external_project_id
+    && !!scope.conversation_thread_id && row.thread_id === scope.conversation_thread_id
+    && !!scope.person_id && (row.person_id || row.contact_id) === scope.person_id
+    && !!scope.external_project_id && scope.allowed_project_ids?.includes(scope.external_project_id);
+  if (scope.external_project_id && row.correlation?.external_project_id !== scope.external_project_id && !unassignedConversation) return false;
+  if (scope.allowed_project_ids && !scope.allowed_project_ids.includes(row.correlation?.external_project_id) && !unassignedConversation) return false;
   if (scope.person_id && (row.person_id || row.contact_id) !== scope.person_id) return false;
   if (scope.thread_id && row.thread_id !== scope.thread_id) return false;
   if (scope.calendar_event_id && row.calendar_event_id !== scope.calendar_event_id) return false;
