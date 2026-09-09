@@ -10,14 +10,14 @@ Runtime requirement: Node.js `22` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `024`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `025`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Threading model, correction workflow and verification](docs/THREADING.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/024_tenant_client_lifecycle.sql)
+- [Latest database migration](migrations/025_tenant_data_lifecycle.sql)
 
 ## Architecture
 
@@ -173,6 +173,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 23. `migrations/022_transcribed_meetings.sql`
 24. `migrations/023_calendar_observation_order.sql`
 25. `migrations/024_tenant_client_lifecycle.sql`
+26. `migrations/025_tenant_data_lifecycle.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
