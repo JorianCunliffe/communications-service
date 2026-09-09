@@ -21,4 +21,8 @@ export class CommunicationsClient {
   setBudget(revision,dailyLimit){return this.request('POST','/v1/tenant/usage',{body:{revision,dailyLimit}});}
   audit(offset=0){return this.request('GET','/v1/tenant/audit',{query:{offset}});}
   memory(body){return this.request('POST','/v1/context/memory',{body});}
+  lifecycle(){return this.request('GET','/v1/tenant/lifecycle');}
+  lifecycleOperation(body){return this.request('POST','/v1/tenant/lifecycle',{body});}
+  exportPage(dataset,revision,offset=0){return this.request('GET','/v1/tenant/lifecycle',{query:{dataset,revision,offset}});}
+
 }

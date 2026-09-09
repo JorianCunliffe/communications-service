@@ -5,11 +5,12 @@ import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import Fastify from 'fastify';
 import { createPostgresClient } from '../../database.js';
 import v1Routes from '../../v1.js';
-export async function createPhase02Database(tenantId, key) {
+export async function createPhase02Database(tenantId, key, options = {}) {
   process.env.API_KEY = key;
   process.env.LEGACY_TENANT_ID = tenantId;
   process.env.PERSISTENCE_PROVIDER = 'none';
   const sql = new PGlite({ extensions: { pg_trgm } });
+  if(options.serverRoles)await sql.exec('create role anon; create role authenticated; create role service_role bypassrls;');
   await sql.query("select set_config('app.legacy_tenant_id',$1,false)", [tenantId]);
   const root = new URL('../../migrations/', import.meta.url);
   for (const file of (await readdir(root)).filter(name => /^\d{3}_.+\.sql$/.test(name)).sort()) {
