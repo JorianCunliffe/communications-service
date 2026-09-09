@@ -344,7 +344,12 @@ export async function getReportEvidence(db, scope = {}) {
     const rows = check(await db.from('communications').select('*')
         .eq('memory_eligible', true).eq('correlation->>external_project_id', scope.external_project_id)
         .order('occurred_at', { ascending: false }).limit(100), 'Report source evidence');
-    const selected = rows.filter(row => sourceAllowed(row, scope)).slice(0, limitOf(scope.limit, 30));
+    const conversation = scope.conversation_thread_id && scope.person_id
+        ? check(await db.from('communications').select('*').eq('memory_eligible', true)
+            .eq('thread_id', scope.conversation_thread_id).eq('person_id', scope.person_id)
+            .order('occurred_at', {ascending:false}).limit(40), 'Conversation source evidence') : [];
+    const selected = [...new Map([...conversation,...rows].filter(row => sourceAllowed(row, scope))
+        .map(row => [row.communication_id,row])).values()].slice(0, limitOf(scope.limit, 30));
     const safe = await safeMemory(db, { communications: selected }, scope);
     return { ...safe, coverage: { scope: 'current_source_messages', scanned_limit: 100, returned_limit: limitOf(scope.limit, 30), exhaustive: false } };
 }
