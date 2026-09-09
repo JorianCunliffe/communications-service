@@ -1,3 +1,4 @@
+import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import Fastify from 'fastify';
 import WebSocket from 'ws';
@@ -81,7 +82,7 @@ const BUILD = (() => {
         'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
-        'context.js', 'communicationModel.js', 'eventOutbox.js', 'v1.js',
+        'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',
         'tenantContext.js', 'tenantOperations.js', 'tenantLifecycle.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
@@ -242,8 +243,16 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
         console.warn(`Rejected inbound call tenant resolution: ${error.message}`);
         return reply.code(503).type('text/xml').send('<Response><Say>This number is not configured for incoming calls.</Say><Hangup/></Response>');
     }
-    const communicationId = prefixedId('comm');
-    const semanticThreadId = prefixedId('thread');
+    const communicationId = params.CallSid ? `comm_${createHash('sha256').update(`${config.tenantId}:${params.CallSid}`).digest('hex').slice(0,32)}` : prefixedId('comm');
+    let semantic;
+    try {
+        semantic = await resolveInboundVoiceThread({db:getDatabase(),tenantId:config.tenantId,
+            personId:config.personId,from:params.From,to:params.To,communicationId});
+    } catch (error) {
+        console.warn(`Inbound conversation resolution unavailable: ${error.message}`);
+        return reply.code(503).type('text/xml').send('<Response><Say>Conversation context is temporarily unavailable. Please try again later.</Say><Hangup/></Response>');
+    }
+    const semanticThreadId = semantic.threadId;
     let routingContext = null;
     if (config.personId) {
         try {
@@ -320,8 +329,9 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
         communicationId,
         tenantId: config.tenantId,
         threadId: semanticThreadId,
-        purpose: { type: 'agent_conversation' },
+        purpose: semantic.purpose,
         correlation: {
+            ...semantic.correlation,
             tenant_id: config.tenantId,
             person_id: config.personId,
             ...(routingContext?.routing?.projectId ? { external_project_id: routingContext.routing.projectId } : {}),
