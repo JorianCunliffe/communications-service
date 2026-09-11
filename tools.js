@@ -248,7 +248,7 @@ const TOOLS = {
             ending: true,
             reason: reason || 'the assistant ended the call',
             // Read by the model, which is still composing its farewell turn.
-            note: 'The line will close once you have finished speaking. Say goodbye now; do not say anything after it.',
+            note: 'The line will close once you have finished speaking. Do not repeat a goodbye you already said.',
         }),
     },
 

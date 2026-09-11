@@ -14,6 +14,7 @@ import { databaseProvider, getDatabase } from './database.js';
 import { recordAnswerDetection, recordCall, tenantForCall, updateCallStatus, recordToolCall, updateCallProjectContext, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
 import { createTranscriptDrain } from './transcriptDrain.js';
+import { createVoiceTurns } from './voiceTurns.js';
 import { recordMessage, tenantForMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
@@ -80,7 +81,7 @@ const VERSION = (() => {
 const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
-        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js',
+        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
@@ -819,15 +820,11 @@ fastify.register(async (fastify) => {
         let latestMediaTimestamp = 0;
         let lastAssistantItem = null;
         let markQueue = [];
+        let nextPlaybackMark = 0;
         let responseStartTimestampTwilio = null;
         let config = DEFAULT_CONFIG; // replaced by the per-call config on 'start'
         let openAiWs = null; // created on 'start', once the CallSid identifies the call
         let callSid = null; // recorded on 'start', so tool calls can be attributed
-
-        // Tool call bookkeeping. call_id -> tool name, captured from
-        // response.output_item.added because that event documents the name;
-        // the arguments.done event carries it too but that field is undocumented.
-        const pendingToolNames = new Map();
 
         // Bumped whenever the caller interrupts. A tool result that comes back
         // carrying a stale generation belongs to a response that no longer
@@ -846,7 +843,6 @@ fastify.register(async (fastify) => {
         // other production systems, because there is then nothing here that
         // could reach a call belonging to one of them.
         let ending = false;
-        let endRequested = null;  // end_call has run; hang up after the farewell turn
         let goodbyeReason = null; // the farewell is playing; hang up when it drains
         let wrapUpTimer = null;
         let limitTimer = null;
@@ -1115,6 +1111,11 @@ fastify.register(async (fastify) => {
 
         // Handle interruption when the caller's speech starts
         const handleSpeechStartedEvent = () => {
+            toolGeneration++;
+            voiceTurns.interrupt();
+            goodbyeReason = null;
+            if (drainTimer) clearTimeout(drainTimer);
+            drainTimer = null;
             if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
                 const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
                 if (SHOW_TIMING_MATH) console.log(`Calculating elapsed time for truncation: ${latestMediaTimestamp} - ${responseStartTimestampTwilio} = ${elapsedTime}ms`);
@@ -1145,7 +1146,6 @@ fastify.register(async (fastify) => {
                 // The response being played has been cancelled, so any tool
                 // still running for it is now answering a question the caller
                 // has talked over.
-                toolGeneration++;
             }
         };
 
@@ -1155,8 +1155,7 @@ fastify.register(async (fastify) => {
         // of an exception that leaves the caller in silence.
         const handleToolCall = async (event) => {
             const toolCallId = event.call_id;
-            const name = pendingToolNames.get(toolCallId) ?? event.name;
-            pendingToolNames.delete(toolCallId);
+            const name = event.name;
 
             if (!toolCallId || !name) {
                 console.warn('Tool call arrived with no name or call_id — ignoring');
@@ -1185,7 +1184,7 @@ fastify.register(async (fastify) => {
             });
             console.log(`Tool ${name} ${error ? `failed: ${error}` : 'ok'} (${durationMs}ms)`);
 
-            if (name === 'select_hyperflow_project' && !error && output?.routing?.kind === 'routed' && output.routing.projectId) {
+            if (generation === toolGeneration && name === 'select_hyperflow_project' && !error && output?.routing?.kind === 'routed' && output.routing.projectId) {
                 try {
                     const selectedCorrelation = await updateCallProjectContext({
                         callSid,
@@ -1212,6 +1211,11 @@ fastify.register(async (fastify) => {
             }
             if (!openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
 
+            if (name === 'select_hyperflow_project' && !error && output?.instructions) {
+                config = applyHyperFlowVoiceContext(config, output);
+                openAiWs.send(JSON.stringify(buildSessionUpdate(config)));
+            }
+
             openAiWs.send(JSON.stringify({
                 type: 'conversation.item.create',
                 item: {
@@ -1222,27 +1226,36 @@ fastify.register(async (fastify) => {
                     output: JSON.stringify(error ? { error } : output),
                 },
             }));
-            openAiWs.send(JSON.stringify({ type: 'response.create' }));
-
-            // Recorded, not acted on yet. The response just asked for is the
-            // model's goodbye, so the line has to stay open until that has been
-            // spoken and played — response.done starts the countdown, and the
-            // mark queue draining finishes it.
-            if (name === 'end_call' && !error) {
-                endRequested = output?.reason ? `end_call — ${output.reason}` : 'end_call';
-            }
+            return { name, output, error };
         };
+
+        const voiceTurns = createVoiceTurns({
+            runTool: handleToolCall,
+            generation: () => toolGeneration,
+            endAfterPlayback,
+            log: (event, detail) => console.log(`Voice turn ${callSid}: ${event}`, detail),
+            sendResponse: (response = {}, farewell = false) => {
+                if (ending || mediaClosed || openAiWs?.readyState !== WebSocket.OPEN) return;
+                if (farewell) {
+                    response.instructions = `${config.systemMessage}\n\nThe caller has finished. Say one brief goodbye now, then stop. Do not repeat earlier answers or ask another question.`;
+                    // Bound generation failure as well as missing playback acknowledgements.
+                    drainTimer = setTimeout(() => endCall('farewell generation/playback timeout'), 15000);
+                }
+                openAiWs.send(JSON.stringify({ type: 'response.create', response }));
+            },
+        });
 
         // Send mark messages to Media Streams so we know if and when AI response playback is finished
         const sendMark = (connection, streamSid) => {
             if (streamSid) {
+                const name = `responsePart-${++nextPlaybackMark}`;
                 const markEvent = {
                     event: 'mark',
                     streamSid: streamSid,
-                    mark: { name: 'responsePart' }
+                    mark: { name }
                 };
                 connection.send(JSON.stringify(markEvent));
-                markQueue.push('responsePart');
+                markQueue.push(name);
             }
         };
 
@@ -1358,22 +1371,10 @@ fastify.register(async (fastify) => {
                     turnStartMs.delete(response.item_id);
                 }
 
-                // Tool calls. Unreachable unless this call advertised tools:
-                // with none in session.update the model never emits these.
-                if (response.type === 'response.output_item.added' && response.item?.type === 'function_call') {
-                    if (response.item.call_id) pendingToolNames.set(response.item.call_id, response.item.name);
-                }
-
-                if (response.type === 'response.function_call_arguments.done') {
-                    handleToolCall(response);
-                }
-
-                // The farewell turn is composed. Everything after this is
-                // waiting for Twilio to finish playing it.
-                if (response.type === 'response.done' && endRequested) {
-                    const reason = endRequested;
-                    endRequested = null;
-                    endAfterPlayback(reason);
+                // Run completed tool calls once, after their parent response has
+                // finished. A tool arguments event is not the farewell boundary.
+                if (response.type === 'response.done') {
+                    voiceTurns.done(response.response).catch(error => console.warn(`Voice turn failed for ${callSid}: ${error.message}`));
                 }
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
@@ -1417,9 +1418,9 @@ fastify.register(async (fastify) => {
                         if (!openAiWs) startOrAdoptSession();
                         break;
                     case 'mark':
-                        if (markQueue.length > 0) {
-                            markQueue.shift();
-                        }
+                        // A clear flushes old marks too; their late echoes must
+                        // not acknowledge audio belonging to the next reply.
+                        markQueue = markQueue.filter(name => name !== data.mark?.name);
 
                         // An empty queue means everything we sent has finished
                         // playing, so the next response needs its own baseline.
