@@ -81,7 +81,7 @@ const VERSION = (() => {
 const BUILD = (() => {
     const SOURCES = [
         'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
-        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js',
+        'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',

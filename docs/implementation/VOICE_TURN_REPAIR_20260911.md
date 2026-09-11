@@ -20,3 +20,7 @@ Validation: 271 unit tests and 41 database tests passed; syntax and whitespace c
 Provider event contract: https://platform.openai.com/docs/api-reference/realtime-server-events/response/function_call_arguments/done documents that arguments.done also occurs on cancellation; response.done contains output items and final status. https://platform.openai.com/docs/api-reference/realtime-client-events/conversation/item/create documents response metadata used to correlate a separately requested farewell.
 
 Release and live retest pending. Ask the latest SMS code for communications test once, allow an answer, then say goodbye. Acceptance requires one relevant answer and one audible complete farewell; correct recall alone is insufficient. No extra outbound call dispatched during repair.
+
+## Production verification
+
+Released Communications implementation commit 20bb468 to origin/main. Replit deployment 1027190d reports healthy production build d4459236f6c3, exactly matching the tested local runtime fingerprint. Brief HTTP 500 responses occurred during process promotion; the subsequent health check returned status ok on the new build. Human inbound retest is pending. No additional outbound calls or messages dispatched.
