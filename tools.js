@@ -21,6 +21,8 @@
 // not check — an unreachable calendar reported as "nothing on" is a confident
 // wrong answer, which is the worst outcome this feature can produce.
 
+import { VOICE_CONTEXT_TIMEOUT_MS, withToolDeadline } from './voiceContextDeadline.js';
+
 const DEFAULT_TIMEOUT_MS = 2500;
 
 // Turns a tool name into the environment variable holding its endpoint:
@@ -59,7 +61,7 @@ export function filterTurns(turns, query) {
 const TOOLS = {
     select_hyperflow_project: {
         type: 'builtin',
-        timeoutMs: 5000,
+        timeoutMs: VOICE_CONTEXT_TIMEOUT_MS,
         description:
             'Select or switch the HyperFlow project for this call and retrieve only the context that this caller is authorized to use. ' +
             'Call this after the caller names a project, whenever they ask to switch projects, or before answering a project question when no project context is available. ' +
@@ -80,6 +82,7 @@ const TOOLS = {
                 threadId: context.threadId,
                 communicationId: context.communicationId,
                 serviceIdentity: context.serviceIdentity,
+                signal: context.signal,
                 utterance: [project_reference, question].filter(Boolean).join('. '),
             });
         },
@@ -388,8 +391,8 @@ export async function executeTool(name, args, context = {}) {
 
     try {
         if (tool.type === 'builtin') {
-            const output = await withTimeout(
-                Promise.resolve().then(() => tool.handler(args, context)),
+            const output = await withToolDeadline(
+                signal => tool.handler(args, { ...context, signal }),
                 timeoutMs,
                 `Tool ${name}`
             );

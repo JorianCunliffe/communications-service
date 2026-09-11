@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { safeFetch } from './safeFetch.js';
 import { hyperflowProtectionHeaders } from './vercelProtection.js';
 import { DEFAULT_CONFIG } from './config.js';
+import { VOICE_CONTEXT_TIMEOUT_MS } from './voiceContextDeadline.js';
 
 function contextUrl() {
     const configured = String(process.env.HYPERFLOW_AGENT_CONTEXT_URL || '').trim();
@@ -26,7 +27,8 @@ export async function requestHyperFlowVoiceContext({
     communicationId,
     serviceIdentity,
     utterance = null,
-}) {
+    signal = null,
+}, { fetchContext = safeFetch } = {}) {
     const url = contextUrl();
     if (!url) throw new Error('HYPERFLOW_AGENT_CONTEXT_URL is not configured');
     if (!tenantId || !personId || !threadId || !communicationId || !serviceIdentity) {
@@ -46,25 +48,32 @@ export async function requestHyperFlowVoiceContext({
     const configuredHosts = String(process.env.HYPERFLOW_AGENT_CONTEXT_HOSTS || '')
         .split(',').map((host) => host.trim().toLowerCase()).filter(Boolean);
     const allowedHosts = configuredHosts.length ? configuredHosts : [new URL(url).hostname.toLowerCase()];
-    const response = await safeFetch(url, {
-        method: 'POST',
-        headers: {
-            'content-type': 'application/json',
-            'x-communications-timestamp': timestamp,
-            'x-communications-signature-v2': signature(timestamp, body),
-            ...hyperflowProtectionHeaders(url, process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL),
-        },
-        body,
-        signal: AbortSignal.timeout(8000),
-    }, { scope: 'HYPERFLOW_AGENT_CONTEXT', allowedHosts, maxRedirects: 0 });
-    const text = (await response.text()).slice(0, 128 * 1024);
-    let parsed;
-    try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
-    if (!response.ok) throw new Error(`HyperFlow voice context returned HTTP ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
-    if (!parsed || typeof parsed !== 'object' || typeof parsed.instructions !== 'string' || typeof parsed.greeting !== 'string') {
-        throw new Error('HyperFlow voice context returned an invalid response');
+    const started = Date.now();
+    try {
+        const response = await fetchContext(url, {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'x-communications-timestamp': timestamp,
+                'x-communications-signature-v2': signature(timestamp, body),
+                ...hyperflowProtectionHeaders(url, process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL),
+            },
+            body,
+            signal: signal || AbortSignal.timeout(VOICE_CONTEXT_TIMEOUT_MS),
+        }, { scope: 'HYPERFLOW_AGENT_CONTEXT', allowedHosts, maxRedirects: 0 });
+        const text = (await response.text()).slice(0, 128 * 1024);
+        let parsed;
+        try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
+        if (!response.ok) throw new Error(`HyperFlow voice context returned HTTP ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
+        if (!parsed || typeof parsed !== 'object' || typeof parsed.instructions !== 'string' || typeof parsed.greeting !== 'string') {
+            throw new Error('HyperFlow voice context returned an invalid response');
+        }
+        console.info('HyperFlow voice lookup', { requestId: payload.request_id, durationMs: Date.now() - started, status: 'ok' });
+        return parsed;
+    } catch (error) {
+        console.warn('HyperFlow voice lookup', { requestId: payload.request_id, durationMs: Date.now() - started, status: signal?.aborted || error?.name === 'TimeoutError' ? 'timeout' : 'failed' });
+        throw error;
     }
-    return parsed;
 }
 
 export function applyHyperFlowVoiceContext(config, context) {
