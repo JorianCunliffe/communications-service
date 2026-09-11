@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { safeFetch } from './safeFetch.js';
 import { hyperflowProtectionHeaders } from './vercelProtection.js';
+import { DEFAULT_CONFIG } from './config.js';
 
 function contextUrl() {
     const configured = String(process.env.HYPERFLOW_AGENT_CONTEXT_URL || '').trim();
@@ -67,15 +68,20 @@ export async function requestHyperFlowVoiceContext({
 }
 
 export function applyHyperFlowVoiceContext(config, context) {
+    // Keep explicit line/contact instructions, but not the generic demo persona.
+    // Retain the original base so a project switch replaces stale context.
+    const base = config.hyperflowBaseInstructions ??
+        (config.systemMessage === DEFAULT_CONFIG.systemMessage ? 'You are HyperFlow, a concise and practical assistant.' : config.systemMessage);
     const evidence = context.project?.context ? JSON.stringify(context.project.context).slice(0, 30000) : null;
     const scopedInstructions = [
         context.instructions,
         evidence ? `--- HYPERFLOW PROJECT CONTEXT DATA ---\n${evidence}\n--- END HYPERFLOW PROJECT CONTEXT DATA ---` : null,
-        'Use select_hyperflow_project whenever the caller selects or switches projects. Never expose context from a project until that tool returns it as authorized for this call.',
+        'Use select_hyperflow_project as soon as the caller names a project, including in their first question. Their question already counts as selecting it: do not ask them to repeat the name or ask which project it is under. Ask for clarification only when the tool reports ambiguity. Never expose context from a project until returned as authorized for this call. After selection, answer the pending question once without repeating the greeting. The configured HyperFlow style takes precedence over a generic demo persona. Do not add unsolicited jokes. Explain limitations in plain language; do not describe internal authorization or read-only architecture to the caller.',
     ].filter(Boolean).join('\n\n');
     return {
         ...config,
-        systemMessage: `${config.systemMessage}\n\n${scopedInstructions}`,
+        hyperflowBaseInstructions: base,
+        systemMessage: `${base}\n\n${scopedInstructions}`,
         greetingText: context.greeting,
         aiSpeaksFirst: true,
         liveTranscript: true,
