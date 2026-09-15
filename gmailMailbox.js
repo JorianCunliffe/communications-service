@@ -81,9 +81,6 @@ export function canonicalGmailMessage(message, { mailboxAddress = null } = {}) {
         in_reply_to: headers['in-reply-to'] || null,
         references: headers.references || '',
         from: splitAddresses(headers.from || headers.sender || headers['return-path']),
-        // Gmail can omit To on valid inbox messages (for example Bcc and some
-        // system-generated mail). The connected account is the trusted
-        // receiving identity, so it is the safe final fallback.
         to: splitAddresses(headers.to || headers['delivered-to'] || headers['x-original-to'] || mailboxAddress),
         cc: splitAddresses(headers.cc),
         bcc: splitAddresses(headers.bcc),
@@ -125,7 +122,9 @@ async function gmailRequest(accessToken, path, options = {}) {
                         ? 'gmail.users.getProfile'
                         : path === '/watch'
                             ? 'gmail.users.watch'
-                            : 'gmail.request';
+                            : path.startsWith('/drafts/')
+                                ? 'gmail.drafts'
+                                : 'gmail.request';
         throw error;
     }
     return payload;
@@ -266,4 +265,29 @@ export async function createGmailDraft(accessToken, input, mailboxAddress) {
 
 export function getGmailDraft(accessToken, draftId) {
     return gmailRequest(accessToken, `/drafts/${encodeURIComponent(draftId)}?format=metadata`);
+}
+
+export async function updateGmailDraft(accessToken, draftId, input, mailboxAddress) {
+    const current = await getGmailDraft(accessToken, draftId);
+    if (!current?.id || !current?.message?.id) {
+        const error = new Error('Gmail draft is no longer editable');
+        error.status = 409;
+        error.code = 'DRAFT_NOT_EDITABLE';
+        throw error;
+    }
+    const message = gmailDraftMessage({
+        ...input,
+        provider_thread_id: input.provider_thread_id || current.message.threadId || undefined,
+    }, mailboxAddress);
+    const updated = await gmailRequest(accessToken, `/drafts/${encodeURIComponent(draftId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ id: draftId, message }),
+    });
+    if (updated?.id && updated.id !== draftId) {
+        const error = new Error('Gmail changed the draft identity during update');
+        error.status = 409;
+        error.code = 'DRAFT_IDENTITY_CHANGED';
+        throw error;
+    }
+    return { ...updated, id: draftId };
 }
