@@ -7,7 +7,7 @@ function credentialAad(tenantId, connectionId) {
     return `communications-mailbox:${tenantId}:${connectionId}`;
 }
 
-async function audit(db, tenantId, connectionId, actorId, action, outcome, details = {}) {
+async function writeAudit(db, tenantId, connectionId, actorId, action, outcome, details = {}) {
     const result = await db.from('mailbox_audit_events').insert({
         tenant_id: tenantId,
         provider_connection_id: connectionId || null,
@@ -35,9 +35,7 @@ async function selectedConnection(db, tenantId, connectionId) {
         .eq('tenant_id', tenantId).eq('id', connectionId).eq('enabled', true).maybeSingle();
     if (result.error) throw new Error(`Could not load mailbox connection: ${result.error.message}`);
     if (!result.data || !['gmail', 'outlook'].includes(result.data.provider) || !(result.data.channels || []).includes('email')) {
-        const error = new Error('Mailbox connection is unavailable');
-        error.status = 404;
-        throw error;
+        throw Object.assign(new Error('Mailbox connection is unavailable'), { status: 404 });
     }
     return result.data;
 }
@@ -67,6 +65,17 @@ function stableResponse(record, providerDraft, request) {
     };
 }
 
+async function recordDraftFailure(db, tenantId, recordId, error) {
+    try {
+        await db.from('mailbox_drafts').update({
+            last_error: String(error.message || error).slice(0, 500),
+            updated_at: new Date().toISOString(),
+        }).eq('tenant_id', tenantId).eq('id', recordId);
+    } catch (_) {
+        // The original provider/idempotency error is more useful than a secondary audit write failure.
+    }
+}
+
 export async function updateMailboxDraft(db, {
     tenantId,
     connectionId,
@@ -74,7 +83,16 @@ export async function updateMailboxDraft(db, {
     actorId = null,
     idempotencyKey,
     request,
-}) {
+}, dependencies = {}) {
+    const reserveOperation = dependencies.reserveOperation || reserveOutbound;
+    const markOperation = dependencies.markOperation || markOutbound;
+    const credentialProvider = dependencies.credentialProvider || accessCredential;
+    const audit = dependencies.audit || writeAudit;
+    const providers = dependencies.providers || {
+        outlook: (credential, id, input) => updateOutlookDraft(credential.access_token, id, input),
+        gmail: (credential, id, input, connection) => updateGmailDraft(credential.access_token, id, input, connection.provider_account_id),
+    };
+
     if (!idempotencyKey) {
         const error = new Error('Idempotency-Key header is required for mailbox draft updates');
         error.code = 'IDEMPOTENCY_REQUIRED';
@@ -102,7 +120,7 @@ export async function updateMailboxDraft(db, {
     };
     let operation;
     try {
-        operation = await reserveOutbound(db, {
+        operation = await reserveOperation(db, {
             tenantId,
             key: idempotencyKey,
             type: 'mailbox_draft_update',
@@ -110,14 +128,14 @@ export async function updateMailboxDraft(db, {
             request: operationRequest,
         });
         if (operation.status === 'completed') return operation.response;
-        const credential = await accessCredential(db, tenantId, connection);
+        const credential = await credentialProvider(db, tenantId, connection);
         const providerRequest = {
             ...request,
             provider_thread_id: request.provider_thread_id || record.provider_thread_id || undefined,
         };
-        const providerDraft = connection.provider === 'outlook'
-            ? await updateOutlookDraft(credential.access_token, draftId, providerRequest)
-            : await updateGmailDraft(credential.access_token, draftId, providerRequest, connection.provider_account_id);
+        const providerUpdate = providers[connection.provider];
+        if (typeof providerUpdate !== 'function') throw new Error(`Unsupported mailbox provider: ${connection.provider}`);
+        const providerDraft = await providerUpdate(credential, draftId, providerRequest, connection);
         if (providerDraft?.id !== draftId) {
             const error = new Error('Provider changed the draft identity during update');
             error.code = 'DRAFT_IDENTITY_CHANGED';
@@ -133,7 +151,7 @@ export async function updateMailboxDraft(db, {
             updated_at: response.updated_at,
         }).eq('tenant_id', tenantId).eq('id', record.id).select('*').single();
         if (updated.error) throw new Error(updated.error.message);
-        await markOutbound(db, operation.id, {
+        await markOperation(db, operation.id, {
             status: 'completed',
             provider_id: draftId,
             response,
@@ -146,16 +164,13 @@ export async function updateMailboxDraft(db, {
         return response;
     } catch (error) {
         if (operation?.id) {
-            await markOutbound(db, operation.id, {
+            await markOperation(db, operation.id, {
                 status: 'failed',
                 response: { error: error.message, code: error.code || null },
                 completed_at: new Date().toISOString(),
             }).catch(() => {});
         }
-        await db.from('mailbox_drafts').update({
-            last_error: String(error.message || error).slice(0, 500),
-            updated_at: new Date().toISOString(),
-        }).eq('tenant_id', tenantId).eq('id', record.id).catch?.(() => {});
+        await recordDraftFailure(db, tenantId, record.id, error);
         await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.updated', 'failed', {
             draft_id: draftId,
             error: String(error.message || error).slice(0, 200),
