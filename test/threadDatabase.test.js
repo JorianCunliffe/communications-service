@@ -72,11 +72,87 @@ after(async () => {
 
 describe('PostgreSQL-backed thread story', () => {
     test('applies the entire migration sequence and normalizes identities on real inserts', async () => {
-        assert.equal(migrationCount, 26);
+        assert.equal(migrationCount, 27);
         const identities = (await sql.query('select normalized_value from communication_identities where person_id=$1', [alex])).rows;
         assert.ok(identities.some(row => row.normalized_value === 'alex@example.com'));
         assert.equal((await sql.query("select normalize_communication_identity('tel:+61 (400) 000-111') value")).rows[0].value, '+61400000111');
         assert.equal((await sql.query("select normalize_communication_identity('tel: +61 (400) 000-111') value")).rows[0].value, '+61400000111');
+    });
+
+    test('atomically claims/finalizes draft updates and fences expired outcomes', async () => {
+        const fixtureTenant = 'mailbox_update_atomicity_test';
+        await sql.query('insert into tenants(tenant_id,name) values($1,$1)', [fixtureTenant]);
+        const connection = (await sql.query(
+            "insert into provider_connections(tenant_id,provider,provider_account_id,credential_reference,channels) values($1,'gmail','atomic@example.com','fixture',array['email']) returning id",
+            [fixtureTenant],
+        )).rows[0].id;
+        const draft = (await sql.query(
+            "insert into mailbox_drafts(tenant_id,provider_connection_id,provider_draft_id,idempotency_key,request_hash,status) values($1,$2,'provider-atomic','create-atomic','hash','created') returning id",
+            [fixtureTenant, connection],
+        )).rows[0].id;
+        const receipt = (await sql.query(
+            "insert into mailbox_draft_update_receipts(tenant_id,provider_connection_id,mailbox_draft_id,idempotency_key,request_hash,update_request,status,base_revision) values($1,$2,$3,'update-atomic','hash','{\"subject\":\"Next\"}','reserved',1) returning id",
+            [fixtureTenant, connection, draft],
+        )).rows[0].id;
+        await assert.rejects(sql.query(
+            "insert into mailbox_draft_update_receipts(tenant_id,provider_connection_id,mailbox_draft_id,idempotency_key,request_hash,status,base_revision) values($1,$2,$3,'foreign-key','hash','reserved',1)",
+            ['thread_integration_test', connection, draft],
+        ), /foreign key|violates/);
+        const claimed = await sql.query(
+            "select claim_mailbox_draft_update($1,$2,$3,$4,1,90) value",
+            [fixtureTenant, connection, draft, receipt],
+        );
+        assert.equal(claimed.rows[0].value, true);
+        assert.equal((await sql.query('select status from mailbox_draft_update_receipts where id=$1', [receipt])).rows[0].status, 'applying');
+        const finalized = await sql.query(
+            "select finalize_mailbox_draft_update($1,$2,$3,$4,'provider-atomic','message-atomic','thread-atomic',1,$5::jsonb) value",
+            [fixtureTenant, connection, draft, receipt, JSON.stringify({ id: draft, provider_draft_id: 'provider-atomic' })],
+        );
+        assert.equal(finalized.rows[0].value.revision, 2);
+        assert.equal((await sql.query('select active_update_id,revision from mailbox_drafts where id=$1', [draft])).rows[0].active_update_id, null);
+        await sql.query('delete from mailbox_draft_update_receipts where id=$1', [receipt]);
+        assert.equal((await sql.query('select count(*)::int count from mailbox_draft_update_receipts where id=$1', [receipt])).rows[0].count, 0);
+
+        const staleDraft = (await sql.query(
+            "insert into mailbox_drafts(tenant_id,provider_connection_id,provider_draft_id,idempotency_key,request_hash,status) values($1,$2,'provider-stale','create-stale','hash','created') returning id",
+            [fixtureTenant, connection],
+        )).rows[0].id;
+        const staleReceipt = (await sql.query(
+            "insert into mailbox_draft_update_receipts(tenant_id,provider_connection_id,mailbox_draft_id,idempotency_key,request_hash,status,base_revision) values($1,$2,$3,'update-stale','hash','reserved',1) returning id",
+            [fixtureTenant, connection, staleDraft],
+        )).rows[0].id;
+        assert.equal((await sql.query("select claim_mailbox_draft_update($1,$2,$3,$4,1,90) value", [fixtureTenant, connection, staleDraft, staleReceipt])).rows[0].value, true);
+        await sql.query("update mailbox_draft_update_receipts set lease_until=now()-interval '1 second' where id=$1", [staleReceipt]);
+        await sql.query("update mailbox_drafts set active_update_lease_until=now()-interval '1 second' where id=$1", [staleDraft]);
+        await assert.rejects(sql.query(
+            "select release_mailbox_draft_update($1,$2,$3,$4,'reconcile',409,'DRAFT_RECONCILIATION_REQUIRED',false)",
+            [fixtureTenant, connection, staleDraft, staleReceipt],
+        ), /manual reconciliation/);
+        assert.equal((await sql.query('select active_update_id from mailbox_drafts where id=$1', [staleDraft])).rows[0].active_update_id, staleReceipt);
+        assert.equal((await sql.query('select status from mailbox_draft_update_receipts where id=$1', [staleReceipt])).rows[0].status, 'applying');
+    });
+
+    test('lifecycle suspension blocks active mailbox update claims', async () => {
+        const fixtureTenant = 'mailbox_lifecycle_test';
+        await sql.query('insert into tenants(tenant_id,name) values($1,$1)', [fixtureTenant]);
+        const connection = (await sql.query(
+            "insert into provider_connections(tenant_id,provider,provider_account_id,credential_reference,channels) values($1,'gmail','lifecycle@example.com','fixture',array['email']) returning id",
+            [fixtureTenant],
+        )).rows[0].id;
+        const draft = (await sql.query(
+            "insert into mailbox_drafts(tenant_id,provider_connection_id,provider_draft_id,idempotency_key,request_hash,status) values($1,$2,'provider-life','create-life','hash','created') returning id",
+            [fixtureTenant, connection],
+        )).rows[0].id;
+        const receipt = (await sql.query(
+            "insert into mailbox_draft_update_receipts(tenant_id,provider_connection_id,mailbox_draft_id,idempotency_key,request_hash,status,base_revision) values($1,$2,$3,'update-life','hash','reserved',1) returning id",
+            [fixtureTenant, connection, draft],
+        )).rows[0].id;
+        await sql.query("select claim_mailbox_draft_update($1,$2,$3,$4,1,90)", [fixtureTenant, connection, draft, receipt]);
+        await assert.rejects(sql.query('delete from mailbox_draft_update_receipts where id=$1', [receipt]), /Reconcile active or uncertain draft update/);
+        const revision = (await sql.query('select lifecycle_revision from tenants where tenant_id=$1', [fixtureTenant])).rows[0].lifecycle_revision;
+        await assert.rejects(sql.query(
+            "select tenant_data_lifecycle($1,'test','life-suspend','suspend',$2)", [fixtureTenant, revision],
+        ), /Reconcile active or uncertain draft update/);
     });
 
     test('email, SMS, voice and recording join one project thread and persist scores and group participants', async () => {

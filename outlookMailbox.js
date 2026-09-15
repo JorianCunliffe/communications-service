@@ -71,6 +71,9 @@ async function graphRequest(accessToken, pathOrUrl, options = {}) {
         const error = new Error(payload?.error?.message || `Microsoft Graph returned HTTP ${response.status}`);
         error.status = response.status;
         error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        error.providerOperation = pathOrUrl.includes('/messages/')
+            ? (options.method === 'PATCH' ? 'outlook.messages.update' : 'outlook.messages.get')
+            : 'outlook.request';
         throw error;
     }
     return payload;
@@ -138,8 +141,8 @@ function recipients(values) {
 }
 
 function draftBody(input) {
-    if (input.html) return { contentType: 'HTML', content: safeHtml(input.html) || '' };
-    if (input.text) return { contentType: 'Text', content: String(input.text) };
+    if (input.html !== undefined && input.html !== null) return { contentType: 'HTML', content: safeHtml(input.html) || '' };
+    if (input.text !== undefined && input.text !== null) return { contentType: 'Text', content: String(input.text) };
     throw new Error('text or html is required');
 }
 
@@ -148,10 +151,11 @@ export async function createOutlookDraft(accessToken, input, { request = graphRe
         const draft = await request(accessToken, `me/messages/${encodeURIComponent(input.provider_message_id)}/createReply`, {
             method: 'POST', body: JSON.stringify({}),
         });
-        const updated = await request(accessToken, `me/messages/${encodeURIComponent(draft.id)}`, {
+        await request(accessToken, `me/messages/${encodeURIComponent(draft.id)}`, {
             method: 'PATCH', body: JSON.stringify({ body: draftBody(input) }),
         });
-        return { id: updated.id || draft.id, message: updated };
+        const verified = await getOutlookDraft(accessToken, draft.id, { request });
+        return { id: assertOutlookDraft(verified, draft.id).id, message: verified };
     }
     const toRecipients = recipients(input.to);
     if (!toRecipients.length) throw new Error('to is required');
@@ -169,6 +173,95 @@ export async function createOutlookDraft(accessToken, input, { request = graphRe
     return { id: message.id, message };
 }
 
+function assertOutlookDraft(message, draftId) {
+    if (!message?.id) {
+        const error = new Error('Microsoft Graph did not return a draft');
+        error.status = 409;
+        error.code = 'DRAFT_NOT_EDITABLE';
+        throw error;
+    }
+    if (message.isDraft !== true) {
+        const error = new Error('Outlook provider object is not an editable draft');
+        error.status = 409;
+        error.code = 'DRAFT_NOT_EDITABLE';
+        throw error;
+    }
+    if (draftId && message.id !== draftId) {
+        const error = new Error('Provider changed the draft identifier');
+        error.status = 409;
+        error.code = 'DRAFT_ID_CHANGED';
+        throw error;
+    }
+    return message;
+}
+
+export function outlookDraftEditableFields(message) {
+    const body = message?.body || {};
+    return {
+        subject: message?.subject || '',
+        to: addresses(message?.toRecipients),
+        cc: addresses(message?.ccRecipients),
+        bcc: addresses(message?.bccRecipients),
+        reply_to: addresses(message?.replyTo),
+        ...(String(body.contentType || '').toLowerCase() === 'html'
+            ? { html: body.content || '' }
+            : { text: body.content || message?.bodyPreview || '' }),
+    };
+}
+
+export async function updateOutlookDraft(accessToken, draftId, input, { request = graphRequest } = {}) {
+    const current = await getOutlookDraft(accessToken, draftId, { request });
+    assertOutlookDraft(current, draftId);
+    const merged = {
+        ...outlookDraftEditableFields(current),
+        ...Object.fromEntries(Object.entries(input || {}).filter(([, value]) => value !== undefined)),
+    };
+    let body;
+    try {
+        body = draftBody(merged);
+    } catch (error) {
+        error.status = error.status || 422;
+        error.code = error.code || 'DRAFT_INPUT_INVALID';
+        throw error;
+    }
+    try {
+        await request(accessToken, `me/messages/${encodeURIComponent(draftId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+                subject: String(merged.subject || '').trim(),
+                toRecipients: recipients(merged.to),
+                ccRecipients: recipients(merged.cc),
+                bccRecipients: recipients(merged.bcc),
+                replyTo: recipients(merged.reply_to),
+                body,
+            }),
+        });
+    } catch (error) {
+        if (error.status === undefined) {
+            error.providerAfterMutation = true;
+        } else if (![400, 401, 403, 404, 409, 422].includes(Number(error.status))) {
+            error.providerAfterMutation = true;
+        }
+        throw error;
+    }
+    // Graph may return 204 or a partial resource for PATCH. The authoritative
+    // result is always a fresh GET, which also catches a provider-side send or
+    // ID mutation race before the service records success.
+    let updated;
+    try {
+        updated = await getOutlookDraft(accessToken, draftId, { request });
+    } catch (error) {
+        error.providerAfterMutation = true;
+        throw error;
+    }
+    try {
+        return assertOutlookDraft(updated, draftId);
+    } catch (error) {
+        error.providerAfterMutation = true;
+        throw error;
+    }
+}
+
 export function getOutlookDraft(accessToken, draftId, { request = graphRequest } = {}) {
-    return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,conversationId,internetMessageId,isDraft,subject`);
+    return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,conversationId,internetMessageId,isDraft,subject,toRecipients,ccRecipients,bccRecipients,replyTo,body,bodyPreview`);
 }

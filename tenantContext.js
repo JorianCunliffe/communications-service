@@ -17,6 +17,7 @@ export const TENANT_TABLES = new Set([
     'communication_attachments', 'email_messages', 'email_reply_routes',
     'mailbox_oauth_credentials', 'mailbox_sync_state', 'mailbox_oauth_states',
     'mailbox_drafts', 'mailbox_audit_events',
+    'mailbox_draft_update_receipts',
     'communication_thread_participants', 'thread_resolution_decisions',
     'thread_resolution_feedback', 'recording_revisions', 'tenant_admin_audit', 'tenant_api_budgets', 'tenant_api_usage', 'tenant_lifecycle_receipts',
 ]);
@@ -26,6 +27,9 @@ const TENANT_RPCS = new Set([
     'resolve_communication_ask', 'search_communications', 'suggest_terms',
     'consume_mailbox_oauth_state',
     'claim_mailbox_sync',
+    'claim_mailbox_draft_update',
+    'finalize_mailbox_draft_update',
+    'release_mailbox_draft_update',
     'correct_communication_thread',
     'update_communication_thread_register',
     'read_communication_thread_register',

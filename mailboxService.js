@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
 import { ingestCanonicalInboundEmail } from './emailWebhook.js';
+import { safeHtml } from './email.js';
 import {
     createGmailDraft,
+    updateGmailDraft,
     GmailMessageNormalizationError,
     GmailMessageUnavailableError,
     getGmailDraft,
+    gmailDraftEditableFields,
+    gmailDraftHasAttachments,
     gmailHistoryMessageIds,
     gmailInitialMessageIds,
     gmailMessage,
@@ -15,7 +19,9 @@ import {
 import { mailboxKeyFingerprint, openMailboxCredential, sealMailboxCredential } from './mailboxCrypto.js';
 import {
     createOutlookDraft,
+    updateOutlookDraft,
     getOutlookDraft,
+    outlookDraftEditableFields,
     OutlookMessageNormalizationError,
     outlookDeltaMessages,
     outlookMessage,
@@ -447,7 +453,7 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
         communication_id: request.communication_id || null,
         idempotency_key: idempotencyKey,
         request_hash: hash,
-        status: 'creating',
+        status: 'reserved',
     }).select('*').single();
     if (reserved.error) {
         const raced = await db.from('mailbox_drafts').select('*')
@@ -468,7 +474,7 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
         const credential = await accessCredential(db, tenantId, connection);
         let providerRequest = request;
         if (connection.provider === 'outlook' && request.communication_id && !request.provider_message_id) {
-            const email = await db.from('emails').select('provider_email_id')
+            const email = await db.from('email_messages').select('provider_email_id')
                 .eq('tenant_id', tenantId).eq('communication_id', request.communication_id).maybeSingle();
             if (email.error) throw new Error(email.error.message);
             providerRequest = { ...request, provider_message_id: email.data?.provider_email_id || undefined };
@@ -505,10 +511,351 @@ export async function getMailboxDraft(db, { tenantId, connectionId, draftId }) {
     const provider = connection.provider === 'outlook'
         ? await getOutlookDraft(credential.access_token, draftId)
         : await getGmailDraft(credential.access_token, draftId);
+    if (!provider?.id || provider.id !== draftId) {
+        throw draftUpdateError('Provider draft was not found', 404, 'DRAFT_NOT_FOUND');
+    }
+    if (connection.provider === 'outlook' && provider.isDraft !== true) {
+        throw draftUpdateError('Provider object is no longer an editable draft', 409, 'DRAFT_NOT_EDITABLE');
+    }
+    if (connection.provider === 'gmail') {
+        const labels = provider.message?.labelIds || provider.labelIds;
+        if (!Array.isArray(labels) || !labels.includes('DRAFT')) {
+            throw draftUpdateError('Provider object is no longer an editable draft', 409, 'DRAFT_NOT_EDITABLE');
+        }
+    }
     return {
         ...record.data,
         provider: connection.provider === 'outlook'
             ? { id: provider.id, message_id: provider.id, thread_id: provider.conversationId, is_draft: provider.isDraft }
-            : { id: provider.id, message_id: provider.message?.id, thread_id: provider.message?.threadId },
+            : { id: provider.id, message_id: provider.message?.id, thread_id: provider.message?.threadId, is_draft: true },
     };
+}
+
+function draftUpdateError(message, status = 409, code = 'DRAFT_UPDATE_CONFLICT') {
+    const error = new Error(message);
+    error.status = status;
+    error.code = code;
+    return error;
+}
+
+function updateResult(record) {
+    return {
+        id: record.id,
+        provider_draft_id: record.provider_draft_id,
+        provider_message_id: record.provider_message_id,
+        provider_thread_id: record.provider_thread_id,
+        status: record.status,
+        revision: record.revision,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    };
+}
+
+const DRAFT_EDITABLE_FIELDS = ['to', 'cc', 'bcc', 'reply_to', 'subject', 'text', 'html'];
+
+function normalizeDraftValue(key, value) {
+    if (Array.isArray(value)) return value.map(item => String(item).trim().toLowerCase()).sort();
+    if (key === 'subject') return String(value ?? '').trim();
+    if (key === 'html') return safeHtml(value) || '';
+    return String(value ?? '');
+}
+
+function normalizedUpdateRequest(request = {}) {
+    return Object.fromEntries(DRAFT_EDITABLE_FIELDS
+        .filter(key => request[key] !== undefined)
+        .map(key => [key, normalizeDraftValue(key, request[key])]));
+}
+
+function draftFieldsMatch(request, current) {
+    const entries = Object.entries(request);
+    return entries.length > 0 && entries.every(([key, value]) => JSON.stringify(value) === JSON.stringify(normalizeDraftValue(key, current[key])));
+}
+
+function providerDraftData(provider, providerName, mailboxAddress) {
+    return {
+        fields: providerName === 'outlook'
+            ? outlookDraftEditableFields(provider)
+            : gmailDraftEditableFields(provider, mailboxAddress),
+        provider_message_id: provider?.message?.id || (providerName === 'outlook' ? provider?.id : null),
+        provider_thread_id: provider?.message?.threadId || provider?.conversationId || null,
+    };
+}
+
+async function currentEditableProviderDraft(connection, credential, draftId, providerOps = {}) {
+    const provider = connection.provider === 'outlook'
+        ? await (providerOps.getOutlookDraft || getOutlookDraft)(credential.access_token, draftId)
+        : await (providerOps.getGmailDraft || getGmailDraft)(credential.access_token, draftId, { format: 'full' });
+    if (!provider?.id || provider.id !== draftId) throw draftUpdateError('Provider draft was not found', 404, 'DRAFT_NOT_FOUND');
+    if (connection.provider === 'outlook' && provider.isDraft !== true) {
+        throw draftUpdateError('Provider object is no longer an editable draft', 409, 'DRAFT_NOT_EDITABLE');
+    }
+    if (connection.provider === 'gmail') {
+        const labels = provider.message?.labelIds || provider.labelIds;
+        if (!Array.isArray(labels) || !labels.includes('DRAFT')) {
+            throw draftUpdateError('Provider object is no longer an editable draft', 409, 'DRAFT_NOT_EDITABLE');
+        }
+        if (gmailDraftHasAttachments(provider)) {
+            throw draftUpdateError('Gmail drafts with attachments are not supported for in-place updates', 409, 'DRAFT_ATTACHMENTS_UNSUPPORTED');
+        }
+    }
+    return { provider, ...providerDraftData(provider, connection.provider, connection.provider_account_id) };
+}
+
+async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptId, draftId, providerData, expectedRevision }) {
+    const nextRevision = expectedRevision + 1;
+    const result = updateResult({
+        ...draft,
+        provider_draft_id: draftId,
+        provider_message_id: providerData.provider_message_id || draft.provider_message_id,
+        provider_thread_id: providerData.provider_thread_id || draft.provider_thread_id,
+        revision: nextRevision,
+        updated_at: null,
+    });
+    const finalized = await db.rpc('finalize_mailbox_draft_update', {
+        p_tenant_id: tenantId,
+        p_provider_connection_id: connectionId,
+        p_mailbox_draft_id: draft.id,
+        p_receipt_id: receiptId,
+        p_provider_draft_id: draftId,
+        p_provider_message_id: result.provider_message_id,
+        p_provider_thread_id: result.provider_thread_id,
+        p_expected_revision: expectedRevision,
+        p_result: result,
+    });
+    if (finalized.error) {
+        throw draftUpdateError('Draft update finalization is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    return finalized.data || result;
+}
+
+async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt, draftId, connection, credential, providerOps }) {
+    const leaseActive = draft.active_update_id === receipt.id
+        && (!receipt.lease_until || new Date(receipt.lease_until).valueOf() > Date.now());
+    if (leaseActive) {
+        throw draftUpdateError('Another draft update is in progress; retry after its lease expires', 409, 'DRAFT_UPDATE_IN_PROGRESS');
+    }
+    let current;
+    try {
+        current = await currentEditableProviderDraft(connection, credential, draftId, providerOps);
+    } catch {
+        throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    if (!draftFieldsMatch(receipt.update_request || {}, current.fields)) {
+        throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    return finalizeDraftUpdate(db, {
+        tenantId, connectionId, draft, receiptId: receipt.id, draftId,
+        providerData: current, expectedRevision: Number(receipt.base_revision || draft.revision || 1),
+    });
+}
+
+/**
+ * Update an existing provider draft without ever changing its provider ID.
+ * The receipt row is deliberately separate from mailbox_drafts: one draft can
+ * be edited many times while each idempotency key remains durable forever.
+ */
+export async function updateMailboxDraft(db, {
+    tenantId, connectionId, draftId, actorId = null, idempotencyKey, request,
+    providerOps = {}, credentialOverride = null,
+}) {
+    if (!idempotencyKey) throw draftUpdateError('Idempotency-Key header is required for mailbox draft updates', 400, 'IDEMPOTENCY_REQUIRED');
+    const connection = await selectedConnection(db, tenantId, connectionId);
+    const hashRequest = Object.fromEntries(['to', 'cc', 'bcc', 'reply_to', 'subject', 'text', 'html', 'revision']
+        .filter(key => request?.[key] !== undefined)
+        .map(key => [key, request[key]]));
+    const hash = requestHash(hashRequest);
+    const draft = await db.from('mailbox_drafts').select('*')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+        .eq('provider_draft_id', draftId).maybeSingle();
+    if (draft.error) throw new Error(draft.error.message);
+    if (!draft.data) throw draftUpdateError('Mailbox draft not found', 404, 'DRAFT_NOT_FOUND');
+    if (draft.data.status !== 'created' || !draft.data.provider_draft_id) {
+        throw draftUpdateError('Mailbox draft is not editable until its provider state is reconciled', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+
+    const existing = await db.from('mailbox_draft_update_receipts').select('*')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+        .eq('mailbox_draft_id', draft.data.id).eq('idempotency_key', idempotencyKey).maybeSingle();
+    if (existing.error) throw new Error(existing.error.message);
+    if (existing.data) {
+        if (existing.data.request_hash !== hash) {
+            throw draftUpdateError('Idempotency key was already used with different draft content', 409, 'IDEMPOTENCY_CONFLICT');
+        }
+        if (existing.data.status === 'updated') return existing.data.result || updateResult(draft.data);
+        if (existing.data.status === 'failed') {
+            throw draftUpdateError(existing.data.last_error || 'Draft update previously failed', existing.data.error_status || 502, existing.data.error_code || 'DRAFT_PROVIDER_FAILED');
+        }
+        if (['applying', 'uncertain'].includes(existing.data.status)) {
+            try {
+                const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+                return reconcileDraftUpdate(db, {
+                    tenantId, connectionId, draft: draft.data, receipt: existing.data, draftId, connection, credential, providerOps,
+                });
+            } catch (error) {
+                if (error.code === 'DRAFT_RECONCILIATION_REQUIRED' || error.code === 'DRAFT_UPDATE_IN_PROGRESS') throw error;
+                throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            }
+        }
+        if (existing.data.status === 'reserved'
+            && Number(existing.data.base_revision || 1) !== Number(draft.data.revision || 1)) {
+            await db.rpc('release_mailbox_draft_update', {
+                p_tenant_id: tenantId, p_provider_connection_id: connectionId,
+                p_mailbox_draft_id: draft.data.id, p_receipt_id: existing.data.id,
+                p_error: 'Draft revision changed while this update was waiting',
+                p_error_status: 409, p_error_code: 'STALE_REVISION', p_force_stale: true,
+            });
+            throw draftUpdateError('Draft revision changed; reload the draft before updating', 409, 'STALE_REVISION');
+        }
+        if (existing.data.status !== 'reserved') {
+            throw draftUpdateError('Another draft update is in progress; retry after the active update completes', 409, 'DRAFT_UPDATE_IN_PROGRESS');
+        }
+    }
+
+    const requestedRevision = request?.revision;
+    if (requestedRevision !== undefined && (!Number.isInteger(requestedRevision) || requestedRevision < 1)) {
+        throw draftUpdateError('revision must be a positive integer', 422, 'INVALID_REVISION');
+    }
+    if (requestedRevision !== undefined && requestedRevision !== Number(draft.data.revision || 1)) {
+        throw draftUpdateError('Draft revision changed; reload the draft before updating', 409, 'STALE_REVISION');
+    }
+    const normalizedRequest = normalizedUpdateRequest(request);
+    if (!Object.keys(normalizedRequest).length) {
+        throw draftUpdateError('At least one editable draft field is required', 422, 'INVALID_DRAFT_UPDATE');
+    }
+    const reserved = existing.data?.status === 'reserved' && !draft.data.active_update_id
+        ? { data: existing.data, error: null }
+        : await db.from('mailbox_draft_update_receipts').insert({
+            tenant_id: tenantId,
+            provider_connection_id: connectionId,
+            mailbox_draft_id: draft.data.id,
+            idempotency_key: idempotencyKey,
+            request_hash: hash,
+            update_request: normalizedRequest,
+            base_revision: Number(draft.data.revision || 1),
+            status: 'reserved',
+        }).select('*').single();
+    if (reserved.error) {
+        const raced = await db.from('mailbox_draft_update_receipts').select('*')
+            .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+            .eq('mailbox_draft_id', draft.data.id).eq('idempotency_key', idempotencyKey).maybeSingle();
+        if (raced.error) throw new Error(raced.error.message);
+        if (!raced.data) throw new Error(reserved.error.message);
+        if (raced.data.request_hash !== hash) throw draftUpdateError('Idempotency key was already used with different draft content', 409, 'IDEMPOTENCY_CONFLICT');
+        if (raced.data.status === 'updated') return raced.data.result;
+        if (['applying', 'uncertain'].includes(raced.data.status)) {
+            try {
+                const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+                return reconcileDraftUpdate(db, {
+                    tenantId, connectionId, draft: draft.data, receipt: raced.data, draftId, connection, credential, providerOps,
+                });
+            } catch (error) {
+                if (error.code === 'DRAFT_RECONCILIATION_REQUIRED' || error.code === 'DRAFT_UPDATE_IN_PROGRESS') throw error;
+                throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            }
+        }
+        return updateMailboxDraft(db, {
+            tenantId, connectionId, draftId, actorId, idempotencyKey, request, providerOps, credentialOverride,
+        });
+    }
+
+    let claimed;
+    try {
+        claimed = await db.rpc('claim_mailbox_draft_update', {
+            p_tenant_id: tenantId, p_provider_connection_id: connectionId,
+            p_mailbox_draft_id: draft.data.id, p_receipt_id: reserved.data.id,
+            p_expected_revision: Number(draft.data.revision || 1), p_lease_seconds: 90,
+        });
+    } catch (error) {
+        throw draftUpdateError('Draft update claim is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    if (claimed.error) {
+        await db.from('mailbox_draft_update_receipts').update({
+            status: 'uncertain', last_error: claimed.error.message, updated_at: new Date().toISOString(),
+        }).eq('tenant_id', tenantId).eq('id', reserved.data.id);
+        throw draftUpdateError('Draft update claim is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    if (claimed.data !== true) {
+        throw draftUpdateError('Another draft update is in progress; retry after the active update completes', 409, 'DRAFT_UPDATE_IN_PROGRESS');
+    }
+
+    const providerRequest = { ...(request || {}) };
+    delete providerRequest.revision;
+    delete providerRequest.communication_id;
+    delete providerRequest.provider_draft_id;
+    delete providerRequest.headers;
+    delete providerRequest.provider_thread_id;
+    delete providerRequest.in_reply_to;
+    delete providerRequest.references;
+    let providerStarted = false;
+    let receiptCommitted = false;
+    try {
+        const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+        providerStarted = true;
+        const providerDraft = connection.provider === 'outlook'
+            ? await (providerOps.updateOutlookDraft || updateOutlookDraft)(credential.access_token, draftId, providerRequest)
+            : await (providerOps.updateGmailDraft || updateGmailDraft)(credential.access_token, draftId, providerRequest, connection.provider_account_id);
+        if (!providerDraft || providerDraft.id !== draftId) {
+            throw draftUpdateError('Provider changed the draft identifier', 409, 'DRAFT_ID_CHANGED');
+        }
+        const nextRevision = Number(draft.data.revision || 1) + 1;
+        const providerData = providerDraftData(providerDraft, connection.provider, connection.provider_account_id);
+        const result = await finalizeDraftUpdate(db, {
+            tenantId, connectionId, draft: draft.data, receiptId: reserved.data.id, draftId,
+            providerData, expectedRevision: Number(draft.data.revision || 1),
+        });
+        receiptCommitted = true;
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.updated', 'succeeded', {
+            draft_id: draftId, revision: nextRevision,
+        }).catch(() => {});
+        return result;
+    } catch (error) {
+        let uncertain = !receiptCommitted && providerStarted && (
+            error.providerAfterMutation === true
+            || error.code === 'DRAFT_RECONCILIATION_REQUIRED'
+            || error.retryable === true || ![400, 401, 403, 404, 409, 422].includes(Number(error.status))
+            || [408, 429, 500, 502, 503, 504].includes(Number(error.status))
+        );
+        if (!providerStarted && !receiptCommitted) uncertain = false;
+        if (!uncertain && !receiptCommitted) {
+            const released = await db.rpc('release_mailbox_draft_update', {
+                p_tenant_id: tenantId, p_provider_connection_id: connectionId,
+                p_mailbox_draft_id: draft.data.id, p_receipt_id: reserved.data.id,
+                p_error: String(error.message || error).slice(0, 500),
+                p_error_status: Number.isInteger(error.status) ? error.status : 502,
+                p_error_code: error.code || 'DRAFT_PROVIDER_FAILED', p_force_stale: true,
+            });
+            if (released.error) uncertain = true;
+        }
+        if (receiptCommitted) {
+            // The result is durable; keep the active claim if releasing it
+            // failed so another key cannot issue a second provider update.
+            throw error;
+        }
+        const status = uncertain ? 'uncertain' : 'failed';
+        const errorStatus = Number(error.status);
+        const persistedErrorStatus = Number.isInteger(errorStatus)
+            && [400, 401, 403, 404, 409, 422].includes(errorStatus)
+            ? errorStatus
+            : 502;
+        await db.from('mailbox_draft_update_receipts').update({
+            status,
+            last_error: String(error.message || error).slice(0, 500),
+            error_status: persistedErrorStatus,
+            error_code: error.code || (uncertain ? 'DRAFT_RECONCILIATION_REQUIRED' : 'DRAFT_PROVIDER_FAILED'),
+            lease_until: uncertain ? undefined : null,
+            updated_at: new Date().toISOString(),
+        }).eq('tenant_id', tenantId).eq('id', reserved.data.id);
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.updated', 'failed', {
+            draft_id: draftId, error: String(error.message || error).slice(0, 200),
+        }).catch(() => {});
+        if (uncertain) {
+            const reconciliation = error.code === 'DRAFT_RECONCILIATION_REQUIRED'
+                ? error
+                : draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            reconciliation.providerOperation = error.providerOperation;
+            reconciliation.providerAfterMutation = error.providerAfterMutation;
+            throw reconciliation;
+        }
+        throw error;
+    }
 }

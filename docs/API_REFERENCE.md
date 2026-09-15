@@ -57,7 +57,7 @@ PERSISTENCE_PROVIDER=postgres
 DATABASE_URL=postgresql://...
 ```
 
-Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `024`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, and `019` adds ranked, explainable, correctable thread resolution.
+Supabase uses `PERSISTENCE_PROVIDER=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. The legacy `SUPABASE_CONFIG_ENABLED=true` switch remains supported. Databases require migrations `000` through `026`; `LEGACY_TENANT_ID` must be set before migration `009` backfills and locks existing rows. Migrations `011`-`012` recover terminal call-event delivery, `013`-`015` narrowly requeue inbound email jobs affected by superseded routing paths, `016`-`017` add connected mailbox storage, `018` adds person-aware semantic threads, `019` adds ranked, explainable, correctable thread resolution, and `026` adds durable in-place draft update receipts, leases, atomic claims/finalization/release, and lifecycle protections.
 
 ### Twilio webhooks
 
@@ -456,7 +456,40 @@ Creates a provider-native Gmail or Outlook draft and never sends it. For an Outl
 GET /v1/mailboxes/:connectionId/drafts/:draftId
 ```
 
-Retrieves a tenant-scoped draft record and verifies that the provider draft still exists.
+Retrieves a tenant-scoped draft record and verifies that the provider draft
+still exists and remains editable.
+
+```http
+PATCH /v1/mailboxes/:connectionId/drafts/:draftId
+Idempotency-Key: stable-update-key
+Content-Type: application/json
+```
+
+Updates the existing provider draft in place and never sends it or changes
+`provider_draft_id`. All editable fields are optional; omitted recipients,
+subject, and body fields remain unchanged (`to`, `cc`, `bcc`, `reply_to`,
+`subject`, `text`, or `html`). `revision` is an optional current revision for
+optimistic concurrency. Provider-specific headers and thread metadata remain
+preserved, but are not client-editable through this provider-neutral route.
+At least one editable field must be supplied.
+Update receipts use `reserved` (not started), `applying`, `updated`, `failed`,
+or `uncertain`; provider timeouts and persistence ambiguity stay uncertain and
+are checked by a bounded provider GET rather than retried blindly. If that GET
+cannot prove that every requested field matches, the claim and uncertain
+receipt remain in place for manual/operator reconciliation; the service never
+clears an unproven claim or issues another provider mutation automatically.
+The response is `200` with the draft record and the incremented `revision`.
+This route requires `communications:write` and `email:draft`, and always
+requires `Idempotency-Key`.
+
+An identical completed retry returns the same result without another provider
+call. Reusing a key with different content returns `409`. An update that is
+still reserved/applying or has an uncertain provider outcome returns `409` until
+reconciled. Missing, deleted, or provider objects that are no longer drafts
+are rejected; provider failures do not send mail and are retained in the
+durable receipt. Missing provider drafts return `404`, non-editable or
+reconciliation-required drafts return `409`, and other provider failures
+return `502`; error `code` is included when available.
 
 When Gmail Pub/Sub is configured, its authenticated push subscription posts to `POST /oauth/gmail`. The notification is only a sync hint: the durable mailbox history cursor remains authoritative, and scheduled reconciliation covers delayed or dropped notifications.
 
@@ -1340,7 +1373,7 @@ The [OpenAPI supplement](../contracts/phase11.openapi.json) describes these addi
 
 GET/POST `/v1/tenant/lifecycle` is the independent Communications lifecycle resource. It requires administrator role and `tenant:manage`. The current state, lifecycle revision, dataset catalogue and last100 receipts are readable even while the tenant is suspended or closed. Other tenant APIs reject inactive tenants.
 
-POST accepts `{operation,revision,requestId}`. A stable request ID replays the original result for the same actor/operation. `suspend` rejects reserved outbound operations, active calls, syncing mailboxes, uncertain draft creation and active worker leases. `resume` restores a suspended tenant; an erased tenant cannot be reactivated. `erase_local` requires a suspended revision, additional `tenant:erase` authority and exact confirmation `Erase Communications local tenant data`. These operations do not contact providers.
+POST accepts `{operation,revision,requestId}`. A stable request ID replays the original result for the same actor/operation. `suspend` rejects reserved outbound operations, active calls, syncing mailboxes, active/uncertain draft creation or updates, and active worker leases. `resume` restores a suspended tenant; an erased tenant cannot be reactivated. `erase_local` requires a suspended revision, additional `tenant:erase` authority and exact confirmation `Erase Communications local tenant data`; it also blocks while draft update evidence is active. These operations do not contact providers.
 
 A suspended tenant can export a permitted business dataset with GET `?dataset=contacts&revision=2&offset=0`. Pages contain at most50 records; follow `nextOffset`. Export requires `memory:private` authority because a tenant export may include private evidence. Credential/configuration datasets are excluded and nested authentication fields are redacted. Each exported page has a SHA256 digest and an audit receipt. Pages over3.5MB fail413 for an operator file export. This is a portable business-data export, not a credential-bearing database backup.
 

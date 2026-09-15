@@ -9,12 +9,13 @@ import {
     outlookAuthorizationUrl,
     verifyMailboxOAuthState,
 } from '../mailboxOAuth.js';
-import { canonicalGmailMessage, GmailMessageNormalizationError, GmailMessageUnavailableError, gmailDraftMessage } from '../gmailMailbox.js';
+import { canonicalGmailMessage, GmailMessageNormalizationError, GmailMessageUnavailableError, gmailDraftMessage, updateGmailDraft } from '../gmailMailbox.js';
 import {
     canonicalOutlookMessage,
     createOutlookDraft,
     outlookDeltaMessages,
     OutlookMessageNormalizationError,
+    updateOutlookDraft,
 } from '../outlookMailbox.js';
 
 const KEYS = [
@@ -173,6 +174,70 @@ describe('Gmail adapter contract', () => {
         assert.match(mime, /Draft only/);
         assert.equal(draft.threadId, 'gmail-thread-1');
     });
+
+    test('updates Gmail drafts partially while preserving body, headers, thread and ID', async () => {
+        const calls = [];
+        const encoded = value => Buffer.from(value).toString('base64url');
+        const result = await updateGmailDraft('token', 'draft-1', { subject: 'Updated' }, 'coach@example.com', {
+            request: async (_token, path, options) => {
+                calls.push({ path, options });
+                if (calls.length === 1) return {
+                    id: 'draft-1',
+                    message: {
+                        id: 'message-1', threadId: 'thread-1', labelIds: ['DRAFT'],
+                        payload: {
+                            headers: [
+                                { name: 'To', value: 'Alex <alex@example.com>' },
+                                { name: 'Subject', value: 'Original' },
+                                { name: 'X-Trace', value: 'preserve-me' },
+                            ],
+                            parts: [{ mimeType: 'text/plain', body: { data: encoded('existing body') } }],
+                        },
+                    },
+                };
+                return { id: 'draft-1', message: { id: 'message-1', threadId: 'thread-1', labelIds: ['DRAFT'] } };
+            },
+        });
+        const payload = JSON.parse(calls[1].options.body);
+        const mime = Buffer.from(payload.message.raw, 'base64url').toString('utf8');
+        assert.equal(result.id, 'draft-1');
+        assert.equal(calls[0].path, '/drafts/draft-1?format=full');
+        assert.equal(calls[1].options.method, 'PUT');
+        assert.equal(payload.id, 'draft-1');
+        assert.match(mime, /To: Alex <alex@example\.com>/);
+        assert.match(mime, /Subject: Updated/);
+        assert.match(mime, /existing body/);
+        assert.match(mime, /X-Trace: preserve-me/);
+        assert.equal(payload.message.threadId, 'thread-1');
+    });
+
+    test('rejects a Gmail provider object that is no longer a draft', async () => {
+        await assert.rejects(updateGmailDraft('token', 'draft-1', { subject: 'Updated' }, 'coach@example.com', {
+            request: async () => ({ id: 'draft-1', message: { labelIds: ['INBOX'] } }),
+        }), error => error.code === 'DRAFT_NOT_EDITABLE' && error.status === 409);
+    });
+
+    test('rejects Gmail attachment drafts before PUT so attachments are never dropped', async () => {
+        let puts = 0;
+        await assert.rejects(updateGmailDraft('token', 'draft-1', { subject: 'Updated' }, 'coach@example.com', {
+            request: async (_token, path, options) => {
+                if (options?.method === 'PUT') puts += 1;
+                return options?.method === 'PUT'
+                    ? { id: 'draft-1', message: { labelIds: ['DRAFT'] } }
+                    : {
+                        id: 'draft-1',
+                        message: {
+                            labelIds: ['DRAFT'],
+                            payload: {
+                                headers: [{ name: 'Subject', value: 'Original' }],
+                                parts: [{ filename: 'report.pdf', mimeType: 'application/pdf', body: { attachmentId: 'a1' } }],
+                            },
+                        },
+                    };
+            },
+        }), error => error.code === 'DRAFT_ATTACHMENTS_UNSUPPORTED' && error.status === 409);
+        assert.equal(puts, 0);
+    });
 });
 
 describe('Outlook adapter contract', () => {
@@ -205,6 +270,7 @@ describe('Outlook adapter contract', () => {
         assert.equal(calls[0].options.method, 'POST');
         assert.match(calls[1].path, /draft-1$/);
         assert.equal(calls[1].options.method, 'PATCH');
+        assert.match(calls[2].path, /draft-1\?/);
         assert.equal(calls.some(call => /send/i.test(call.path)), false);
     });
 
@@ -219,6 +285,46 @@ describe('Outlook adapter contract', () => {
         assert.equal(calls[0].path, 'me/messages');
         assert.equal(calls[0].options.method, 'POST');
         assert.equal(calls.some(call => /send/i.test(call.path)), false);
+    });
+
+    test('re-reads Outlook after a partial or 204 PATCH and preserves the draft ID', async () => {
+        const calls = [];
+        const result = await updateOutlookDraft('token', 'draft-1', { subject: 'Updated' }, {
+            request: async (_token, path, options) => {
+                calls.push({ path, options });
+                if (calls.length === 1) return {
+                    id: 'draft-1', isDraft: true, subject: 'Original',
+                    toRecipients: [{ emailAddress: { address: 'alex@example.com' } }],
+                    body: { contentType: 'Text', content: 'Existing body' },
+                };
+                if (calls.length === 2) return {};
+                return { id: 'draft-1', isDraft: true, subject: 'Updated' };
+            },
+        });
+        assert.equal(result.id, 'draft-1');
+        assert.equal(calls.length, 3);
+        assert.equal(calls[1].options.method, 'PATCH');
+        assert.match(calls[1].options.body, /Existing body/);
+        assert.match(calls[2].path, /draft-1\?/);
+    });
+
+    test('classifies PATCH network and server failures as uncertain after mutation may have started', async () => {
+        for (const failure of [new Error('socket timeout'), Object.assign(new Error('Graph unavailable'), { status: 503 })]) {
+            let calls = 0;
+            await assert.rejects(updateOutlookDraft('token', 'draft-1', { subject: 'Updated' }, {
+                request: async (_token, path, options) => {
+                    calls += 1;
+                    if (calls === 1) return { id: 'draft-1', isDraft: true, subject: 'Original', body: { contentType: 'Text', content: 'Body' } };
+                    throw failure;
+                },
+            }), error => error.providerAfterMutation === true);
+        }
+    });
+
+    test('rejects an Outlook provider object that is no longer a draft', async () => {
+        await assert.rejects(updateOutlookDraft('token', 'draft-1', { subject: 'Updated' }, {
+            request: async () => ({ id: 'draft-1', isDraft: false }),
+        }), error => error.code === 'DRAFT_NOT_EDITABLE' && error.status === 409);
     });
 
     test('normalizes Graph messages into the canonical email contract', () => {
@@ -273,5 +379,28 @@ describe('connected mailbox migration', () => {
         const sql = readFileSync(new URL('../migrations/017_provider_neutral_mailbox_cursor.sql', import.meta.url), 'utf8');
         assert.match(sql, /add column if not exists provider_cursor text/);
         assert.match(sql, /set provider_cursor=history_id/);
+    });
+
+    test('protects draft update receipts and serializes provider claims', () => {
+        const receipts = readFileSync(new URL('../migrations/026_mailbox_draft_updates.sql', import.meta.url), 'utf8');
+        assert.match(receipts, /mailbox_draft_update_receipts/);
+        assert.match(receipts, /enable row level security/);
+        assert.match(receipts, /revoke all on public\.mailbox_draft_update_receipts from public/);
+        assert.match(receipts, /foreign key\(tenant_id,provider_connection_id\)/);
+        assert.match(receipts, /active_update_id uuid/);
+        assert.match(receipts, /active_update_id\)\s*references public\.mailbox_draft_update_receipts/);
+        assert.match(receipts, /status in\('reserved','applying','updated','failed','uncertain'\)/);
+        assert.match(receipts, /update_request jsonb/);
+        assert.match(receipts, /claim_mailbox_draft_update/);
+        assert.match(receipts, /finalize_mailbox_draft_update/);
+        assert.match(receipts, /release_mailbox_draft_update/);
+        assert.match(receipts, /active_update_id=null/);
+        assert.match(receipts, /mailbox_tenant_lifecycle_draft_guard/);
+    });
+
+    test('resolves Outlook reply parents from the canonical email_messages table', () => {
+        const service = readFileSync(new URL('../mailboxService.js', import.meta.url), 'utf8');
+        assert.match(service, /from\('email_messages'\)/);
+        assert.doesNotMatch(service, /from\('emails'\)/);
     });
 });

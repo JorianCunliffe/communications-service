@@ -19,7 +19,7 @@ import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { normaliseAddresses, outboundEmailRequest } from './email.js';
 import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
-import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncMailbox } from './mailboxService.js';
+import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncMailbox, updateMailboxDraft } from './mailboxService.js';
 import { ingestMeeting, getMeeting, findMeetingBySource, listMeetings, MeetingError } from './meetings.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
@@ -47,8 +47,12 @@ export function providerCallbackUrl(baseUrl, path, tenantId) {
 
 function errorReply(reply, error, status = 400) {
     const payload = { error: error.message };
+    if (error.code) payload.code = error.code;
     if (error.providerError) payload.provider_error = error.providerError;
-    return reply.code(status).send(payload);
+    const providerStatus = error.providerOperation && ![404, 409].includes(Number(error.status))
+        ? 502
+        : status;
+    return reply.code(providerStatus).send(payload);
 }
 
 function outboundError(action, error) {
@@ -307,6 +311,7 @@ export default async function v1Routes(fastify, options = {}) {
                 provider_message_id: draft.provider_message_id,
                 provider_thread_id: draft.provider_thread_id,
                 status: draft.status,
+                revision: draft.revision || 1,
                 created_at: draft.created_at,
             });
         } catch (error) { return errorReply(reply, error, error.status || 502); }
@@ -321,6 +326,21 @@ export default async function v1Routes(fastify, options = {}) {
                 draftId: request.params.draftId,
             });
             return draft || reply.code(404).send({ error: 'Mailbox draft not found' });
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
+    });
+
+    fastify.patch('/mailboxes/:connectionId/drafts/:draftId', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const draft = await updateMailboxDraft(db, {
+                tenantId: request.tenantId,
+                connectionId: request.params.connectionId,
+                draftId: request.params.draftId,
+                actorId: request.body?.initiator_id || request.authContext?.keyId,
+                idempotencyKey: request.headers['idempotency-key'],
+                request: request.body || {},
+            });
+            return reply.code(200).send(draft);
         } catch (error) { return errorReply(reply, error, error.status || 502); }
     });
 

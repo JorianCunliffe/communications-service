@@ -291,6 +291,126 @@
           }
         }
       }
+    },
+    "/v1/mailboxes/{connectionId}/drafts/{draftId}": {
+      "patch": {
+        "description": "Update an existing Gmail or Outlook draft in place. All editable fields are optional, but at least one must be supplied; omitted recipients, subject, and body fields remain unchanged. Requires an authenticated tenant, communications:write, email:draft, and Idempotency-Key. The provider draft ID and provider-specific headers/thread metadata are preserved, and the operation never sends mail. Identical retries return the original result without a second provider call; key conflicts, stale revisions, missing drafts, and uncertain provider outcomes return 409. Uncertain outcomes are checked by a bounded provider GET; if the requested fields cannot be proven to match, the claim remains active for manual/operator reconciliation and no second provider mutation is attempted.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connectionId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "draftId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "to": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "cc": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "bcc": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "reply_to": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "html": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated tenant-scoped draft record"
+          },
+          "400": {
+            "description": "Missing Idempotency-Key or invalid input"
+          },
+          "422": {
+            "description": "At least one editable draft field is required"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient capability"
+          },
+          "404": {
+            "description": "Draft or provider object not found"
+          },
+          "409": {
+            "description": "Idempotency conflict, stale revision, non-editable draft, or reconciliation required"
+          },
+          "502": {
+            "description": "Provider failure"
+          }
+        }
+      }
     }
   },
   "components": {

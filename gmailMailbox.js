@@ -117,6 +117,10 @@ async function gmailRequest(accessToken, path, options = {}) {
         error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
         error.providerOperation = path.startsWith('/messages/')
             ? 'gmail.messages.get'
+            : path.startsWith('/drafts/')
+                ? options.method === 'PUT'
+                    ? 'gmail.drafts.update'
+                    : 'gmail.drafts.get'
             : path.startsWith('/messages?')
                 ? 'gmail.messages.list'
                 : path.startsWith('/history?')
@@ -241,18 +245,29 @@ export function gmailDraftMessage(input, mailboxAddress) {
     ];
     if (input.in_reply_to) headers.push(`In-Reply-To: ${cleanHeader(input.in_reply_to, 'in_reply_to')}`);
     if (input.references) headers.push(`References: ${cleanHeader(input.references, 'references')}`);
+    const reserved = new Set(['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'in-reply-to', 'references', 'mime-version', 'content-type', 'content-transfer-encoding']);
+    const preservedHeaders = Array.isArray(input.preserved_headers)
+        ? input.preserved_headers
+        : Array.isArray(input.headers)
+            ? input.headers
+            : Object.entries(input.headers || {}).map(([name, value]) => ({ name, value }));
+    for (const header of preservedHeaders) {
+        const name = String(header?.name || '').trim();
+        if (!name || reserved.has(name.toLowerCase())) continue;
+        headers.push(`${cleanHeader(name, 'header name')}: ${cleanHeader(header.value, name)}`);
+    }
     let body;
-    if (input.text && input.html) {
+    if (input.text !== undefined && input.text !== null && input.html !== undefined && input.html !== null) {
         headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
         body = [
             `--${boundary}`, 'Content-Type: text/plain; charset="UTF-8"', 'Content-Transfer-Encoding: 8bit', '', String(input.text),
             `--${boundary}`, 'Content-Type: text/html; charset="UTF-8"', 'Content-Transfer-Encoding: 8bit', '', safeHtml(input.html) || '',
             `--${boundary}--`, '',
         ].join('\r\n');
-    } else if (input.text) {
+    } else if (input.text !== undefined && input.text !== null) {
         headers.push('Content-Type: text/plain; charset="UTF-8"', 'Content-Transfer-Encoding: 8bit');
         body = String(input.text);
-    } else if (input.html) {
+    } else if (input.html !== undefined && input.html !== null) {
         headers.push('Content-Type: text/html; charset="UTF-8"', 'Content-Transfer-Encoding: 8bit');
         body = safeHtml(input.html) || '';
     } else throw new Error('text or html is required');
@@ -264,6 +279,109 @@ export async function createGmailDraft(accessToken, input, mailboxAddress) {
     return gmailRequest(accessToken, '/drafts', { method: 'POST', body: JSON.stringify({ message }) });
 }
 
-export function getGmailDraft(accessToken, draftId) {
-    return gmailRequest(accessToken, `/drafts/${encodeURIComponent(draftId)}?format=metadata`);
+function assertGmailDraft(draft, expectedId = null) {
+    const labels = draft?.message?.labelIds || draft?.labelIds;
+    if (!Array.isArray(labels) || !labels.includes('DRAFT')) {
+        const error = new Error('Gmail provider object is not an editable draft');
+        error.status = 409;
+        error.code = 'DRAFT_NOT_EDITABLE';
+        throw error;
+    }
+    if (!draft?.id) {
+        const error = new Error('Gmail provider did not return a draft');
+        error.status = 409;
+        error.code = 'DRAFT_NOT_EDITABLE';
+        throw error;
+    }
+    if (expectedId && draft.id !== expectedId) {
+        const error = new Error('Provider changed the draft identifier');
+        error.status = 409;
+        error.code = 'DRAFT_ID_CHANGED';
+        throw error;
+    }
+    return draft;
+}
+
+export function gmailDraftEditableFields(draft, mailboxAddress) {
+    const message = draft?.message || draft;
+    const sourceHeaders = Array.isArray(message?.payload?.headers) ? message.payload.headers : [];
+    const headers = headerMap(sourceHeaders);
+    const contents = { text: [], html: [], attachments: [] };
+    walkParts(message?.payload || {}, contents);
+    const standard = new Set(['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'in-reply-to', 'references', 'mime-version', 'content-type', 'content-transfer-encoding']);
+    return {
+        to: splitAddresses(headers.to || headers['delivered-to'] || mailboxAddress),
+        cc: splitAddresses(headers.cc),
+        bcc: splitAddresses(headers.bcc),
+        reply_to: splitAddresses(headers['reply-to']),
+        subject: headers.subject || '',
+        text: contents.text.join('\n\n'),
+        html: safeHtml(contents.html.join('\n')) || '',
+        in_reply_to: headers['in-reply-to'] || undefined,
+        references: headers.references || undefined,
+        provider_thread_id: message?.threadId || undefined,
+        preserved_headers: sourceHeaders.filter((item) => !standard.has(String(item?.name || '').toLowerCase())),
+    };
+}
+
+export function gmailDraftHasAttachments(draft) {
+    const contents = { text: [], html: [], attachments: [] };
+    walkParts(draft?.message?.payload || draft?.payload || {}, contents);
+    return contents.attachments.length > 0;
+}
+
+export async function updateGmailDraft(accessToken, draftId, input, mailboxAddress, { request = gmailRequest } = {}) {
+    const draft = await request(accessToken, `/drafts/${encodeURIComponent(draftId)}?format=full`);
+    assertGmailDraft(draft, draftId);
+    if (gmailDraftHasAttachments(draft)) {
+        const error = new Error('Gmail drafts with attachments are not supported for in-place updates');
+        error.status = 409;
+        error.code = 'DRAFT_ATTACHMENTS_UNSUPPORTED';
+        throw error;
+    }
+    const current = gmailDraftEditableFields(draft, mailboxAddress);
+    const incomingHeaders = Array.isArray(input?.headers)
+        ? input.headers
+        : Object.entries(input?.headers || {}).map(([name, value]) => ({ name, value }));
+    const preservedHeaders = new Map();
+    for (const header of [...current.preserved_headers, ...incomingHeaders]) {
+        const name = String(header?.name || '').trim();
+        if (name) preservedHeaders.set(name.toLowerCase(), { name, value: header.value });
+    }
+    const merged = {
+        ...current,
+        ...Object.fromEntries(Object.entries(input || {}).filter(([, value]) => value !== undefined)),
+        // Header preservation is additive: caller-supplied headers replace an
+        // existing header of the same name while unrelated headers survive.
+        preserved_headers: [...preservedHeaders.values()],
+        provider_thread_id: input?.provider_thread_id || current.provider_thread_id,
+    };
+    let message;
+    try {
+        message = gmailDraftMessage(merged, mailboxAddress);
+    } catch (error) {
+        error.status = error.status || 422;
+        error.code = error.code || 'DRAFT_INPUT_INVALID';
+        throw error;
+    }
+    let updated;
+    try {
+        updated = await request(accessToken, `/drafts/${encodeURIComponent(draftId)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ id: draftId, message }),
+        });
+    } catch (error) {
+        if (![400, 401, 403, 404, 409, 422].includes(Number(error.status))) error.providerAfterMutation = true;
+        throw error;
+    }
+    try {
+        return assertGmailDraft(updated, draftId);
+    } catch (error) {
+        error.providerAfterMutation = true;
+        throw error;
+    }
+}
+
+export function getGmailDraft(accessToken, draftId, { format = 'metadata', request = gmailRequest } = {}) {
+    return request(accessToken, `/drafts/${encodeURIComponent(draftId)}?format=${encodeURIComponent(format)}`);
 }

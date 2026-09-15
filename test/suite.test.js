@@ -89,39 +89,37 @@ async function twilioFetch(path, { method = 'POST', params = {}, headers = {} } 
 // 2. HTTP: /incoming-call (TwiML)
 // ---------------------------------------------------------------------------
 describe('HTTP – /incoming-call TwiML', () => {
-    test('POST /incoming-call returns 200 with XML content-type', async () => {
+    // This live suite deliberately supplies no tenant-owned service number.
+    // The secure behavior is to return TwiML that hangs up rather than falling
+    // back to another tenant or a deployment-wide default.
+    test('POST /incoming-call fails an unconfigured number closed with XML', async () => {
         const res = await twilioFetch('/incoming-call');
-        assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
+        assert.equal(res.status, 503, `Expected 503, got ${res.status}`);
         const ct = res.headers.get('content-type') || '';
         assert.ok(ct.includes('xml'), `Expected XML content-type, got: ${ct}`);
     });
 
-    test('GET /incoming-call also returns TwiML (Twilio uses both methods)', async () => {
+    test('GET /incoming-call also fails unconfigured calls closed', async () => {
         const res = await twilioFetch('/incoming-call', { method: 'GET' });
-        assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
+        assert.equal(res.status, 503, `Expected 503, got ${res.status}`);
     });
 
-    test('TwiML response contains required XML elements', async () => {
+    test('unconfigured TwiML explains and hangs up without opening media', async () => {
         const res = await twilioFetch('/incoming-call');
         const text = await res.text();
 
-        assert.ok(text.includes('<?xml'), 'Missing XML declaration');
         assert.ok(text.includes('<Response>'), 'Missing <Response> root element');
-        assert.ok(text.includes('<Connect>'), 'Missing <Connect> element');
-        assert.ok(text.includes('<Stream'), 'Missing <Stream> element');
+        assert.ok(text.includes('<Say>'), 'Missing caller-safe explanation');
+        assert.ok(text.includes('<Hangup/>'), 'Missing fail-closed hangup');
+        assert.ok(!text.includes('<Connect>'), 'Unconfigured calls must not connect');
+        assert.ok(!text.includes('<Stream'), 'Unconfigured calls must not stream');
     });
 
-    test('TwiML <Stream> URL points to /media-stream WebSocket endpoint', async () => {
+    test('unconfigured TwiML does not expose a media-stream URL', async () => {
         const res = await twilioFetch('/incoming-call', { headers: { host: `localhost:${PORT}` } });
         const text = await res.text();
-        assert.ok(
-            text.includes('/media-stream'),
-            `<Stream> URL should contain /media-stream.\nGot TwiML:\n${text}`
-        );
-        assert.ok(
-            text.includes('wss://'),
-            '<Stream> URL should use wss:// (secure WebSocket required by Twilio)'
-        );
+        assert.ok(!text.includes('/media-stream'), `Unconfigured TwiML exposed media stream:\n${text}`);
+        assert.ok(!text.includes('wss://'), 'Unconfigured TwiML exposed a WebSocket URL');
     });
 });
 
