@@ -172,3 +172,28 @@ export async function createOutlookDraft(accessToken, input, { request = graphRe
 export function getOutlookDraft(accessToken, draftId, { request = graphRequest } = {}) {
     return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,conversationId,internetMessageId,isDraft,subject`);
 }
+
+export async function updateOutlookDraft(accessToken, draftId, input, { request = graphRequest } = {}) {
+    const current = await getOutlookDraft(accessToken, draftId, { request });
+    if (current?.isDraft !== true) {
+        const error = new Error('Outlook message is no longer an editable draft');
+        error.status = 409;
+        error.code = 'DRAFT_NOT_EDITABLE';
+        throw error;
+    }
+    const toRecipients = recipients(input.to);
+    if (!toRecipients.length) throw new Error('to is required');
+    const patch = {
+        subject: String(input.subject || '').trim(),
+        body: draftBody(input),
+        toRecipients,
+        ccRecipients: recipients(input.cc),
+        bccRecipients: recipients(input.bcc),
+        replyTo: recipients(input.reply_to),
+    };
+    const updated = await request(accessToken, `me/messages/${encodeURIComponent(draftId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+    });
+    return { id: updated.id || draftId, message: { ...current, ...updated, isDraft: true } };
+}
