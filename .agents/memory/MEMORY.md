@@ -1,1 +1,4 @@
 - [Twilio PUBLIC_URL coupling](twilio-public-url.md) — "application error" with clean logs usually means PUBLIC_URL doesn't match the live domain; .replit userenv wins over shared env vars.
+- [Git cherry-pick identity](git-cherry-pick-identity.md) — missing committer identity can stop a cherry-pick after staging its patch; verify the index before retrying.
+- [GitHub graph-preserving fallback](github-graph-preserving-push.md) — if shell auth fails, Git Data API can preserve exact local-only history with verified non-force ref updates.
+- [Phase 03 production migration](phase03-production-migration.md) — skip Replit's destructive generic diff; let the transactional repository runner backfill identities.
