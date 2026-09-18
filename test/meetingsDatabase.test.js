@@ -4,6 +4,7 @@ import { createPhase02Database } from "./fixtures/phase02Database.js";
 import { createPostgresClient } from "../database.js";
 import { tenantDatabase } from "../tenantContext.js";
 import { storeCommitments, counterpartyContent } from "../enrichment.js";
+import { processPromiseJob, fallbackPromises } from '../promiseLedger.js';
 
 const payload = () => ({
   source: "generic",
@@ -48,6 +49,7 @@ test("transcribed meeting imports preserve topic isolation, versions, duplicates
   const tenant = "p05_fixture",
     key = "p05-local";
   const { app, sql, close } = await createPhase02Database(tenant, key);
+  await sql.query("update tenants set metadata=jsonb_build_object('promise_ledger',jsonb_build_object('enabled',true)) where tenant_id=$1",[tenant]);
   const request = (method, url, body) =>
     app.inject({
       method,
@@ -104,6 +106,11 @@ test("transcribed meeting imports preserve topic isolation, versions, duplicates
     assert.match(counterpartyContent(evidence), /Alex: I will send/);
     await storeCommitments(db, evidence, {});
     await storeCommitments(db, evidence, {});
+    const processLedger=async()=>{
+      const job=(await sql.query("update promise_jobs set status='processing',attempts=attempts+1,lease_token=gen_random_uuid(),lease_expires_at=now()+interval '5 minutes' where communication_id=$1 and source_revision=(select promise_revision from communications where communication_id=$1) returning *",[evidence.communication_id])).rows[0];
+      await processPromiseJob(db,job,{extractor:fallbackPromises,destination:null});
+    };
+    await processLedger();
     const promises = (
       await sql.query(
         "select * from communication_commitments where communication_id=$1",
@@ -111,7 +118,7 @@ test("transcribed meeting imports preserve topic isolation, versions, duplicates
       )
     ).rows;
     assert.equal(promises.length, 1);
-    assert.equal(promises[0].promisor_contact_id, null);
+    assert.equal(promises[0].promisor_contact_id, contact.json().person_id);
     assert.match(promises[0].source_excerpt, /I will send the report/);
     const sameVersion = payload();
     sameVersion.topics[0].segments[0].text = "Changed text";
@@ -183,10 +190,11 @@ test("transcribed meeting imports preserve topic isolation, versions, duplicates
       undefined,
       true,
     );
+    await processLedger();
     assert.equal(
       (
         await sql.query(
-          "select count(*)::int n from communication_commitments where communication_id=$1",
+          "select count(*)::int n from communication_commitments where communication_id=$1 and review_state<>'retracted'",
           [evidence.communication_id],
         )
       ).rows[0].n,

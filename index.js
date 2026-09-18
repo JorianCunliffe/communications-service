@@ -25,6 +25,7 @@ import { summariseCall } from './summarise.js';
 import v1Routes, { outboundError } from './v1.js';
 import { callbackForThread, enqueueEvent, startEventSweeper } from './eventOutbox.js';
 import { startEnrichmentSweeper } from './enrichment.js';
+import { startPromiseSweeper } from './promiseLedger.js';
 import { startCallOutcomeSweeper } from './callOutcome.js';
 import { prefixedId } from './communicationModel.js';
 import { applyHyperFlowVoiceContext, requestHyperFlowVoiceContext } from './hyperflowVoice.js';
@@ -1594,6 +1595,7 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     // Derives summaries, current state, facts and commitments outside all
     // provider ingestion paths. Failures remain isolated in the durable queue.
     startEnrichmentSweeper();
+    startPromiseSweeper();
 
     // Provider completion is not business success. This durable worker waits
     // for transcript/AMD evidence, then emits exactly one terminal call event.

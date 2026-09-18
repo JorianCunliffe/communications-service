@@ -35,11 +35,13 @@ export function dueEvidence(row) {
 }
 
 export async function safeMemory(db, result, scope = {}) {
-  if (!result) return result;
+    if (!result) return result;
+    const ledgerIds=new Set();const ledgerRows=new Map();
   const ids = new Set();
   const askThreads=new Set();
   const collect = value => {
-    if (!value || typeof value !== 'object') return;
+      if (!value || typeof value !== 'object') return;
+      if(value.ledger_version && value.id)ledgerIds.add(value.id);
     if (value.communication_id) ids.add(value.communication_id);
     if (value.type==='human_ask' && value.thread_id) askThreads.add(value.thread_id);
     for (const [key,item] of Object.entries(value)) {
@@ -48,6 +50,10 @@ export async function safeMemory(db, result, scope = {}) {
     }
   };
   collect(result);
+  if(ledgerIds.size){
+    const {readPromise}=await import('./promiseLedger.js');
+    for(const id of ledgerIds){const row=await readPromise(db,id,scope);if(row?.source_current&&!['retracted','dismissed'].includes(row.review_state))ledgerRows.set(id,row);}
+  }
   const sources = new Map();
   const allIds = [...ids];
   for (let offset=0;offset<allIds.length;offset+=200) {
@@ -76,6 +82,11 @@ export async function safeMemory(db, result, scope = {}) {
   const visit = (value,key='') => {
     if (Array.isArray(value)) return value.map(item=>visit(item,key)).filter(item=>item!==null);
     if (!value || typeof value !== 'object') return value;
+    if(value.ledger_version && value.id){
+      const row=ledgerRows.get(value.id);if(!row){suppressed=true;return null;}
+      return {...row,due_at:row.due_interpretation?.status==='explicit'?row.due_interpretation.instant:null,
+        due_date_status:row.due_interpretation?.status==='explicit'?'explicit':'inferred'};
+    }
     if (value.starts_at) {
       const external=value.metadata?.correlation?.external_project_id || value.metadata?.external_project_id;
       if ((scope.include_private !== true && (value.metadata?.private || ['private','restricted'].includes(value.metadata?.visibility)))

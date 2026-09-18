@@ -1,4 +1,5 @@
 import twilio from 'twilio';
+import { listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
 import { tenantLifecycleOperation } from './tenantLifecycle.js';
 import { tenantClientOperation, TenantOperationError } from './tenantOperations.js';
 import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.js';
@@ -140,7 +141,8 @@ export default async function v1Routes(fastify, options = {}) {
     fastify.addHook('preHandler', async (request, reply) => {
         const rejected = await rejectUnauthorizedTenant(request, reply, rawDatabase(), 'Communications API');
         if (rejected) return rejected;
-        const memoryRead = /\/context\/(search|memory)(?:\?|$)/.test(request.url);
+        const memoryRead = /\/context\/(search|memory)(?:\?|$)/.test(request.url)
+            || /\/promises\/(query|coverage|[^/]+\/read)(?:\?|$)/.test(request.url);
         if (request.query && Object.hasOwn(request.query,'include_private')) request.query.include_private = request.query.include_private === 'true';
         const capability = request.method === 'GET' || memoryRead ? 'communications:read' : 'communications:write';
         if ((request.body?.include_private === true || request.query?.include_private === true)
@@ -1135,6 +1137,63 @@ export default async function v1Routes(fastify, options = {}) {
         catch (error) { return errorReply(reply, error, 500); }
     });
 
+    fastify.post('/promises/query', async (request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        try{return await listPromises(db,request.body||{});}catch(error){return errorReply(reply,error,error.status||503);}
+    });
+    fastify.get('/promises/policy',async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        const result=await db.from('tenants').select('metadata').eq('tenant_id',request.tenantId).maybeSingle();
+        if(result.error)return errorReply(reply,new Error(result.error.message),503);
+        return result.data?.metadata?.promise_ledger||{enabled:false,shadow:true,project_ids:[],local_person_id:null,version:0};
+    });
+    fastify.post('/promises/policy',async(request,reply)=>{
+        if(rejectMissingCapability(request,reply,'tenant:manage'))return reply;
+        const db=database(reply);if(!db)return reply;
+        const b=request.body||{};
+        if(!Number.isSafeInteger(b.expected_revision)||typeof b.enabled!=='boolean'||typeof b.shadow!=='boolean'
+            || (b.project_ids!==null&&(!Array.isArray(b.project_ids)||b.project_ids.length>200||b.project_ids.some(x=>typeof x!=='string'||!x.trim())))
+            || (b.local_person_id!=null&&!UUID.test(b.local_person_id)))return reply.code(400).send({error:'Version, enabled, shadow, project_ids and canonical local_person_id required'});
+        const result=await db.rpc('configure_promise_ledger',{p_revision:b.expected_revision,p_policy:{enabled:b.enabled,shadow:b.shadow,project_ids:b.project_ids,local_person_id:b.local_person_id||null}});
+        return result.error?errorReply(reply,new Error(result.error.message),result.error.code==='40001'?409:400):result.data;
+    });
+    fastify.get('/promises',async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        try{return await listPromises(db,request.query||{});}catch(error){return errorReply(reply,error,error.status||503);}
+    });
+    fastify.post('/promises/coverage',async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        try{return await promiseCoverage(db,request.body||{});}catch(error){return errorReply(reply,error,error.status||503);}
+    });
+    fastify.post('/promises/backfill',async(request,reply)=>{
+        if(rejectMissingCapability(request,reply,'tenant:manage'))return reply;
+        const db=database(reply);if(!db)return reply;
+        const since=request.body?.since||new Date(Date.now()-30*86400000).toISOString();
+        if(!Number.isFinite(Date.parse(since)))return reply.code(400).send({error:'Invalid backfill date'});
+        const result=await db.rpc('reconcile_promise_jobs',{p_since:since,p_limit:500});
+        return result.error?errorReply(reply,new Error(result.error.message),503):{queued:result.data,backfill:true};
+    });
+    fastify.post('/promises/retry',async(request,reply)=>{
+        if(rejectMissingCapability(request,reply,'tenant:manage'))return reply;
+        const db=database(reply);if(!db)return reply;
+        if(!UUID.test(request.body?.job_id||''))return reply.code(400).send({error:'Job ID required'});
+        const result=await db.from('promise_jobs').update({status:'pending',attempts:0,last_error:null,next_attempt_at:new Date().toISOString()})
+            .eq('id',request.body.job_id).eq('status','failed').select('id');
+        return result.error?errorReply(reply,new Error(result.error.message),503):{data:result.data};
+    });
+    fastify.post('/promises/:id/read',async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        try{const data=await readPromise(db,request.params.id,promiseScope(request.body),{history:true});
+            return data||reply.code(404).send({error:'Promise not found'});
+        }catch(error){return errorReply(reply,error,error.status||503);}
+    });
+    fastify.post('/promises/:id/review',async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        if(request.body?.initiator_id && rejectMissingCapability(request,reply,'threads:actor:assert'))return reply;
+        try{return await reviewPromise(db,request.params.id,request.body,JSON.stringify({client_id:request.authContext.keyId,user_id:request.body.initiator_id||null}),promiseScope(request.body));}
+        catch(error){return errorReply(reply,error,error.status||503);}
+    });
+
     fastify.get('/threads/:threadId', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try {
@@ -1220,16 +1279,10 @@ export default async function v1Routes(fastify, options = {}) {
 
     fastify.post('/commitments/:commitmentId/status', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
-        const statuses = ['open', 'completed', 'cancelled', 'superseded', 'unknown'];
-        if (!statuses.includes(request.body?.status)) return reply.code(400).send({ error: `status must be one of: ${statuses.join(', ')}` });
-        const now = new Date().toISOString();
-        const result = await db.from('communication_commitments').update({
-            status: request.body.status, updated_at: now,
-            resolved_at: ['completed', 'cancelled', 'superseded'].includes(request.body.status) ? now : null,
-        }).eq('id', request.params.commitmentId).select('*').maybeSingle();
-        if (result.error) return errorReply(reply, new Error(result.error.message), 500);
-        if (!result.data) return reply.code(404).send({ error: 'Commitment not found' });
-        return result.data;
+        const actions={open:'confirm',completed:'completion_claimed',cancelled:'cancel',superseded:'dismiss',unknown:'correct'};
+        if(!actions[request.body?.status])return reply.code(400).send({error:'Invalid commitment status'});
+        try{return await reviewPromise(db,request.params.commitmentId,{...request.body,action:actions[request.body.status]},request.authContext.keyId,promiseScope(request.body));}
+        catch(error){return errorReply(reply,error,error.status||503);}
     });
 
     fastify.post('/facts/:factId/status', async (request, reply) => {

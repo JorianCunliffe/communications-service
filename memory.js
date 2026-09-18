@@ -80,7 +80,8 @@ async function queryCommitments(db, body, limit) {
     if (body.thread_id) query = query.eq('thread_id', body.thread_id);
     const personId = body.person_id || body.contact_id;
     const rows = check(await query, 'Commitment search');
-    return rows.filter((row) => (!personId || row.promisor_contact_id === personId || row.promisee_contact_id === personId)
+    return rows.filter((row) => (!personId || row.promisor_contact_id === personId || row.promisee_contact_id === personId
+        || [...(row.promisor_parties||[]),...(row.promisee_parties||[])].some(p=>p.person_id===personId))
         && relevantText(row, body.query)).slice(0, limit);
 }
 

@@ -173,6 +173,14 @@ async function fail(db, job, error) {
 }
 
 export async function storeCommitments(db, communication, extracted, validIds = new Set([communication.communication_id]), evidenceById = new Map([[communication.communication_id, communication]]), reconcile = false, evidenceAt = new Date().toISOString()) {
+    // Migration 028 gives every source its own durable ledger job. The coalesced
+    // summary worker must never delete or rewrite its audited promise records.
+    if (communication.promise_revision !== undefined) {
+        const tenant=await db.from('tenants').select('metadata').eq('tenant_id',communication.tenant_id||db.tenantId).maybeSingle();
+        if(tenant.error)throw new Error(tenant.error.message);
+        const policy=tenant.data?.metadata?.promise_ledger;
+        if(policy?.enabled===true && (!Array.isArray(policy.project_ids)||policy.project_ids.includes(communication.correlation?.external_project_id)))return;
+    }
     const deterministic = extractExplicitCommitments(counterpartyContent(communication), communication.occurred_at);
     const modelItems = (extracted.commitments || []).flatMap((item) => {
         const sourceCommunicationId = (item.source_communication_ids || []).find((id) => validIds.has(id));
@@ -199,6 +207,7 @@ export async function storeCommitments(db, communication, extracted, validIds = 
         const existing = await db.from('communication_commitments').select('*')
             .eq('communication_id', sourceCommunicationId).eq('description', item.description.slice(0, 1000)).maybeSingle();
         if (existing.error) throw new Error(`Commitment lookup: ${existing.error.message}`);
+        if (existing.data?.ledger_version) continue;
         const parsedDue = item.due_at && Number.isFinite(new Date(item.due_at).getTime()) ? new Date(item.due_at).toISOString() : null;
         const row = {
             communication_id: sourceCommunicationId, thread_id: sourceCommunication.thread_id,
@@ -221,6 +230,7 @@ export async function storeCommitments(db, communication, extracted, validIds = 
             .filter((item) => (item.source_communication_id || communication.communication_id) === communication.communication_id)
             .map((item) => item.description.toLowerCase()));
         for (const row of current.data || []) {
+            if (row.ledger_version) continue;
             if (verified.has(String(row.description || '').toLowerCase())) continue;
             const removed = await db.from('communication_commitments').delete()
                 .eq('id', row.id).eq('communication_id', communication.communication_id).in('status', ['open', 'unknown']);

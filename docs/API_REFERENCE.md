@@ -1380,3 +1380,30 @@ A suspended tenant can export a permitted business dataset with GET `?dataset=co
 Database guards lock/check the tenant row before ordinary writes, including background writers and late callbacks. Suspended/closed tenant records cannot be recreated. Job claims skip inactive tenants. Local erasure transactionally removes registered business datasets, derived memory, source/thread records and managed API clients, with FK-safe rollback if any dependency cannot be removed. A minimal tenant tombstone, usage, administration and lifecycle receipts remain; automatic deletion of those records is not enabled.
 
 The receipt explicitly states that provider-held data and HyperFlow records were not erased. Disconnecting inbound numbers/mailboxes, deleting provider resources, invalidating HyperFlow copies/downloads and satisfying backup retention need separate owner receipts. Suspending this database does not disconnect a provider number or terminate an already established voice session. Never report local erasure as whole-product erasure.
+# Promise ledger — promise-ledger.v1
+
+The ledger captures communication evidence; it does not approve or fulfill HyperFlow obligations. `we` means one joint promise attributed to both conversation participants. In multi-party meetings it is attributed to the participating group. Unknown party identities remain explicit placeholders.
+
+| Route | Contract |
+|---|---|
+| `GET /v1/promises` | Paginated ledger; supports `external_project_id`, `thread_id`, `person_id`, `after`, `limit`, `status`, `review_state`. |
+| `POST /v1/promises/query` | Same read, with `allowed_project_ids`, `include_private`, `unresolved`, and `direction` (`owing` or `owed`, with `person_id`). Requires `communications:read`. |
+| `POST /v1/promises/:id/read` | Scoped detail, citations and audit history. Requires `communications:read`. |
+| `POST /v1/promises/coverage` | Paginated source processing receipts, using `offset`; pending, processed, excluded, provisional and failed outcomes remain distinct. Requires `communications:read`. |
+| `POST /v1/promises/:id/review` | Requires `communications:write`, `expected_revision`, `action`, and a nonempty `reason`. Actions: `confirm`, `correct`, `dismiss`, `completion_claimed`, `verify_fulfillment`, `cancel`. `patch` can correct `promisor_parties` or `due`. Asserted `initiator_id` additionally requires `threads:actor:assert`. |
+| `POST /v1/promises/backfill` | Requires `tenant:manage`; queues at most 500 missing source revisions since `since` (default 30 days). Repeat until `queued=0`. Backfill never emits live promise notifications. |
+| `POST /v1/promises/retry` | Requires `tenant:manage`; requeues a failed `job_id`. |
+| `GET /v1/promises/policy` | Reads the tenant extraction policy; unconfigured tenants default to disabled, shadow mode. |
+| `POST /v1/promises/policy` | Requires `tenant:manage`; supply `expected_revision`, `enabled`, `shadow`, `project_ids` (array, or explicit null for all projects), and `local_person_id` (canonical UUID or null). Returns a versioned policy; conflicts return 409. |
+
+All routes enforce tenant scope and source visibility. Private evidence requires `memory:private` plus `include_private=true`. An optional `unassigned_person_id` permits unassigned evidence only for that canonical person; HyperFlow derives this from its primary-person configuration, never browser input. Pagination can return an empty filtered page with a non-null cursor. Continue until the cursor is null.
+
+The legacy `/v1/commitments/:commitmentId/status` route now requires `expected_revision` and `reason` and appends audited history. Legacy `completed` maps to `completion_claimed`, not verified fulfillment. Clients must upgrade those writes before rollout.
+
+`promise.changed` is a signed canonical event carrying `payload.contract_version=promise-ledger.v1`, `promise_id`, `revision`, `action`, and `evidence_only=true`. It contains no raw quote or participant PII. Consumers deduplicate by promise revision and fetch evidence through scoped APIs. HyperFlow uses it only to flag source changes, never to advance a workflow.
+
+## Processing and rollout
+
+Migration `028_promise_ledger.sql` adds durable source revision jobs, citations and history, preserving existing promise IDs. The repository migration runner remains authoritative. The independent worker runs every 15 seconds; ingestion itself never calls an LLM. `PROMISE_MODEL` optionally overrides the extraction model; `OPENAI_API_KEY` is required for semantic extraction. Without model availability, explicit promises are retained as provisional evidence and the job retries up to five times; failed receipts can be requeued. No inferred relative deadline is silently assigned a time.
+
+Tenant policy `enabled=false` pauses extraction, `shadow=true` suppresses outbound promise events, and `project_ids` limits processing to a pilot project list. New source revisions are queued even while disabled. Enable one pilot project through `/v1/promises/policy`; the worker reconciles the last 30 days in bounded batches after enabling. Unconfigured tenants remain disabled to avoid an unreviewed full-history/model rollout. `local_person_id` identifies the local participant; otherwise exact mailbox identity matching is attempted, and unresolved identities remain reviewable. Source retractions keep history. New records participate in tenant export/deletion and suspension controls.

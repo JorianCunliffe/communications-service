@@ -9,7 +9,7 @@ const fixtures = JSON.parse(readFileSync(
 describe('Communications v2 shared contract fixtures', () => {
     test('defines the canonical inbound and terminal fixture set', () => {
         assert.deepEqual(fixtures.map((fixture) => fixture.name), [
-            'inbound_email', 'inbound_sms', 'inbound_voice', 'ask_response', 'call_completed', 'call_failed',
+            'inbound_email', 'inbound_sms', 'inbound_voice', 'ask_response', 'call_completed', 'call_failed', 'promise_changed',
         ]);
     });
 

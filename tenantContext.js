@@ -6,6 +6,7 @@
 // inserted tenant-owned row.
 
 export const TENANT_TABLES = new Set([
+    'promise_jobs', 'promise_evidence', 'promise_history',
     'contacts', 'contact_config', 'phone_configs', 'calls', 'sms_threads',
     'sms_messages', 'tool_calls', 'recordings', 'projects', 'project_contacts',
     'communications', 'communication_identities', 'communication_threads',
@@ -23,6 +24,7 @@ export const TENANT_TABLES = new Set([
 ]);
 
 const TENANT_RPCS = new Set([
+    'reconcile_promise_jobs', 'commit_promise_job', 'review_promise', 'configure_promise_ledger',
     'create_communication_contact', 'ingest_calendar_event', 'ingest_transcribed_meeting', 'requeue_communication_enrichment',
     'resolve_communication_ask', 'search_communications', 'suggest_terms',
     'consume_mailbox_oauth_state',
