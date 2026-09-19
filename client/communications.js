@@ -15,6 +15,15 @@ export class CommunicationsClient {
     const response=await this.fetcher(url,{method,headers:{'X-API-Key':this.#apiKey,'X-Tenant-Id':this.tenantId,...(body!==undefined?{'Content-Type':'application/json'}:{}),...(idempotencyKey?{'Idempotency-Key':idempotencyKey}:{})},body:body!==undefined?JSON.stringify(body):undefined,signal,redirect:'error'});
     const value=await response.json();if(!response.ok)throw new CommunicationsApiError(response.status,value.error||'Communications request failed');return value;
   }
+  promises(query={}){return this.request('GET','/v1/promises',{query});}
+  promise(id,query={}){return this.request('GET',`/v1/promises/${encodeURIComponent(id)}`,{query});}
+  createPromise(body){return this.request('POST','/v1/promises',{body});}
+  updatePromise(id,body){return this.request('PATCH',`/v1/promises/${encodeURIComponent(id)}`,{body});}
+  deletePromise(id,body){return this.request('DELETE',`/v1/promises/${encodeURIComponent(id)}`,{body});}
+  promiseEvidence(id,body){return this.request('POST',`/v1/promises/${encodeURIComponent(id)}/evidence`,{body});}
+  createPromiseCondition(id,body){return this.request('POST',`/v1/promises/${encodeURIComponent(id)}/conditions`,{body});}
+  updatePromiseCondition(id,conditionId,body){return this.request('PATCH',`/v1/promises/${encodeURIComponent(id)}/conditions/${encodeURIComponent(conditionId)}`,{body});}
+  deletePromiseCondition(id,conditionId,body){return this.request('DELETE',`/v1/promises/${encodeURIComponent(id)}/conditions/${encodeURIComponent(conditionId)}`,{body});}
   clients(after=''){return this.request('GET','/v1/tenant/clients',{query:{after}});}
   clientOperation(body){return this.request('POST','/v1/tenant/clients',{body});}
   usage(){return this.request('GET','/v1/tenant/usage');}

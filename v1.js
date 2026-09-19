@@ -1,5 +1,5 @@
 import twilio from 'twilio';
-import { listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
+import { mutatePromise, listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
 import { tenantLifecycleOperation } from './tenantLifecycle.js';
 import { tenantClientOperation, TenantOperationError } from './tenantOperations.js';
 import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.js';
@@ -1135,6 +1135,29 @@ export default async function v1Routes(fastify, options = {}) {
         const db = database(reply); if (!db) return reply;
         try { return await searchMemory(db, request.body || {}); }
         catch (error) { return errorReply(reply, error, 500); }
+    });
+
+    for (const [method,url,action] of [
+        ['POST','/promises','create'],['PATCH','/promises/:id','update'],['DELETE','/promises/:id','delete'],
+        ['POST','/promises/:id/conditions','condition_create'],['PATCH','/promises/:id/conditions/:conditionId','condition_update'],
+        ['DELETE','/promises/:id/conditions/:conditionId','condition_delete'],['POST','/promises/:id/evidence','evidence_add']
+    ]) fastify.route({method,url,handler:async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        const body=request.body||{};
+        if(body.initiator_id && rejectMissingCapability(request,reply,'threads:actor:assert'))return reply;
+        try {
+            const input={...body,patch:{...(body.patch||{}),...(request.params.conditionId?{id:request.params.conditionId}:{})}};
+            const data=await mutatePromise(db,request.params.id,action,input,JSON.stringify({client_id:request.authContext.keyId,user_id:body.initiator_id||null}),promiseScope(body));
+            return reply.code(action==='create'?201:200).send(data);
+        } catch(error){return errorReply(reply,error,error.status||503);}
+    }});
+    for (const suffix of ['', '/conditions','/evidence','/history']) fastify.get(`/promises/:id${suffix}`,async(request,reply)=>{
+        const db=database(reply);if(!db)return reply;
+        try {
+            const row=await readPromise(db,request.params.id,promiseScope(request.query||{}),{history:true});
+            if(!row)return reply.code(404).send({error:'Promise not found'});
+            return suffix?{data:row[suffix.slice(1)],revision:row.revision}:row;
+        } catch(error){return errorReply(reply,error,error.status||503);}
     });
 
     fastify.post('/promises/query', async (request,reply)=>{
