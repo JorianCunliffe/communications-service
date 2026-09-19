@@ -166,7 +166,7 @@ export async function processPromiseJob(db, job, { extractor = extractPromises, 
     for (const p of [...normalized.participants,...normalized.turns.map(t => t.speaker)]) if (!known.has(p.person_id)) p.person_id = null;
     let existing = [];
     if (source.thread_id) existing = check(await db.from('communication_commitments').select('*').eq('thread_id',source.thread_id).order('updated_at',{ascending:false}).limit(100));
-    existing = existing.filter(p => p.external_project_id === (source.correlation?.external_project_id || null) && !['dismissed','retracted'].includes(p.review_state));
+    existing = existing.filter(p => p.external_project_id === (source.correlation?.external_project_id || null) && !['deleted','dismissed','retracted'].includes(p.review_state));
     // Do not feed a public source's extractor private promises from the same thread.
     const checked=await Promise.all(existing.map(p=>readPromise(db,p.id,{include_private:source.metadata?.private===true,external_project_id:source.correlation?.external_project_id})));
     existing=checked.filter(Boolean).map(({id,description,promisor_parties,observed_state})=>({id,description,promisor_parties,observed_state}));
@@ -220,7 +220,7 @@ export function startPromiseSweeper() {
 }
 
 export function promiseScope(input = {}) {
-    const scope = {include_private:input.include_private === true};
+    const scope = {include_private:input.include_private === true,include_deleted:input.include_deleted === true || input.include_deleted === 'true'};
     for (const key of ['external_project_id','thread_id','person_id','unassigned_person_id','since','until']) {
         if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim() || input[key].length>300)) throw new PromiseError(400,`Invalid ${key}`);
         if (input[key]) scope[key]=input[key];
@@ -242,13 +242,16 @@ function allowedSource(source, scope) {
 export async function readPromise(db, id, scope = {}, {history = false} = {}) {
     if (!uuid.test(id)) throw new PromiseError(400,'Invalid promise ID');
     const row = check(await db.from('communication_commitments').select('*').eq('id',id).maybeSingle());
-    if (!row) return null;
-    const source = check(await db.from('communications').select('*').eq('communication_id',row.communication_id).maybeSingle());
-    if (!allowedSource(source,scope)) return null;
+    if (!row || (row.deleted_at && !scope.include_deleted)) return null;
+    const source = row.communication_id ? check(await db.from('communications').select('*').eq('communication_id',row.communication_id).maybeSingle()) : {memory_eligible:true,metadata:{},correlation:{external_project_id:row.external_project_id},thread_id:row.thread_id,project_id:row.project_id,occurred_at:row.created_at};
+    // Current terms own association; source snapshots still own privacy and eligibility.
+    const audienceSource = s => s && ({...s,project_id:row.project_id,thread_id:row.thread_id,correlation:{...s.correlation,external_project_id:row.external_project_id}});
+    if (!allowedSource(audienceSource(source),scope)) return null;
+    if (scope.allowed_project_ids && !scope.allowed_project_ids.includes(row.external_project_id)) return null;
     const evidence = check(await db.from('promise_evidence').select('*').eq('promise_id',id).order('created_at'));
-    const refs = [...new Set(evidence.map(e=>e.communication_id))];
+    const refs = [...new Set(evidence.map(e=>e.communication_id).filter(Boolean))];
     const sources = refs.length ? check(await db.from('communications').select('*').in('communication_id',refs)) : [];
-    const visible = evidence.filter(e => allowedSource(e.source,scope) && allowedSource(sources.find(s=>s.communication_id===e.communication_id),scope));
+    const visible = evidence.filter(e => (!e.communication_id && e.extractor_version==='human') || allowedSource(audienceSource(e.source),scope) && allowedSource(audienceSource(sources.find(s=>s.communication_id===e.communication_id)),scope));
     const current = visible.filter(e=>e.active && sources.some(s=>s.communication_id===e.communication_id && s.promise_revision===e.source_revision));
     // Never surface an aggregate derived from evidence outside the current audience.
     if (evidence.length && !visible.length) return null;
@@ -256,14 +259,14 @@ export async function readPromise(db, id, scope = {}, {history = false} = {}) {
     const personIds = [...new Set([...row.promisor_parties,...row.promisee_parties].map(p=>p.person_id).filter(Boolean))];
     const people = personIds.length ? check(await db.from('contacts').select('id,name,email,phone_number').in('id',personIds)) : [];
     const result = {...row,people,evidence_only:true,original_wording:row.source_excerpt,
-        source_communication_ids:current.length?[...new Set(current.map(e=>e.communication_id))]:[row.communication_id],
-        evidence:visible.map(({source,...e})=>({...e,current:current.includes(e),source_href:`/v1/communications/${encodeURIComponent(e.communication_id)}`})),
-        source_current:row.ledger_version ? current.length>0 && row.source_revision===source.promise_revision : true,
+        source_communication_ids:current.length?[...new Set(current.map(e=>e.communication_id))]:[row.communication_id].filter(Boolean),
+        evidence:visible.map(({source,...e})=>({...e,current:current.includes(e),source_href:e.communication_id ? `/v1/communications/${encodeURIComponent(e.communication_id)}` : null})),
+        source_current:row.source_type==='manual' ? true : row.ledger_version ? current.length>0 && row.source_revision===source.promise_revision : true,
         unresolved:!row.external_project_id || !row.thread_id || row.promisor_parties.some(p=>!p.person_id),
         overdue:row.due_interpretation?.instant && ['explicit','confirmed'].includes(row.due_interpretation.status)
             ? Date.parse(row.due_interpretation.instant)<Date.now() && !['fulfilled','cancelled'].includes(row.observed_state):false};
     if (history) result.history=check(await db.from('promise_history').select('*').eq('promise_id',id).order('revision'))
-        .filter(h=>!evidence.length || (h.data.communication_id===source.communication_id && h.data.source_revision===source.promise_revision)
+        .filter(h=>row.source_type==='manual' || !evidence.length || (h.data.communication_id===source.communication_id && h.data.source_revision===source.promise_revision)
             || visible.some(e=>e.communication_id===h.data.communication_id && e.source_revision===h.data.source_revision))
         .map(({data,...h})=>h);
     return result;
@@ -273,6 +276,7 @@ export async function listPromises(db,input={}) {
     const scope=promiseScope(input); const limit=Math.min(100,Math.max(1,Number(input.limit)||50));
     if (input.after && !uuid.test(input.after)) throw new PromiseError(400,'Invalid cursor');
     let query=db.from('communication_commitments').select('id').order('id').limit(limit+1);
+    if(!scope.include_deleted)query=query.is('deleted_at',null);
     if(input.after)query=query.gt('id',input.after);
     // Source scope is revalidated below; association corrections must not expose stale rows.
     if(scope.external_project_id)query=query.eq('external_project_id',scope.external_project_id);
@@ -311,4 +315,28 @@ export async function reviewPromise(db,id,input,actor,scope={}) {
     const result=await db.rpc('review_promise',{p_id:id,p_revision:input.expected_revision,p_actor:actor,p_action:input.action,p_reason:input.reason.slice(0,4000),p_patch:patch,p_destination:process.env.HYPERFLOW_EVENT_URL||null});
     if(result.error)throw new PromiseError(result.error.code==='40001'?409:400,result.error.message);
     return readPromise(db,id,scope,{history:true});
+}
+
+// All writes are one database transaction: revision, terms, evidence, history and outbox.
+export async function mutatePromise(db,id,action,input,actor,scope={}) {
+    if (!input || typeof input!=='object' || Array.isArray(input)) throw new PromiseError(400,'Object body required');
+    if (typeof input.reason!=='string' || !input.reason.trim() || input.reason.length>4000) throw new PromiseError(400,'Reason required (max 4000)');
+    if (id) {
+        const row=await readPromise(db,id,scope);
+        if (!row || row.deleted_at) throw new PromiseError(404,'Promise not found');
+        if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision<1) throw new PromiseError(400,'Current revision required');
+    }
+    const patch=input.patch || {};
+    if (!patch || typeof patch!=='object' || Array.isArray(patch)) throw new PromiseError(400,'Object patch required');
+    if (patch.due?.instant && (!Number.isFinite(Date.parse(patch.due.instant)) || !/(Z|[+-]\d{2}:\d{2})$/.test(patch.due.instant))) throw new PromiseError(400,'Due instant requires a date and timezone offset');
+    if (patch.external_project_id != null && (typeof patch.external_project_id!=='string' || !patch.external_project_id.trim() || patch.external_project_id.length>300)) throw new PromiseError(400,'Invalid project ID');
+    if (patch.external_project_id && scope.allowed_project_ids && !scope.allowed_project_ids.includes(patch.external_project_id)) throw new PromiseError(404,'Project unavailable');
+    if (patch.related_promise_id && !await readPromise(db,patch.related_promise_id,scope)) throw new PromiseError(404,'Related promise unavailable');
+    if (action==='evidence_add' && patch.communication_id) {
+        const source=check(await db.from('communications').select('*').eq('communication_id',patch.communication_id).maybeSingle());
+        if (!allowedSource(source,scope)) throw new PromiseError(404,'Evidence source unavailable');
+    }
+    const result=await db.rpc('mutate_promise',{p_id:id||null,p_revision:input.expected_revision||null,p_actor:actor,p_action:action,p_reason:input.reason,p_patch:patch,p_destination:process.env.HYPERFLOW_EVENT_URL||null});
+    if(result.error) throw new PromiseError(result.error.code==='40001'?409:result.error.code==='P0002'?404:400,result.error.message);
+    return await readPromise(db,result.data.id,{...scope,include_deleted:action==='delete'},{history:true}) || {id:result.data.id,revision:result.data.revision};
 }

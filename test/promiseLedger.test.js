@@ -138,3 +138,53 @@ test('the production service role can commit ledger evidence without default Sup
  try{const result=await processPromiseJob(db,job,{extractor:extract,destination:null});assert.equal(result.count,1);}
  finally{await sql.query('reset role');}
 });
+
+test('manual CRUD, condition review, evidence and tombstones form one revisioned aggregate',async()=>{
+ let p=await req('POST','/v1/promises',{reason:'Phone agreement',patch:{description:'Send the report',external_project_id:'alpha',promisor_parties:[{person_id:alice,label:'Alice'}],promisee_parties:[{person_id:bob,label:'Bob'}]}});
+ assert.equal(p.source_type,'manual');assert.equal(p.communication_id,null);assert.equal(p.source_current,true);assert.equal(p.history.length,1);
+ p=await req('PATCH',`/v1/promises/${p.id}`,{expected_revision:p.revision,reason:'Clarified terms',patch:{description:'Send revised report',due:{instant:'2026-09-25T17:00:00+10:00',status:'confirmed'}}});
+ const stale=await app.inject({method:'PATCH',url:`/v1/promises/${p.id}`,headers:{'x-api-key':key,'x-tenant-id':tenant},payload:{expected_revision:1,reason:'Old edit',patch:{description:'Wrong'}}});assert.equal(stale.statusCode,409);
+ p=await req('POST',`/v1/promises/${p.id}/conditions`,{expected_revision:p.revision,reason:'Depends on materials',patch:{description:'Dave supplies materials'}});
+ const condition=p.conditions[0];assert.equal(condition.status,'pending');
+ const blocked=await app.inject({method:'POST',url:`/v1/promises/${p.id}/review`,headers:{'x-api-key':key,'x-tenant-id':tenant},payload:{expected_revision:p.revision,reason:'Done',action:'verify_fulfillment'}});assert.equal(blocked.statusCode,400);
+ p=await req('PATCH',`/v1/promises/${p.id}/conditions/${condition.id}`,{expected_revision:p.revision,reason:'Received materials',patch:{status:'satisfied'}});
+ p=await req('POST',`/v1/promises/${p.id}/evidence`,{expected_revision:p.revision,reason:'Delivery record',patch:{quote:'I checked the delivered report.'}});assert.equal(p.evidence.length,1);assert.equal(p.observed_state,'promised');
+ p=await req('POST',`/v1/promises/${p.id}/review`,{expected_revision:p.revision,reason:'Personally verified delivery',action:'verify_fulfillment'});assert.equal(p.observed_state,'fulfilled');
+ p=await req('DELETE',`/v1/promises/${p.id}`,{expected_revision:p.revision,reason:'Duplicate entry'});assert.ok(p.deleted_at);assert.equal(p.history.at(-1).action,'delete');
+ const missing=await app.inject({method:'GET',url:`/v1/promises/${p.id}`,headers:{'x-api-key':key,'x-tenant-id':tenant}});assert.equal(missing.statusCode,404);
+ const audit=await req('GET',`/v1/promises/${p.id}?include_deleted=true`);assert.equal(audit.evidence.length,1);
+ await assert.rejects(()=>sql.query("update promise_evidence set quote='rewritten' where promise_id=$1",[p.id]),/immutable/);
+});
+test('deleted extraction stays suppressed after source revision and manual terms survive extraction',async()=>{
+ const c=await add({thread_id:'crud_suppression'});await process(c.communication_id);
+ let p=(await listPromises(db,{thread_id:'crud_suppression'})).data[0];
+ p=await req('PATCH',`/v1/promises/${p.id}`,{expected_revision:p.revision,reason:'Agreed scope',patch:{description:'Human agreed description',promisee_parties:[{person_id:bob,label:'Bob'}]}});
+ await sql.query("update communications set body=body||' Thanks.',updated_at=now() where communication_id=$1",[c.communication_id]);await process(c.communication_id);
+ p=await readPromise(db,p.id);assert.equal(p.description,'Human agreed description');assert.equal(p.promisee_parties[0].person_id,bob);
+ await req('DELETE',`/v1/promises/${p.id}`,{expected_revision:p.revision,reason:'Removed'});
+ await sql.query("update communications set body=body||' Again.',updated_at=now() where communication_id=$1",[c.communication_id]);await process(c.communication_id);
+ assert.equal((await listPromises(db,{thread_id:'crud_suppression'})).data.length,0);
+});
+test('CRUD rejects tenant foreign references and exposes no partial create',async()=>{
+ await sql.query("insert into tenants(tenant_id,name) values('foreign_crud','Other')");
+ const foreign=(await sql.query("insert into contacts(tenant_id,name) values('foreign_crud','Foreign') returning id")).rows[0].id;
+ const before=(await sql.query('select count(*)::int n from communication_commitments')).rows[0].n;
+ const r=await app.inject({method:'POST',url:'/v1/promises',headers:{'x-api-key':key,'x-tenant-id':tenant},payload:{reason:'Invalid',patch:{description:'Leak',promisor_parties:[{person_id:foreign,label:'Other'}]}}});assert.equal(r.statusCode,400);
+ assert.equal((await sql.query('select count(*)::int n from communication_commitments')).rows[0].n,before);
+});
+test('association edits move current terms without rewriting original source evidence',async()=>{
+ const c=await add({thread_id:'crud_move'});await process(c.communication_id);let p=(await listPromises(db,{thread_id:'crud_move'})).data[0];
+ const original=p.evidence[0].quote;
+ p=await req('PATCH',`/v1/promises/${p.id}`,{expected_revision:p.revision,reason:'Belongs to beta',patch:{external_project_id:'beta',thread_id:null}});
+ assert.equal((await readPromise(db,p.id,{external_project_id:'alpha'})),null);
+ const moved=await readPromise(db,p.id,{external_project_id:'beta',allowed_project_ids:['beta']});assert.equal(moved.evidence[0].quote,original);assert.equal(moved.original_wording,p.original_wording);
+});
+test('manual mutation emits a revision event and rolls back invalid status changes',async()=>{
+ await sql.query("update tenants set metadata=jsonb_set(metadata,'{promise_ledger,shadow}','false') where tenant_id=$1",[tenant]);
+ const result=await db.rpc('mutate_promise',{p_id:null,p_revision:null,p_actor:'tester',p_action:'create',p_reason:'Agreement',p_patch:{description:'Manual event',external_project_id:'alpha',promisor_parties:[{person_id:alice,label:'Alice'}]},p_destination:'https://example.invalid/events'});
+ assert.equal(result.error,null);
+ const p=result.data;const events=await sql.query("select payload from outbound_events where payload->'payload'->>'promise_id'=$1",[p.id]);assert.equal(events.rows.length,1);assert.equal(events.rows[0].payload.payload.revision,1);
+ const bad=await db.rpc('mutate_promise',{p_id:p.id,p_revision:p.revision,p_actor:'tester',p_action:'update',p_reason:'Bypass',p_patch:{observed_state:'fulfilled'},p_destination:null});assert.ok(bad.error);assert.equal((await readPromise(db,p.id)).revision,1);
+ let row=await req('POST',`/v1/promises/${p.id}/conditions`,{expected_revision:1,reason:'Dependency',patch:{description:'Input'}});
+ row=await req('DELETE',`/v1/promises/${p.id}/conditions/${row.conditions[0].id}`,{expected_revision:row.revision,reason:'No longer needed'});assert.deepEqual(row.conditions,[]);
+});
