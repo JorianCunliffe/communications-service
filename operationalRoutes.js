@@ -1,4 +1,5 @@
 import { recordActionResult } from "./reviewActions.js";
+import { storeReviewSources } from "./reviewSources.js";
 import { reviewIdentity } from "./reviewIdentity.js";
 import { rejectMissingCapability } from "./auth.js";
 import {
@@ -48,6 +49,7 @@ export function registerOperationalRoutes(app, database) {
           rejectMissingCapability(req, reply, "tenant:manage")
         )
           return reply;
+        if (url === "/review/sources" && rejectMissingCapability(req, reply, "review:sources:write")) return reply;
         try {
           if (
             url.startsWith("/review/") &&
@@ -81,6 +83,8 @@ export function registerOperationalRoutes(app, database) {
   };
   const scope = (r) => r.reviewIdentity?.scope || promiseScope(input(r));
   const owner = (r) => r.reviewIdentity.owner;
+  route("GET", "/review/sources", async (db, r) => r.reviewIdentity);
+  route("POST", "/review/sources", (db, r) => storeReviewSources(db, r.reviewIdentity, r.body || {}));
   route("POST", "/review/owners", async (db, r) => {
     const b = r.body || {};
     if (

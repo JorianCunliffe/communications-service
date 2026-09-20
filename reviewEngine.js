@@ -1,4 +1,5 @@
 import { actionProposal } from "./reviewActions.js";
+import { readReviewSources } from "./reviewSources.js";
 import { currentSessionScope } from "./reviewIdentity.js";
 import {
   listPromises,
@@ -153,7 +154,7 @@ export async function briefing(db, input = {}, owner = "api") {
   const unanswered = recent.filter(
     (s) =>
       s.direction === "inbound" &&
-      s.metadata?.requires_response === true &&
+      (s.metadata?.requires_response === true || visible.some(o => o.type === "REQUEST" && o.communication_id === s.communication_id)) &&
       !recent.some(
         (r) =>
           s.thread_id &&
@@ -381,13 +382,21 @@ export async function briefing(db, input = {}, owner = "api") {
       .maybeSingle(),
   );
   const observations = tenant?.metadata?.review_sources || {};
+  const synchronized = await readReviewSources(db, owner, scope, now);
+  if (synchronized.calendar?.last_success_at) {
+    calendar = [...new Map(synchronized.calendar.items.map(item => [item.id, item])).values()];
+  }
   const freshness = Object.fromEntries(
     ["calendar", "holds", "unanswered", "attachments"].map((name) => {
       const o = observations[name];
+      if (synchronized[name]) {
+        const {items, ...coverage} = synchronized[name];
+        return [name, coverage];
+      }
       return [
         name,
         {
-          state: !o
+          state: name === "calendar" ? "not_configured" : !o
             ? "not_configured"
             : o.error
               ? "unavailable"
@@ -442,7 +451,7 @@ export async function briefing(db, input = {}, owner = "api") {
     changed_since_last_review: last
       ? promises.filter((p) => p.updated_at > last)
       : promises,
-    holds: recent
+    holds: synchronized.holds?.last_success_at ? synchronized.holds.items : recent
       .filter(
         (s) =>
           s.metadata?.hold_requires_human === true &&
@@ -467,14 +476,14 @@ export async function briefing(db, input = {}, owner = "api") {
     max_items: maxItems,
     remaining_unraised: totalQuestions - queue.length,
     coverage: {
-      calendar: "ingested_events_only",
-      holds: "ingested_hold_notifications_only",
-      unanswered: "explicit_requires_response_only",
+      calendar: synchronized.calendar?.last_success_at ? "configured_project_calendars" : "ingested_events_only",
+      holds: synchronized.holds?.last_success_at ? "hyperflow_open_holds" : "ingested_hold_notifications_only",
+      unanswered: "explicit_flags_and_open_classified_requests",
       freshness,
       truncated: false,
       attachment_content: "not_inspected",
     },
-    text: `${freshness.calendar.state === "current" ? `You have ${calendar.filter((e) => localDate(new Date(e.starts_at), timezone) === date).length} calendar events today.` : `Calendar information is ${freshness.calendar.state.replace("_", " ")}; I cannot confirm your calendar is complete.`} ${active.filter((p) => p.lifecycle === "OVERDUE").length} promises are overdue. ${waiting.length} requests or deliverables are outstanding. I have ${queue.length} items to review${totalQuestions > queue.length ? `, with ${totalQuestions - queue.length} saved for a later review` : ""}.`,
+    text: `${freshness.calendar.state === "current" ? `Your configured project calendars have ${calendar.filter((e) => localDate(new Date(e.starts_at), timezone) === date).length} events today.` : `Calendar information is ${freshness.calendar.state.replace("_", " ")}; I cannot confirm your calendar is complete.`} ${active.filter((p) => p.lifecycle === "OVERDUE").length} promises are overdue. ${waiting.length} requests or deliverables are outstanding. I have ${queue.length} items to review${totalQuestions > queue.length ? `, with ${totalQuestions - queue.length} saved for a later review` : ""}.`,
   };
 }
 export async function createSession(db, input, owner) {

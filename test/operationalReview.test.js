@@ -916,3 +916,29 @@ test("owner bindings survive promise-policy updates and callback reporting survi
     delete process.env.OWNER_REVIEW_ENABLED;
   }
 });
+
+test('source snapshots replace holds, fence delayed syncs and isolate owner/project/tenant coverage', async () => {
+  const { storeReviewSources, readReviewSources } = await import('../reviewSources.js');
+  const now = new Date();
+  const identity = {owner:`person:${alice}`,scope:{allowed_project_ids:['alpha'],person_id:alice}};
+  const base = {source:'holds',project_id:'alpha',state:'current',observed_at:new Date(now.getTime()-2000).toISOString(),items:[{id:'hold-1',project_id:'alpha',status:'waiting'}]};
+  await storeReviewSources(db,identity,{snapshots:[base]},now);
+  assert.equal((await readReviewSources(db,identity.owner,identity.scope,now)).holds.items.length,1);
+  await storeReviewSources(db,identity,{snapshots:[{...base,observed_at:now.toISOString(),items:[]}]},now);
+  await storeReviewSources(db,identity,{snapshots:[base]},now);
+  assert.equal((await readReviewSources(db,identity.owner,identity.scope,now)).holds.items.length,0);
+  assert.equal((await readReviewSources(db,'person:other',identity.scope,now)).holds.state,'not_configured');
+  assert.equal((await readReviewSources(db,identity.owner,{allowed_project_ids:[]},now)).holds.items.length,0);
+  assert.equal((await readReviewSources(tenantDatabase(createPostgresClient(sql),'other'),identity.owner,identity.scope,now)).holds.items.length,0);
+  await assert.rejects(storeReviewSources(db,identity,{snapshots:[{...base,project_id:'forbidden'}]},now),/unavailable/);
+  await assert.rejects(storeReviewSources(db,{...identity,owner:'client:legacy'},{snapshots:[base]},now),/canonical/);
+  await assert.rejects(storeReviewSources(db,identity,{snapshots:[{...base,items:[{id:'x',project_id:'alpha',status:'resolved'}]}]},now),/open holds/);
+  const window = {start:new Date(now.getTime()-86400000).toISOString(),end:new Date(now.getTime()+86400000).toISOString()};
+  await storeReviewSources(db,identity,{snapshots:[{...base,source:'calendar',coverage_window:window,items:[]}]},now);
+  assert.equal((await readReviewSources(db,identity.owner,identity.scope,now)).calendar.state,'current');
+  assert.equal((await readReviewSources(db,identity.owner,{allowed_project_ids:['alpha','beta']},now)).calendar.state,'not_configured');
+  assert.equal((await readReviewSources(db,identity.owner,identity.scope,new Date(now.getTime()+3600001))).calendar.state,'stale');
+  await storeReviewSources(db,identity,{snapshots:[{...base,source:'calendar',state:'unavailable',observed_at:now.toISOString(),items:[]}]},now);
+  assert.equal((await readReviewSources(db,identity.owner,identity.scope,now)).calendar.state,'unavailable');
+  assert.deepEqual(await readReviewSources(db,identity.owner,{...identity.scope,thread_id:'one'},now),{});
+});

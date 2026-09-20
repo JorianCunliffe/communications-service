@@ -30,7 +30,7 @@ npm run test:unit
 npm run test:db
 ```
 
-The database suite applies migrations 000–037 on a real PostgreSQL-compatible engine (PGlite). Regression tests cover the original two defects, atomic rollback, partial progress, deadline preservation, durable snooze, session recovery, current ownership/scope, cross-thread expected arrivals, private rows exceeding the former 500-row cap, and callback conflicts. Unit and database suites overlap; their counts must not be added as unique tests.
+The database suite applies migrations 000–038 on a real PostgreSQL-compatible engine (PGlite). Regression tests cover the original two defects, atomic rollback, partial progress, deadline preservation, durable snooze, session recovery, current ownership/scope, cross-thread expected arrivals, private rows exceeding the former 500-row cap, and callback conflicts. Unit and database suites overlap; their counts must not be added as unique tests.
 
 Run from Hyperflow:
 
@@ -45,7 +45,7 @@ The new executor tests cover duplicate delivery, concurrent workers, changed pay
 
 ## Deployment and configuration
 
-1. Deploy Communications Service and run its existing `npm run db:migrate` runner with the production `DATABASE_URL`. New migrations are **031–037**. Existing migrations are unchanged.
+1. Deploy Communications Service and run its existing `npm run db:migrate` runner with the production `DATABASE_URL`. New migrations are **031–038**. Existing migrations are unchanged.
 2. Deploy Hyperflow and its Firebase database rules. New server-only tenant roots are `review_execution`, `review_work` and `review_owner_bindings`; they are included in tenant data lifecycle handling.
 3. Configure review-owner bindings in the tenant's `metadata.promise_ledger.review_owners`. The key is `<API key ID>:user:<trusted asserted user ID>` (or just `<API key ID>` for a dedicated single-owner client). Values contain `enabled`, `person_id`, `project_ids`, and optional `include_private`. For Hyperflow the trusted user ID is the verified Firebase UID. The Hyperflow credential needs `threads:actor:assert`; private review also requires `memory:private`. An arbitrary body field cannot select the owner.
 4. Configure bindings through `POST /v1/review/owners` with a `tenant:manage` credential, passing `expected_revision`, `binding_key`, `person_id`, `project_ids`, `enabled`, and optional `include_private`. The normal promise-policy endpoint preserves these bindings. Voice additionally requires the existing `voice_review_enabled`, `local_person_id` and configured project policy.
@@ -63,7 +63,7 @@ Additional controls:
 | `REVIEW_ACTION_DISPATCH_ENABLED` | Only literal `true` allows review-action outbox dispatch |
 | `REVIEW_ACTION_EXECUTION_ENABLED` | Only literal `true` allows Hyperflow execution/reconciliation |
 
-For source freshness, `metadata.review_sources` accepts `calendar`, `holds`, `unanswered` and `attachments` observations with `last_success_at`, `coverage_window`, and optional `error`. Populate these only from a verified synchronization process; a single event observation is not evidence of complete calendar coverage. Existing event/hold ingestion remains usable without a completeness claim.
+For other source freshness, `metadata.review_sources` accepts `calendar`, `holds`, `unanswered` and `attachments` observations with `last_success_at`, `coverage_window`, and optional `error`. Populate these only from a verified synchronization process. Legacy calendar metadata no longer establishes completeness; only authenticated, scoped source snapshots do. A single event observation is not evidence of complete calendar coverage. Existing event/hold ingestion remains usable without a completeness claim.
 
 Attachment evidence uses `communication_attachments.metadata.extraction` containing `status: "complete"`, `source_revision`, `extractor`, `text`, and the SHA-256 of that exact text. A missing or mismatched extraction stays metadata-only. This release consumes extraction results; it does not install an OCR/document-extraction provider.
 
@@ -96,7 +96,17 @@ Email/follow-up requires a resolved contact, subject and body. The service resol
 ## Open release gates and remaining integration work
 
 - Production migrations, Firebase rules, owner mappings and actual provider credentials must be verified after deployment.
-- Calendar completeness, operational hold synchronization and attachment extraction depend on deployed upstream adapters. The current code reports these limitations; it does not fabricate missing source coverage. Calendar remains based on ingested observations and unanswered detection on explicit response metadata plus observed replies.
+- Web review now synchronizes configured project calendars and open human workflow holds through the Hyperflow adapters. Deploy migration 038 and grant the trusted Hyperflow client `review:sources:write` in addition to `threads:actor:assert`. Voice uses these same owner/project snapshots but does not itself initiate a provider refresh; observations older than one hour are stale. Attachment extraction still requires an approved upstream provider. Unanswered detection includes explicit response metadata and open classified requests, excluding subsequent observed replies.
 - The synthetic model corpus is a starting point. A consented/de-identified representative corpus, measured date/reconciliation/attachment quality and agreed release thresholds are still required. Run `node scripts/evaluate-operational.js --live` with `OPENAI_API_KEY` to record a real baseline; do not call substituted model tests model accuracy.
 - Verify a real reminder, a specifically approved test email and an approved calendar change, including lost-callback recovery, before expanding live dispatch. No external messages were sent by this implementation task.
 - Complete the uninterrupted owner-review scenario by voice and web in the configured environment. The web panel was build/type checked; authenticated browser and live voice acceptance remain to be evidenced.
+
+## Follow-up source integration and rollout inspection
+
+- Added `GET/POST /v1/review/sources` behind `review:sources:write`. Canonical owner bindings and current allowed projects constrain all writes and reads. Migration 038 registers snapshots for tenant export/erasure and blocks public database roles.
+- A new web review resolves the server-authorized owner scope, reads configured calendar grants and open human holds, then stores replacement snapshots. Provider failure, missing configuration, the calendar-store limit, and stale observations remain explicit. Calendar wording describes configured project calendars rather than claiming every personal calendar is connected. Resolved/cancelled holds are removed by replacement; late sync responses cannot overwrite newer snapshots. Ask tokens, attendee details and event descriptions are excluded.
+- Calendar coverage is a bounded nine-day window. Provider pagination must finish successfully; over 2,000 items per source/project, 100 calendar ledgers, or 100 projects cannot silently become complete coverage. Narrow the project scope when those limits are exceeded.
+- On 20 September 2026, Vercel reported Hyperflow commit `dd3a627cb0319ce4f88938d89a2f5e600dc2128d` READY in production. Communications `/health` still reported build `87fc4c96a1ec`, before the review changes. Replit publishing was blocked by its browser security verification. This is a recorded rollout blocker, not a passed release gate.
+- Production startup already runs the migration runner. Pull current main into Replit and republish, then verify the deployed build, owner bindings, Firebase rules and client capabilities. No production credentials were available locally, so configuration and live model/provider acceptance have not been executed.
+
+Follow-up verification: Communications database suite 84 passing; Hyperflow source/executor/lifecycle tests 13 passing; Hyperflow type check and production build passed. These checks use local fixtures, not live provider acceptance.
