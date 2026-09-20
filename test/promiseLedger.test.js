@@ -188,3 +188,13 @@ test('manual mutation emits a revision event and rolls back invalid status chang
  let row=await req('POST',`/v1/promises/${p.id}/conditions`,{expected_revision:1,reason:'Dependency',patch:{description:'Input'}});
  row=await req('DELETE',`/v1/promises/${p.id}/conditions/${row.conditions[0].id}`,{expected_revision:row.revision,reason:'No longer needed'});assert.deepEqual(row.conditions,[]);
 });
+
+test('publisher sees the Promise Ledger composite key and replay preserves foreign keys',async()=>{
+ const {readFile}=await import('node:fs/promises');
+ const migration=await readFile(new URL('../migrations/039_promise_publish_constraint.sql',import.meta.url),'utf8');
+ await sql.exec(migration);
+ const key=await sql.query("select pg_get_constraintdef(oid) definition from pg_constraint where conrelid='communication_commitments'::regclass and conname='promise_tenant_id' and contype='u'");
+ assert.equal(key.rows[0]?.definition,'UNIQUE (tenant_id, id)');
+ const references=await sql.query("select count(*)::int n from pg_constraint where confrelid='communication_commitments'::regclass and conrelid in ('promise_evidence'::regclass,'promise_history'::regclass) and contype='f' and convalidated");
+ assert.equal(references.rows[0].n,2);
+});
