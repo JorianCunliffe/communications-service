@@ -165,7 +165,8 @@ export async function processPromiseJob(db, job, { extractor = extractPromises, 
     const known = new Set(people.map(p => p.id));
     for (const p of [...normalized.participants,...normalized.turns.map(t => t.speaker)]) if (!known.has(p.person_id)) p.person_id = null;
     let existing = [];
-    if (source.thread_id) existing = check(await db.from('communication_commitments').select('*').eq('thread_id',source.thread_id).order('updated_at',{ascending:false}).limit(100));
+    const {allRows}=await import('./operationalIntelligence.js');
+    existing = (await allRows(db,'communication_commitments')).filter(p=>p.thread_id===source.thread_id||[...p.promisor_parties,...p.promisee_parties].some(x=>x.person_id&&claimed.includes(x.person_id)));
     existing = existing.filter(p => p.external_project_id === (source.correlation?.external_project_id || null) && !['deleted','dismissed','retracted'].includes(p.review_state));
     // Do not feed a public source's extractor private promises from the same thread.
     const checked=await Promise.all(existing.map(p=>readPromise(db,p.id,{include_private:source.metadata?.private===true,external_project_id:source.correlation?.external_project_id})));
@@ -188,11 +189,14 @@ export async function processPromiseJob(db, job, { extractor = extractPromises, 
         catch { raw=fallbackPromises(source,normalized); provisional=true; }
     }
     const items = validatePromises(source, normalized, raw, existing, tenant?.metadata?.promise_ledger?.timezone || source.metadata?.timezone || process.env.CONTEXT_TIMEZONE || null);
-    if (!excludedReason && tenant?.metadata?.promise_ledger?.operational_intelligence === true) {
-        const {classifyCommunication,evaluateFulfilment}=await import('./operationalIntelligence.js');
+    if (!excludedReason && tenant?.metadata?.promise_ledger?.operational_intelligence === true && process.env.PROMISE_CLASSIFICATION_ENABLED !== 'false') {
+        const {classifyCommunication,evaluateFulfilment,evaluateExpectedDeliverable}=await import('./operationalIntelligence.js');
         const scope={include_private:source.metadata?.private===true};
         await classifyCommunication(db,{communication_id:source.communication_id},scope);
-        await Promise.all(existing.filter(p=>!['fulfilled','cancelled','superseded'].includes(p.observed_state)).slice(0,20).map(p=>evaluateFulfilment(db,p.id,{communication_id:source.communication_id},scope)));
+        const expectations=(await allRows(db,'operational_objects',q=>q.eq('status','OPEN'))).filter(o=>['REQUEST','EXPECTED_DELIVERABLE'].includes(o.type)&&[o.data.actor,...(o.data.counterparties||[])].some(p=>p?.person_id&&claimed.includes(p.person_id)));
+        for(const o of expectations){const original=check(await db.from('communications').select('*').eq('communication_id',o.communication_id).maybeSingle());if(sourceAllowed(original,scope)&&original?.promise_revision===o.source_revision&&(original.correlation?.external_project_id||null)===(source.correlation?.external_project_id||null))await evaluateExpectedDeliverable(db,o.id,{communication_id:source.communication_id},scope);}
+        const eligible=existing.filter(p=>!['fulfilled','cancelled','superseded'].includes(p.observed_state));
+        for(let offset=0;offset<eligible.length;offset+=5)await Promise.all(eligible.slice(offset,offset+5).map(p=>evaluateFulfilment(db,p.id,{communication_id:source.communication_id},scope)));
     }
     return check(await db.rpc('commit_promise_job', {p_job_id:job.id,p_lease:job.lease_token,p_items:items,
         p_outcome:excludedReason ? `excluded:${excludedReason}` : provisional ? 'provisional' : items.length ? 'promises_found' : 'none_found',p_destination:destination}));

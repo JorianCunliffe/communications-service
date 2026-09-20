@@ -6,7 +6,7 @@
 // inserted tenant-owned row.
 
 export const TENANT_TABLES = new Set([
-    'operational_classifications', 'operational_candidates', 'operational_objects', 'review_sessions', 'review_actions',
+    'operational_classifications', 'operational_candidates', 'operational_objects', 'review_sessions', 'review_actions', 'review_tasks',
     'promise_jobs', 'promise_evidence', 'promise_history',
     'contacts', 'contact_config', 'phone_configs', 'calls', 'sms_threads',
     'sms_messages', 'tool_calls', 'recordings', 'projects', 'project_contacts',
@@ -25,7 +25,7 @@ export const TENANT_TABLES = new Set([
 ]);
 
 const TENANT_RPCS = new Set([
-    'queue_review_action', 'store_operational_classification', 'respond_operational_review', 'transition_operational_promise',
+    'configure_review_owner', 'refresh_review_session', 'create_review_session', 'record_review_action_result', 'queue_review_action', 'store_operational_classification', 'respond_operational_review', 'transition_operational_promise',
     'mutate_promise', 'reconcile_promise_jobs', 'commit_promise_job', 'review_promise', 'configure_promise_ledger',
     'create_communication_contact', 'ingest_calendar_event', 'ingest_transcribed_meeting', 'requeue_communication_enrichment',
     'resolve_communication_ask', 'search_communications', 'suggest_terms',

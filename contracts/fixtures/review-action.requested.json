@@ -1,0 +1,23 @@
+{
+  "contract_version": "2.0",
+  "type": "review.action.requested",
+  "tenant_id": "org",
+  "event_id": "evt_review_contract",
+  "payload": {
+    "contract_version": "review-action.v1",
+    "action_id": "a1",
+    "idempotency_key": "a1",
+    "owner_id": "person:alice",
+    "session_id": "s1",
+    "instruction": "Create report task",
+    "scope": { "allowed_project_ids": ["p1"] },
+    "proposal": {
+      "version": "review-action.v1",
+      "type": "task",
+      "project_id": "p1",
+      "authorization": "CONFIRMED",
+      "clarification": [],
+      "parameters": { "title": "Report" }
+    }
+  }
+}

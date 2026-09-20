@@ -1,0 +1,14 @@
+[
+ {"id":"individual","body":"I will send you the report tomorrow.","expected":["PROMISE"],"actor":"counterparty"},
+ {"id":"conditional","body":"I will send the report if Dave supplies the figures today.","expected":["CONDITIONAL_PROMISE"],"actor":"counterparty"},
+ {"id":"request","body":"Could you send the budget by Friday?","expected":["REQUEST"]},
+ {"id":"offer","body":"I can help with the report if you want.","expected":["OFFER"]},
+ {"id":"social","body":"Thanks for the lovely dinner!","expected":[]},
+ {"id":"quoted","body":"Thanks.\n> I will send the invoice tomorrow.","expected":[]},
+ {"id":"decision","body":"We have decided to use the blue design.","expected":["DECISION"]},
+ {"id":"ambiguous_date","body":"I will send it next Friday.","expected":["PROMISE"],"actor":"counterparty"},
+ {"id":"partial","body":"Only the first section is finished. The rest still needs work.","expected":["STATUS_UPDATE"]},
+ {"id":"attachment_claim","body":"The report should be in the attachment but please check.","expected":["STATUS_UPDATE"]},
+ {"id":"unaccepted","body":"Dave might be able to send the figures.","expected":[]},
+ {"id":"joint","body":"We both promise to finish the presentation by Friday.","expected":["PROMISE"],"actor":"counterparty"}
+]

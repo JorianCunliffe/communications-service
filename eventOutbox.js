@@ -107,11 +107,15 @@ export async function deliverPendingEvents() {
     const db = getDatabase();
     if (!db) return { attempted: 0, delivered: 0 };
 
+    if(process.env.REVIEW_ACTION_DISPATCH_ENABLED==='true'&&process.env.HYPERFLOW_EVENT_URL){const ready=await db.rpc('dispatch_ready_review_actions',{p_destination:process.env.HYPERFLOW_EVENT_URL,p_limit:BATCH_SIZE});if(ready.error)throw new Error(ready.error.message);}
     const { data, error } = await db.rpc('claim_outbound_events', { p_limit: BATCH_SIZE, p_lease_seconds: 60 });
     if (error) throw new Error(`Could not read outbound events: ${error.message}`);
 
     let delivered = 0;
     for (const row of data || []) {
+        if(row.type==='review.action.requested'&&process.env.REVIEW_ACTION_DISPATCH_ENABLED!=='true'){
+            await db.from('outbound_events').update({status:'pending',next_attempt_at:new Date(Date.now()+60000).toISOString(),lease_token:null,lease_expires_at:null}).eq('event_id',row.event_id).eq('lease_token',row.lease_token);continue;
+        }
         const attempts = (row.attempts || 0) + 1;
         try {
             const destination = await assertFetchable(row.destination, 'communications_webhook');

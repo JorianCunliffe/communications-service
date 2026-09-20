@@ -1,6 +1,6 @@
 # Operational Review Completion Plan
 
-Status: proposed implementation plan; no changes in this plan are implemented by this document.
+Status: implementation delivered for review and action code; production/provider/model release gates remain open. See [delivery evidence and rollout instructions](OPERATIONAL_REVIEW_DELIVERY.md) for the precise implemented scope and remaining integration work.
 
 Date: 2026-09-20  
 Repositories: Communications Service (primary); Hyperflow5 (action execution and review UI integration)  
@@ -283,16 +283,16 @@ Provide separate switches for classification, owner review, voice and action dis
 
 ## 12. Definition of done
 
-- [ ] Both reproduced review defects are fixed and regression-tested.
-- [ ] Field-level changes preserve untouched terms.
-- [ ] Partial answers, corrections and dated snoozes work.
+- [x] Both reproduced review defects are fixed and regression-tested.
+- [x] Field-level changes preserve untouched terms.
+- [x] Partial answers, corrections and dated snoozes work.
 - [ ] One authorized owner can resume across voice and web.
 - [ ] Owner evidence is complete within explicitly reported coverage.
-- [ ] Matching covers promises and expected deliverables across channels.
-- [ ] Briefings report source freshness and limitations.
+- [x] Matching covers promises and expected deliverables across channels.
+- [x] Briefings report source freshness and limitations.
 - [ ] At least one real reminder, email and calendar action has a verified execution receipt.
-- [ ] Duplicate delivery and uncertain provider outcomes are handled safely.
-- [ ] Close-out explains actual changes and remaining work.
+- [x] Duplicate delivery and uncertain provider outcomes are handled safely.
+- [x] Close-out explains actual changes and remaining work.
 - [ ] Model quality is measured on representative examples.
 - [ ] Production rollout and the uninterrupted owner-review scenario are evidenced.
 

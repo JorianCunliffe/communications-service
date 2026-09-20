@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Authorized operational review action",
+  "type": "object",
+  "required": ["type", "tenant_id", "payload"],
+  "properties": {
+    "type": { "const": "review.action.requested" },
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "payload": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "action_id",
+        "idempotency_key",
+        "owner_id",
+        "session_id",
+        "instruction",
+        "scope",
+        "proposal"
+      ],
+      "properties": {
+        "contract_version": { "const": "review-action.v1" },
+        "action_id": { "type": "string", "minLength": 1 },
+        "idempotency_key": { "type": "string", "minLength": 1 },
+        "owner_id": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "instruction": { "type": "string", "minLength": 1 },
+        "scope": { "type": "object" },
+        "proposal": {
+          "type": "object",
+          "required": [
+            "version",
+            "type",
+            "project_id",
+            "authorization",
+            "clarification",
+            "parameters"
+          ],
+          "properties": {
+            "version": { "const": "review-action.v1" },
+            "type": {
+              "enum": ["reminder", "email", "calendar", "task", "follow_up"]
+            },
+            "project_id": { "type": "string", "minLength": 1 },
+            "authorization": { "const": "CONFIRMED" },
+            "clarification": { "type": "array", "maxItems": 0 },
+            "parameters": { "type": "object" },
+            "timezone": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
