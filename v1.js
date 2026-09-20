@@ -1,3 +1,4 @@
+import { registerOperationalRoutes } from './operationalRoutes.js';
 import twilio from 'twilio';
 import { mutatePromise, listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
 import { tenantLifecycleOperation } from './tenantLifecycle.js';
@@ -1131,6 +1132,8 @@ export default async function v1Routes(fastify, options = {}) {
         } catch (error) { request.log.warn({err:error}, 'Memory context unavailable'); return reply.code(503).send({error:'Memory context unavailable'}); }
     });
 
+    registerOperationalRoutes(fastify,database);
+
     fastify.post('/context/search', async (request, reply) => {
         const db = database(reply); if (!db) return reply;
         try { return await searchMemory(db, request.body || {}); }
@@ -1177,7 +1180,7 @@ export default async function v1Routes(fastify, options = {}) {
         if(!Number.isSafeInteger(b.expected_revision)||typeof b.enabled!=='boolean'||typeof b.shadow!=='boolean'
             || (b.project_ids!==null&&(!Array.isArray(b.project_ids)||b.project_ids.length>200||b.project_ids.some(x=>typeof x!=='string'||!x.trim())))
             || (b.local_person_id!=null&&!UUID.test(b.local_person_id)))return reply.code(400).send({error:'Version, enabled, shadow, project_ids and canonical local_person_id required'});
-        const result=await db.rpc('configure_promise_ledger',{p_revision:b.expected_revision,p_policy:{enabled:b.enabled,shadow:b.shadow,project_ids:b.project_ids,local_person_id:b.local_person_id||null}});
+        const result=await db.rpc('configure_promise_ledger',{p_revision:b.expected_revision,p_policy:{enabled:b.enabled,shadow:b.shadow,project_ids:b.project_ids,local_person_id:b.local_person_id||null,timezone:b.timezone||'Australia/Brisbane',operational_intelligence:b.operational_intelligence===true,voice_review_enabled:b.voice_review_enabled===true}});
         return result.error?errorReply(reply,new Error(result.error.message),result.error.code==='40001'?409:400):result.data;
     });
     fastify.get('/promises',async(request,reply)=>{

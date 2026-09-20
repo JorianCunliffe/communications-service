@@ -1,3 +1,4 @@
+import { reviewVoiceTool } from './reviewVoice.js';
 // Tool definitions the assistant may call during a call.
 //
 // Two kinds of tool:
@@ -7,7 +8,8 @@
 //             the endpoint; a tool whose URL is unset is treated as unavailable
 //             and is never offered to the model.
 //
-// Everything here is read-only on purpose. A tool that changes state in another
+// Most tools are read-only. operational_review is an explicit opt-in, owner-scoped
+// exception that records human decisions and queues instructions. A tool that changes state in another
 // system is a much larger trust decision than one that answers a question, and
 // nothing in this file should acquire side effects without that being deliberate.
 //
@@ -59,6 +61,7 @@ export function filterTurns(turns, query) {
 }
 
 const TOOLS = {
+    operational_review: reviewVoiceTool,
     select_hyperflow_project: {
         type: 'builtin',
         timeoutMs: VOICE_CONTEXT_TIMEOUT_MS,

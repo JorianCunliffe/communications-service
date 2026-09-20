@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "PROMISE",
+              "CONDITIONAL_PROMISE",
+              "REQUEST",
+              "EXPECTED_DELIVERABLE",
+              "OFFER",
+              "DECISION",
+              "DEADLINE",
+              "DEPENDENCY",
+              "FULFILMENT_EVIDENCE",
+              "CHANGE",
+              "CANCELLATION",
+              "STATUS_UPDATE",
+              "NONE"
+            ]
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "source_text": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "actor_ref": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "due_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "segment_id",
+          "source_text",
+          "summary",
+          "actor_ref",
+          "target_id",
+          "condition",
+          "confidence",
+          "due_text"
+        ]
+      }
+    }
+  },
+  "required": [
+    "items"
+  ]
+}

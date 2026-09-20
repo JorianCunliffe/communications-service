@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Operational classification request",
+  "type": "object",
+  "required": ["communication"],
+  "properties": {
+    "classification_request_id": {"type": "string", "maxLength": 300},
+    "communication": {
+      "type": "object",
+      "required": ["communication_id"],
+      "properties": {
+        "communication_id": {"type": "string", "minLength": 1},
+        "channel": {"type": "string"},
+        "direction": {"enum": ["inbound", "outbound"]},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "from": {"type": "object"},
+        "to": {"type": "array", "items": {"type": "object"}},
+        "subject": {"type": "string"},
+        "body_text": {"type": "string"},
+        "attachments": {"type": "array"}
+      },
+      "description": "Ingest first. Server reloads canonical content and participant identity by communication_id; caller-provided snapshots never override evidence."
+    },
+    "context": {"type": "object", "description": "Server retrieves scoped canonical context; caller context does not grant access."},
+    "include_private": {"type": "boolean"}
+  }
+}

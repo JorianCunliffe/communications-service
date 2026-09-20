@@ -188,6 +188,12 @@ export async function processPromiseJob(db, job, { extractor = extractPromises, 
         catch { raw=fallbackPromises(source,normalized); provisional=true; }
     }
     const items = validatePromises(source, normalized, raw, existing, tenant?.metadata?.promise_ledger?.timezone || source.metadata?.timezone || process.env.CONTEXT_TIMEZONE || null);
+    if (!excludedReason && tenant?.metadata?.promise_ledger?.operational_intelligence === true) {
+        const {classifyCommunication,evaluateFulfilment}=await import('./operationalIntelligence.js');
+        const scope={include_private:source.metadata?.private===true};
+        await classifyCommunication(db,{communication_id:source.communication_id},scope);
+        await Promise.all(existing.filter(p=>!['fulfilled','cancelled','superseded'].includes(p.observed_state)).slice(0,20).map(p=>evaluateFulfilment(db,p.id,{communication_id:source.communication_id},scope)));
+    }
     return check(await db.rpc('commit_promise_job', {p_job_id:job.id,p_lease:job.lease_token,p_items:items,
         p_outcome:excludedReason ? `excluded:${excludedReason}` : provisional ? 'provisional' : items.length ? 'promises_found' : 'none_found',p_destination:destination}));
 }
@@ -269,6 +275,8 @@ export async function readPromise(db, id, scope = {}, {history = false} = {}) {
         .filter(h=>row.source_type==='manual' || !evidence.length || (h.data.communication_id===source.communication_id && h.data.source_revision===source.promise_revision)
             || visible.some(e=>e.communication_id===h.data.communication_id && e.source_revision===h.data.source_revision))
         .map(({data,...h})=>h);
+    const {lifecycle}=await import('./reviewEngine.js');
+    result.lifecycle=lifecycle(result);
     return result;
 }
 
@@ -284,7 +292,10 @@ export async function listPromises(db,input={}) {
     const rows=check(await query);const page=rows.slice(0,limit);
     const resolved=await Promise.all(page.map(row=>readPromise(db,row.id,scope)));
     const data=resolved.filter(Boolean).filter(p=>(!input.review_state||p.review_state===input.review_state)
-        && (!input.status||p.observed_state===input.status) && (input.unresolved!==true||p.unresolved)
+        && (!input.status||p.observed_state===input.status||p.lifecycle===String(input.status).toUpperCase())
+        && (!input.due_before || (p.due_interpretation?.instant||p.due_interpretation?.date_candidate||'9999')<input.due_before)
+        && (!input.promisor || p.promisor_parties.some(x=>x.person_id===input.promisor))
+        && (!input.promisee || p.promisee_parties.some(x=>x.person_id===input.promisee)) && (input.unresolved!==true||p.unresolved)
         && (!input.direction || (input.direction==='owing'?p.promisor_parties:p.promisee_parties).some(x=>x.person_id===scope.person_id)));
     return {contract_version:'promise-ledger.v1',data,next:rows.length>limit?page.at(-1).id:null,evidence_only:true};
 }
