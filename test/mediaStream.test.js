@@ -57,9 +57,9 @@ test('unsigned media upgrades fail even when HTTP signature mode is off', async 
 test('forged media signature is refused before upgrading', async () => {
     assert.deepEqual(await probe({ signature: 'forged' }), { status: 403, opened: false });
 });
-for (const suffix of ['', '/']) {
-    test(`signed handshake${suffix ? ' with documented trailing slash' : ''} cannot start an unknown call`, async () => {
-        const signature = twilio.getExpectedTwilioSignature(token, `${base}/media-stream${suffix}`, {});
+for (const variant of ['http', 'ws']) for (const suffix of ['', '/']) {
+    test(`signed ${variant} handshake${suffix ? ' with documented trailing slash' : ''} cannot start an unknown call`, async () => {
+        const signature = twilio.getExpectedTwilioSignature(token, `${base.replace('http:', variant + ':')}/media-stream${suffix}`, {});
         const result = await probe({ signature, event: { event: 'start', start: {
             callSid: `CA${'1'.repeat(32)}`, streamSid: `MZ${'2'.repeat(32)}`,
         } } });
