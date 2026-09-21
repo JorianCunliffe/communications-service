@@ -259,12 +259,22 @@ export function rejectUnsignedMediaStream(request, reply) {
         if (!['https:', 'http:'].includes(url.protocol)) return reply.code(503).send();
         // Twilio documents the trailing-slash handshake variant. Check only
         // this configured origin, never forwarded headers or the caller's Host.
-        const urls = [url.href];
-        if (!url.pathname.endsWith('/')) {
-            url.pathname += '/';
-            urls.push(url.href);
+        const urls = [];
+        // Media Streams signs the public WebSocket URL. Also accept the HTTP
+        // upgrade representation used by proxy/framework validators, always at
+        // the same configured origin and path.
+        const protocols = [url.protocol, url.protocol === 'https:' ? 'wss:' : 'ws:'];
+        for (const protocol of protocols) {
+            const candidate = new URL(url.href);
+            candidate.protocol = protocol;
+            urls.push(candidate.href);
+            if (!candidate.pathname.endsWith('/')) {
+                candidate.pathname += '/';
+                urls.push(candidate.href);
+            }
         }
         if (urls.some(value => twilio.validateRequest(token, signature, value, {}))) return;
     } catch { /* Invalid configuration/signatures fail closed. */ }
+    console.warn('Rejected media-stream upgrade: signature mismatch for configured public URL');
     return reply.code(403).send();
 }
