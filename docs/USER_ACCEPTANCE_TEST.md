@@ -11,7 +11,7 @@ Use one designated tester, a test phone, a test mailbox and one selected project
 - SMS delivery confirmed by Twilio. Inbound reply remains to be checked.
 - The initial real call failed with Twilio 31920. The deployed signature guard now validates the WebSocket URL as well as the HTTPS URL, while rejecting unsigned upgrades and unapproved call IDs.
 - The subsequent call completed normally after 36 seconds, exercised interruption and `end_call`, and saved its transcript and summary. The tester reported poor audio quality. Its model was the old `gpt-realtime` with `alloy`; this is not an audio-quality acceptance pass.
-- Upgraded defaults to `gpt-realtime-2.1` with `marin` and an explicit English-language default. A real provider session accepted the upgraded model and voice; 85 affected regression tests passed. Receiving-device quality validation of this configuration remains required.
+- Upgraded defaults to `gpt-realtime-2.1` with `marin` and an explicit English-language default. A real provider session accepted the upgraded model and voice; 85 affected regression tests passed. Deployed build `45337678bca0` is healthy. The upgraded comparison call completed normally after 28 seconds with no Twilio errors; its persisted metadata confirms `gpt-realtime-2.1`, `marin`, and low effort. The tester reported that the voice sounded really good and interruption worked perfectly. Transcript and normal `end_call` completion were verified.
 - Mailbox connection, email delivery/reply, inbound calling, owner review and downstream action execution remain acceptance gates. HyperFlow scheduler HTTP 500 errors require investigation before full readiness.
 
 ## Setup to complete
