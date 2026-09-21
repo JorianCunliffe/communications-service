@@ -1045,6 +1045,7 @@ export default async function v1Routes(fastify, options = {}) {
     });
 
     fastify.get('/contacts/:personId', async (request, reply) => {
+        if (!UUID.test(request.params.personId)) return reply.code(400).send({ error: 'Invalid contact ID' });
         const db = database(reply); if (!db) return reply;
         const [person, identities] = await Promise.all([
             db.from('contacts').select('*').eq('id', request.params.personId).maybeSingle(),
@@ -1056,6 +1057,7 @@ export default async function v1Routes(fastify, options = {}) {
     });
 
     fastify.get('/contacts/:personId/memory', async (request, reply) => {
+        if (!UUID.test(request.params.personId)) return reply.code(400).send({ error: 'Invalid contact ID' });
         const db = database(reply); if (!db) return reply;
         try {
             const memory = await getPersonMemory(db, request.params.personId, request.query);
@@ -1065,6 +1067,7 @@ export default async function v1Routes(fastify, options = {}) {
     });
 
     fastify.get('/projects/:projectId/memory', async (request, reply) => {
+        if (!UUID.test(request.params.projectId)) return reply.code(400).send({ error: 'Invalid project ID' });
         const db = database(reply); if (!db) return reply;
         try {
             const memory = await getProjectMemory(db, request.params.projectId, request.query);
