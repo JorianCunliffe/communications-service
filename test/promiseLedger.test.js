@@ -15,6 +15,16 @@ before(async()=>{fixture=await createPhase02Database(tenant,key,{serverRoles:tru
 });
 after(async()=>fixture?.close());
 
+test('publisher sees the Promise Ledger composite key and replay preserves foreign keys',async()=>{
+ const {readFile}=await import('node:fs/promises');
+ const migration=await readFile(new URL('../migrations/039_promise_publish_constraint.sql',import.meta.url),'utf8');
+ await sql.exec(migration);
+ const key=await sql.query("select pg_get_constraintdef(oid) definition from pg_constraint where conrelid='communication_commitments'::regclass and conname='promise_tenant_id' and contype='u'");
+ assert.equal(key.rows[0]?.definition,'UNIQUE (tenant_id, id)');
+ const references=await sql.query("select count(*)::int n from pg_constraint where confrelid='communication_commitments'::regclass and conrelid in ('promise_evidence'::regclass,'promise_history'::regclass) and contype='f' and convalidated");
+ assert.equal(references.rows[0].n,2);
+});
+
 test('we creates one joint promise with both participants, including unresolved local party',()=>{
  const s={body:"We'll send the report.",direction:'inbound',person_id:'alice',occurred_at:'2026-09-18T00:00:00Z'};
  const n=normalizePromiseEvidence(s),items=validatePromises(s,n,fallbackPromises(s,n));
