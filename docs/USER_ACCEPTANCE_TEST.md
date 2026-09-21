@@ -4,6 +4,16 @@ Test site: https://communications-service.replit.app/console
 
 Use one designated tester, a test phone, a test mailbox and one selected project. Record the build from `/health`, the date, and the communication/call IDs for each result. The browser console supports calls and SMS; the other workflows use the authenticated API or the connected Hyperflow review interface.
 
+## Verified on 21 September 2026
+
+- Selected HyperFlow project: communications test (`1787628008985`), timezone Australia/Brisbane. Tenant Promise policy enabled for this project and the designated owner; authenticated review-owner binding remains to be verified.
+- Build `2a5348d7282f`: 387 isolated regression tests passed; 79/79 deployed HTTP checks passed.
+- SMS delivery confirmed by Twilio. Inbound reply remains to be checked.
+- The initial real call failed with Twilio 31920. The deployed signature guard now validates the WebSocket URL as well as the HTTPS URL, while rejecting unsigned upgrades and unapproved call IDs.
+- The subsequent call completed normally after 36 seconds, exercised interruption and `end_call`, and saved its transcript and summary. The tester reported poor audio quality. Its model was the old `gpt-realtime` with `alloy`; this is not an audio-quality acceptance pass.
+- Upgraded defaults to `gpt-realtime-2.1` with `marin` and an explicit English-language default. A real provider session accepted the upgraded model and voice; 85 affected regression tests passed. Receiving-device quality validation of this configuration remains required.
+- Mailbox connection, email delivery/reply, inbound calling, owner review and downstream action execution remain acceptance gates. HyperFlow scheduler HTTP 500 errors require investigation before full readiness.
+
 ## Setup to complete
 
 - Identify the test owner and resolve their canonical contact ID; select the allowed project IDs.
