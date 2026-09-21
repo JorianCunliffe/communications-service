@@ -17,7 +17,7 @@ import { createTranscriptDrain } from './transcriptDrain.js';
 import { createVoiceTurns } from './voiceTurns.js';
 import { recordMessage, tenantForMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
-import { E164, isAuthorized, rejectUnsignedTwilio, signatureMode } from './auth.js';
+import { E164, isAuthorized, rejectUnsignedTwilio, rejectUnsignedMediaStream, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
 import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory, noteParty, partyFor } from './realtimeSessions.js';
 import { enqueueRecording, startRecordingSweeper } from './recordings.js';
@@ -813,7 +813,7 @@ fastify.all('/call-status', twilioWebhook, async (request, reply) => {
 
 // WebSocket route for media-stream
 fastify.register(async (fastify) => {
-    fastify.get('/media-stream', { websocket: true }, (connection, req) => {
+    fastify.get('/media-stream', { websocket: true, preValidation: async (request, reply) => rejectUnsignedMediaStream(request, reply) }, (connection, req) => {
         console.log('Client connected');
 
         // Connection-specific state
@@ -826,6 +826,8 @@ fastify.register(async (fastify) => {
         let config = DEFAULT_CONFIG; // replaced by the per-call config on 'start'
         let openAiWs = null; // created on 'start', once the CallSid identifies the call
         let callSid = null; // recorded on 'start', so tool calls can be attributed
+        const startTimer = setTimeout(() => connection.close(1008, 'Call start required'), 10000);
+        startTimer.unref();
 
         // Bumped whenever the caller interrupts. A tool result that comes back
         // carrying a stale generation belongs to a response that no longer
@@ -1384,6 +1386,7 @@ fastify.register(async (fastify) => {
 
         // Handle incoming messages from Twilio
         connection.on('message', (message) => {
+            if (connection.readyState !== WebSocket.OPEN) return;
             try {
                 const data = JSON.parse(message);
 
@@ -1401,14 +1404,25 @@ fastify.register(async (fastify) => {
                         }
                         break;
                     case 'start':
+                        if (callSid || !/^CA[0-9a-f]{32}$/i.test(data.start?.callSid || '')
+                            || !/^MZ[0-9a-f]{32}$/i.test(data.start?.streamSid || '')) {
+                            connection.close(1008, 'Invalid call start');
+                            return;
+                        }
+                        const approvedConfig = takeCallConfig(data.start.callSid);
+                        if (!approvedConfig) {
+                            connection.close(1008, 'Unapproved call');
+                            return;
+                        }
+                        clearTimeout(startTimer);
                         at('streamStart');
                         streamSid = data.start.streamSid;
                         callSid = data.start.callSid || null;
                         console.log('Incoming stream has started', streamSid, data.start.callSid || '(no callSid)');
 
-                        // Pick up the config stored by the TwiML webhook for this
-                        // CallSid; streams without one (tests) keep the defaults.
-                        config = takeCallConfig(data.start.callSid) || config;
+                        // Consume the configuration approved by the call webhook
+                        // exactly once; an unknown/replayed call never uses defaults.
+                        config = approvedConfig;
 
                         // Reset start and media timestamp on a new stream
                         responseStartTimestampTwilio = null;
@@ -1447,6 +1461,7 @@ fastify.register(async (fastify) => {
 
         // Handle connection close
         connection.on('close', () => {
+            clearTimeout(startTimer);
             // However the call ended — hangup, time limit, or the caller simply
             // going away — the timers must not outlive it. A stray one would
             // fire against a closed socket for every call the process has ever

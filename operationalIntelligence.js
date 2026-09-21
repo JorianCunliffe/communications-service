@@ -110,12 +110,25 @@ export async function modelJSON(
       .join(""),
   );
 }
-export async function classifyModel(input) {
+export async function classifyModel(input, options = {}) {
+  // Only normalized authored turns are evidence. Passing the raw email body
+  // alongside them reintroduces quoted/forwarded promises that were removed.
+  const communication = input.communication || {};
+  const data = {
+    ...input,
+    communication: {
+      communication_id: communication.communication_id,
+      channel: communication.channel,
+      direction: communication.direction,
+      timestamp: communication.timestamp || communication.occurred_at,
+    },
+  };
   return modelJSON(
     "operational_classification",
     classificationOutputSchema,
-    "Classify CURRENT communication turns into zero or more operational candidates. PROMISE requires the speaker explicitly committing themselves; conditional commitments are CONDITIONAL_PROMISE. A request or dependency never creates a promise for the other person. Expected outputs without explicit commitment are EXPECTED_DELIVERABLE. Cite exact current source_text and segment_id. actor_ref must be a provided participant ref; promises must use the speaker ref. Resolve CHANGE/CANCELLATION/STATUS_UPDATE to an existing target only when participants, project, thread and deliverable match; otherwise target_id=null. Use semantic similarity, dates and preceding messages to reconcile. Do not repeat quoted history. For CHANGE, change_description is the complete proposed commitment description only if its wording changed; otherwise null. clear_deadline is true only for an explicit deadline removal. Missing due wording never removes a deadline. due_text must be exact current wording; condition is a natural language description. Return NONE or no items for social conversation. Fulfilment is evaluated separately.",
-    input,
+    "Classify CURRENT communication turns into zero or more operational candidates. PROMISE requires the speaker explicitly committing themselves; conditional commitments are CONDITIONAL_PROMISE. A request or dependency never creates a promise for the other person. An expression of ability or willingness (can help, could help, available to help), even with an if clause, is an OFFER unless the speaker actually commits to act. An if clause alone never establishes a CONDITIONAL_PROMISE. Expected future outputs without explicit commitment are EXPECTED_DELIVERABLE. Statements that work is already sent, attached, completed or in progress are STATUS_UPDATE, including tentative claims such as should be attached; they are not verified fulfilment. A routine please check appended to a status report does not create a separate deliverable or request unless it asks for a distinct action or response. Cite exact current source_text and segment_id. actor_ref must be a provided participant ref; promises must use the speaker ref. Resolve CHANGE/CANCELLATION/STATUS_UPDATE to an existing target only when participants, project, thread and deliverable match; otherwise target_id=null. Use semantic similarity, dates and preceding messages to reconcile. Classify only current.turns. Communication metadata and context are not new evidence. Never classify quoted or forwarded history or create a new candidate from preceding messages. For CHANGE, change_description is the complete proposed commitment description only if its wording changed; otherwise null. clear_deadline is true only for an explicit deadline removal. Missing due wording never removes a deadline. due_text must be exact current wording; condition is a natural language description. Return NONE or no items for social conversation. Fulfilment is evaluated separately.",
+    data,
+    options,
   );
 }
 export function validateCandidates(

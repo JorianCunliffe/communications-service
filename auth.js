@@ -245,3 +245,26 @@ export function rejectUnsignedTwilio(request, reply) {
     console.warn(`Rejected unsigned Twilio request ${request.method} ${request.raw.url}: ${reason} (checked against ${url})`);
     return reply.code(403).send();
 }
+
+// Media streams can open paid model sessions: always authenticate the upgrade,
+// including when HTTP webhook validation is temporarily in warn/off mode.
+export function rejectUnsignedMediaStream(request, reply) {
+    const token = process.env.TWILIO_AUTH_TOKEN;
+    const signature = request.headers['x-twilio-signature'];
+    const base = process.env.PUBLIC_URL;
+    if (!token || !base) return reply.code(503).send();
+    if (typeof signature !== 'string') return reply.code(403).send();
+    try {
+        const url = new URL(`${base.replace(/\/$/, '')}${request.raw.url}`);
+        if (!['https:', 'http:'].includes(url.protocol)) return reply.code(503).send();
+        // Twilio documents the trailing-slash handshake variant. Check only
+        // this configured origin, never forwarded headers or the caller's Host.
+        const urls = [url.href];
+        if (!url.pathname.endsWith('/')) {
+            url.pathname += '/';
+            urls.push(url.href);
+        }
+        if (urls.some(value => twilio.validateRequest(token, signature, value, {}))) return;
+    } catch { /* Invalid configuration/signatures fail closed. */ }
+    return reply.code(403).send();
+}

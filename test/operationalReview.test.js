@@ -35,6 +35,12 @@ const candidate = (text, type = "PROMISE", extra = {}) => ({
   due_text: null,
   ...extra,
 });
+test('malformed contact and project IDs are rejected without leaking database errors', async () => {
+  for (const path of ['/v1/contacts/not-a-uuid', '/v1/contacts/not-a-uuid/memory', '/v1/projects/not-a-uuid/memory']) {
+    const result = await request('GET', path, undefined, 400);
+    assert.match(result.error, /^Invalid (contact|project) ID$/);
+  }
+});
 const ingest = async (text, thread = "review-thread") =>
   request(
     "POST",

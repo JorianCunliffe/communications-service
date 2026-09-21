@@ -334,6 +334,7 @@ export function storeCallConfig(callSid, config) {
 }
 
 export function takeCallConfig(callSid) {
+    sweepExpired();
     const entry = callSid ? callConfigs.get(callSid) : undefined;
     if (!entry) return null;
     callConfigs.delete(callSid);
@@ -343,6 +344,7 @@ export function takeCallConfig(callSid) {
 // Read without consuming — for routes that run before the media stream claims
 // the config (the outbound answer webhook).
 export function peekCallConfig(callSid) {
+    sweepExpired();
     const entry = callSid ? callConfigs.get(callSid) : undefined;
     return entry ? entry.config : null;
 }

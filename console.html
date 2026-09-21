@@ -78,7 +78,7 @@
 <body>
 <div class="wrap">
   <h1>Assistant test console</h1>
-  <p class="sub">Place a call or send a message through this server. Nothing here is stored on the server &mdash; your key stays in this browser.</p>
+  <p class="sub">Place a call or send a message through this server. Your key stays in this browser. Calls and messages may be stored by this service.</p>
 
   <div class="status" id="status"><span class="chip">checking&hellip;</span></div>
 
@@ -120,7 +120,7 @@
     <div class="actions">
       <button id="smsBtn" type="button" class="ghost">Send message</button>
     </div>
-    <p class="hint">Sends immediately via Twilio. Not yet stored in the database.</p>
+    <p class="hint">Sends immediately via Twilio and records the message when persistence is enabled.</p>
     <div class="out" id="smsOut" role="status" aria-live="polite"></div>
   </div>
 </div>
