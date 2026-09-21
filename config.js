@@ -5,15 +5,15 @@
 import { buildToolDefinitions } from './tools.js';
 
 export const DEFAULT_CONFIG = {
-    // OpenAI Realtime model. 'gpt-realtime-2' / 'gpt-realtime-2.1' also supported.
-    model: 'gpt-realtime',
+    // Current full OpenAI Realtime model, verified against the provider.
+    model: 'gpt-realtime-2.1',
 
     // Reasoning effort: minimal | low | medium | high | xhigh.
     // Only sent when set — gpt-realtime (v1) does not accept it.
     effort: null,
 
     // Voice for the AI's spoken responses (OpenAI Realtime voice name).
-    voice: 'alloy',
+    voice: 'marin',
 
     // Controls the randomness of the AI's responses.
     temperature: 0.8,
@@ -22,7 +22,7 @@ export const DEFAULT_CONFIG = {
     assistantName: 'Iris',
 
     // System prompt / instructions for the AI.
-    systemMessage: 'You are Iris, a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.',
+    systemMessage: 'You are Iris, a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. Speak clearly in English by default. Switch languages only when the caller explicitly requests it; do not infer a language preference from a name, accent, noise, or a short ambiguous utterance. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.',
 
     // Whether Twilio speaks the intro lines below before the media stream
     // connects. Twilio's text-to-speech is a different voice from the

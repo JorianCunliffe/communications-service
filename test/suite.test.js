@@ -213,7 +213,7 @@ describe('OpenAI Realtime API – connectivity', () => {
         assert.ok(OPENAI_API_KEY, 'Skipping: OPENAI_API_KEY not set');
 
         return wsPromise(
-            `wss://api.openai.com/v1/realtime?model=gpt-realtime`,
+            `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1`,
             { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } },
             (ws, done) => {
                 ws.on('open', () => {
@@ -243,7 +243,7 @@ describe('OpenAI Realtime API – connectivity', () => {
         assert.ok(OPENAI_API_KEY, 'Skipping: OPENAI_API_KEY not set');
 
         return wsPromise(
-            `wss://api.openai.com/v1/realtime?model=gpt-realtime`,
+            `wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1`,
             { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } },
             (ws, done) => {
                 let sessionCreated = false;
@@ -260,11 +260,11 @@ describe('OpenAI Realtime API – connectivity', () => {
                             type: 'session.update',
                             session: {
                                 type: 'realtime',
-                                model: 'gpt-realtime',
+                                model: 'gpt-realtime-2.1',
                                 output_modalities: ['audio'],
                                 audio: {
                                     input: { format: { type: 'audio/pcmu' }, turn_detection: { type: 'server_vad' } },
-                                    output: { format: { type: 'audio/pcmu' }, voice: 'alloy' },
+                                    output: { format: { type: 'audio/pcmu' }, voice: 'marin' },
                                 },
                                 instructions: 'You are a helpful assistant.',
                             },
