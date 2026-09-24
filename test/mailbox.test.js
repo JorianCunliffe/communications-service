@@ -6,6 +6,7 @@ import {
     createMailboxOAuthState,
     gmailAuthorizationUrl,
     mailboxOAuthNonceHash,
+    microsoftDirectoryTenantId,
     outlookAuthorizationUrl,
     verifyMailboxOAuthState,
 } from '../mailboxOAuth.js';
@@ -95,10 +96,20 @@ describe('connected mailbox credentials and OAuth state', () => {
         assert.equal(verified.setupDraftId, 'setup-1');
         const url = new URL(outlookAuthorizationUrl(created.token));
         assert.equal(url.origin, 'https://login.microsoftonline.com');
-        assert.equal(url.pathname, '/common/oauth2/v2.0/authorize');
+        assert.equal(url.pathname, '/organizations/oauth2/v2.0/authorize');
         assert.equal(url.searchParams.get('redirect_uri'), 'https://communications.example.com/oauth/mailboxes/microsoft/callback');
         assert.match(url.searchParams.get('scope'), /offline_access/);
         assert.match(url.searchParams.get('scope'), /Mail\.ReadWrite/);
+    });
+
+    test('extracts and validates the Microsoft Entra directory tenant id from OAuth tokens', () => {
+        const directoryTenantId = '12345678-90ab-cdef-1234-567890abcdef';
+        const token = ['header', Buffer.from(JSON.stringify({ tid: directoryTenantId })).toString('base64url'), 'signature'].join('.');
+        assert.equal(microsoftDirectoryTenantId({ id_token: token }), directoryTenantId);
+        assert.equal(microsoftDirectoryTenantId({ access_token: token }), directoryTenantId);
+        assert.throws(() => microsoftDirectoryTenantId({ id_token: 'not-a-jwt' }), /valid directory tenant id/);
+        const invalid = ['header', Buffer.from(JSON.stringify({ tid: 'common' })).toString('base64url'), 'signature'].join('.');
+        assert.throws(() => microsoftDirectoryTenantId({ id_token: invalid }), /valid directory tenant id/);
     });
 });
 
