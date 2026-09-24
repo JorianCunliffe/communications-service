@@ -17,6 +17,7 @@ import {
     usableGmailCredential,
 } from './gmailMailbox.js';
 import { mailboxKeyFingerprint, openMailboxCredential, sealMailboxCredential } from './mailboxCrypto.js';
+import { microsoftDirectoryTenantId } from './mailboxOAuth.js';
 import {
     createOutlookDraft,
     updateOutlookDraft,
@@ -55,6 +56,7 @@ function connectionRef(connection, state) {
         can_send: false,
         can_create_drafts: canCreateDrafts,
         remediation,
+        provider_tenant_id: connection.provider === 'outlook' ? (connection.metadata?.provider_tenant_id || null) : null,
     };
 }
 
@@ -149,7 +151,7 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
         channels: ['email'],
         default_callback_url: process.env.HYPERFLOW_EVENT_URL || null,
         enabled: true,
-        metadata: { connection_type: 'connected_mailbox', scopes, state: 'connected' },
+        metadata: { connection_type: 'connected_mailbox', scopes, state: 'connected', provider_tenant_id: providerTenantId },
         updated_at: new Date().toISOString(),
     };
     if (connection) {
@@ -165,7 +167,7 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
     const identityValues = {
         tenant_id: tenantId, provider_connection_id: connection.id, channel: 'email', address: mailboxAddress,
         display_name: mailboxAddress, can_send: false, can_receive: true, is_default: false,
-        metadata: { connected_mailbox: true, draft_only: true }, updated_at: new Date().toISOString(),
+        metadata: { connected_mailbox: true, draft_only: true, provider_tenant_id: providerTenantId }, updated_at: new Date().toISOString(),
     };
     const identity = existingIdentity.data
         ? await db.from('service_identities').update(identityValues).eq('tenant_id', tenantId).eq('id', existingIdentity.data.id).select('*').single()
@@ -188,6 +190,7 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
 }
 
 export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens, scopes }) {
+    const providerTenantId = microsoftDirectoryTenantId(tokens);
     const credential = {
         ...tokens,
         expires_at: Date.now() + Number(tokens.expires_in || 3600) * 1000,
@@ -200,6 +203,10 @@ export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens,
         .eq('tenant_id', tenantId).eq('provider', 'outlook').eq('provider_account_id', mailboxAddress).maybeSingle();
     if (found.error) throw new Error(found.error.message);
     let connection = found.data;
+    const existingProviderTenantId = String(connection?.metadata?.provider_tenant_id || '').trim().toLowerCase();
+    if (existingProviderTenantId && existingProviderTenantId !== providerTenantId) {
+        throw new Error('This Outlook mailbox is already bound to a different Microsoft directory');
+    }
     const existingIdentity = await db.from('service_identities').select('*')
         .eq('tenant_id', tenantId).eq('channel', 'email').eq('address', mailboxAddress).maybeSingle();
     if (existingIdentity.error) throw new Error(existingIdentity.error.message);
@@ -245,7 +252,7 @@ export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens,
         updated_at: new Date().toISOString(),
     }, { onConflict: 'provider_connection_id' }).select('*').single();
     if (state.error) throw new Error(state.error.message);
-    await audit(db, tenantId, connection.id, initiatorId, 'mailbox.connected', 'succeeded', { provider: 'outlook' });
+    await audit(db, tenantId, connection.id, initiatorId, 'mailbox.connected', 'succeeded', { provider: 'outlook', provider_tenant_id: providerTenantId });
     return connectionRef(connection, state.data);
 }
 
