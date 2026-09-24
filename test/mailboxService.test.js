@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import Fastify from 'fastify';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { updateMailboxDraft } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft } from '../mailboxService.js';
 
 const tenant = 'service-test-tenant';
 const connectionId = '00000000-0000-4000-8000-000000000001';
@@ -112,6 +112,28 @@ const providerOps = ({ subject = 'Updated' } = {}) => {
 
 const input = { subject: 'Updated', text: 'body' };
 const requestHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+const microsoftTokenForTenant = tenantId => ({
+    id_token: ['header', Buffer.from(JSON.stringify({ tid: tenantId })).toString('base64url'), 'signature'].join('.'),
+});
+
+describe('Outlook multitenant directory binding', () => {
+    const directoryA = '12345678-90ab-cdef-1234-567890abcdef';
+    const directoryB = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    test('records the provider directory for a new Outlook connection', () => {
+        assert.equal(outlookProviderTenantId(null, microsoftTokenForTenant(directoryA)), directoryA);
+    });
+
+    test('permits reconnect only to the same Microsoft directory', () => {
+        const existing = { metadata: { provider_tenant_id: directoryA } };
+        assert.equal(outlookProviderTenantId(existing, microsoftTokenForTenant(directoryA)), directoryA);
+        assert.throws(
+            () => outlookProviderTenantId(existing, microsoftTokenForTenant(directoryB)),
+            /different Microsoft directory/
+        );
+    });
+});
 const options = (db, key, request = input, ops = providerOps()) => ({
     tenantId: tenant, connectionId, draftId: 'draft-1', idempotencyKey: key, request,
     credentialOverride: { access_token: 'test' }, providerOps: ops, db,
