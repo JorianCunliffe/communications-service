@@ -105,9 +105,34 @@ export function gmailAuthorizationUrl(state) {
 }
 
 function microsoftTenant() {
-    const value = String(process.env.MICROSOFT_OAUTH_TENANT || 'common').trim();
+    const value = String(process.env.MICROSOFT_OAUTH_TENANT || 'organizations').trim();
     if (!/^[A-Za-z0-9._-]{1,100}$/.test(value)) throw new Error('MICROSOFT_OAUTH_TENANT is invalid');
     return value;
+}
+
+const MICROSOFT_DIRECTORY_TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function jwtPayload(token) {
+    const parts = String(token || '').split('.');
+    if (parts.length < 2 || !parts[1]) return null;
+    try {
+        return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Extract the Microsoft Entra directory tenant id from a token set returned
+ * directly by Microsoft's token endpoint. This value is connection metadata;
+ * it is not a substitute for token signature validation.
+ */
+export function microsoftDirectoryTenantId(tokens) {
+    for (const token of [tokens?.id_token, tokens?.access_token]) {
+        const tenantId = String(jwtPayload(token)?.tid || '').trim().toLowerCase();
+        if (MICROSOFT_DIRECTORY_TENANT_ID.test(tenantId)) return tenantId;
+    }
+    throw new Error('Microsoft did not return a valid directory tenant id');
 }
 
 export function outlookAuthorizationUrl(state) {
