@@ -151,7 +151,7 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
         channels: ['email'],
         default_callback_url: process.env.HYPERFLOW_EVENT_URL || null,
         enabled: true,
-        metadata: { connection_type: 'connected_mailbox', scopes, state: 'connected', provider_tenant_id: providerTenantId },
+        metadata: { connection_type: 'connected_mailbox', scopes, state: 'connected' },
         updated_at: new Date().toISOString(),
     };
     if (connection) {
@@ -167,7 +167,7 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
     const identityValues = {
         tenant_id: tenantId, provider_connection_id: connection.id, channel: 'email', address: mailboxAddress,
         display_name: mailboxAddress, can_send: false, can_receive: true, is_default: false,
-        metadata: { connected_mailbox: true, draft_only: true, provider_tenant_id: providerTenantId }, updated_at: new Date().toISOString(),
+        metadata: { connected_mailbox: true, draft_only: true }, updated_at: new Date().toISOString(),
     };
     const identity = existingIdentity.data
         ? await db.from('service_identities').update(identityValues).eq('tenant_id', tenantId).eq('id', existingIdentity.data.id).select('*').single()
@@ -221,7 +221,7 @@ export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens,
         channels: ['email'],
         default_callback_url: process.env.HYPERFLOW_EVENT_URL || null,
         enabled: true,
-        metadata: { connection_type: 'connected_mailbox', scopes, state: 'connected' },
+        metadata: { connection_type: 'connected_mailbox', scopes, state: 'connected', provider_tenant_id: providerTenantId },
         updated_at: new Date().toISOString(),
     };
     if (connection) {
@@ -237,7 +237,7 @@ export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens,
     const identityValues = {
         tenant_id: tenantId, provider_connection_id: connection.id, channel: 'email', address: mailboxAddress,
         display_name: String(profile.displayName || mailboxAddress), can_send: false, can_receive: true, is_default: false,
-        metadata: { connected_mailbox: true, draft_only: true }, updated_at: new Date().toISOString(),
+        metadata: { connected_mailbox: true, draft_only: true, provider_tenant_id: providerTenantId }, updated_at: new Date().toISOString(),
     };
     const identity = existingIdentity.data
         ? await db.from('service_identities').update(identityValues).eq('tenant_id', tenantId).eq('id', existingIdentity.data.id).select('*').single()
