@@ -199,7 +199,6 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
 }
 
 export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens, scopes }) {
-    const providerTenantId = outlookProviderTenantId(null, tokens);
     const credential = {
         ...tokens,
         expires_at: Date.now() + Number(tokens.expires_in || 3600) * 1000,
@@ -212,7 +211,7 @@ export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens,
         .eq('tenant_id', tenantId).eq('provider', 'outlook').eq('provider_account_id', mailboxAddress).maybeSingle();
     if (found.error) throw new Error(found.error.message);
     let connection = found.data;
-    outlookProviderTenantId(connection, tokens);
+    const providerTenantId = outlookProviderTenantId(connection, tokens);
     const existingIdentity = await db.from('service_identities').select('*')
         .eq('tenant_id', tenantId).eq('channel', 'email').eq('address', mailboxAddress).maybeSingle();
     if (existingIdentity.error) throw new Error(existingIdentity.error.message);
