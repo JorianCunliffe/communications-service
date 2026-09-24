@@ -124,6 +124,15 @@ async function receivingIdentity(db, tenantId, connectionId) {
     return result.data;
 }
 
+export function outlookProviderTenantId(connection, tokens) {
+    const providerTenantId = microsoftDirectoryTenantId(tokens);
+    const existingProviderTenantId = String(connection?.metadata?.provider_tenant_id || '').trim().toLowerCase();
+    if (existingProviderTenantId && existingProviderTenantId !== providerTenantId) {
+        throw new Error('This Outlook mailbox is already bound to a different Microsoft directory');
+    }
+    return providerTenantId;
+}
+
 export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, scopes }) {
     const credential = {
         ...tokens,
@@ -190,7 +199,7 @@ export async function connectGmailMailbox(db, { tenantId, initiatorId, tokens, s
 }
 
 export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens, scopes }) {
-    const providerTenantId = microsoftDirectoryTenantId(tokens);
+    const providerTenantId = outlookProviderTenantId(null, tokens);
     const credential = {
         ...tokens,
         expires_at: Date.now() + Number(tokens.expires_in || 3600) * 1000,
@@ -203,10 +212,7 @@ export async function connectOutlookMailbox(db, { tenantId, initiatorId, tokens,
         .eq('tenant_id', tenantId).eq('provider', 'outlook').eq('provider_account_id', mailboxAddress).maybeSingle();
     if (found.error) throw new Error(found.error.message);
     let connection = found.data;
-    const existingProviderTenantId = String(connection?.metadata?.provider_tenant_id || '').trim().toLowerCase();
-    if (existingProviderTenantId && existingProviderTenantId !== providerTenantId) {
-        throw new Error('This Outlook mailbox is already bound to a different Microsoft directory');
-    }
+    outlookProviderTenantId(connection, tokens);
     const existingIdentity = await db.from('service_identities').select('*')
         .eq('tenant_id', tenantId).eq('channel', 'email').eq('address', mailboxAddress).maybeSingle();
     if (existingIdentity.error) throw new Error(existingIdentity.error.message);
