@@ -262,6 +262,7 @@ export async function updateOutlookDraft(accessToken, draftId, input, { request 
     }
 }
 
-export function getOutlookDraft(accessToken, draftId, { request = graphRequest } = {}) {
-    return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,conversationId,internetMessageId,isDraft,subject,toRecipients,ccRecipients,bccRecipients,replyTo,body,bodyPreview`);
+export function getOutlookDraft(accessToken, draftId, { request = graphRequest, textBody = false } = {}) {
+    return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,conversationId,internetMessageId,isDraft,subject,toRecipients,ccRecipients,bccRecipients,replyTo,body,bodyPreview,webLink`,
+        textBody ? { headers: { Prefer: 'outlook.body-content-type="text"' } } : {});
 }
