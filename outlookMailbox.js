@@ -124,7 +124,7 @@ export async function outlookDeltaMessages(accessToken, cursor = null, { maxMess
 
 export async function outlookMessage(accessToken, messageId, mailboxAddress = null, { request = graphRequest } = {}) {
     const select = 'id,conversationId,internetMessageId,receivedDateTime,sentDateTime,subject,from,sender,toRecipients,ccRecipients,bccRecipients,replyTo,body,bodyPreview,hasAttachments';
-    const expand = 'attachments($select=id,name,contentType,size,isInline,contentId)';
+    const expand = 'attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)';
     try {
         const message = await request(accessToken, `me/messages/${encodeURIComponent(messageId)}?$select=${encodeURIComponent(select)}&$expand=${encodeURIComponent(expand)}`, {
             headers: { Prefer: 'outlook.body-content-type="html"' },
