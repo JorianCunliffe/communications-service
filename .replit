@@ -58,6 +58,7 @@ externalPort = 3000
 [deployment]
 deploymentTarget = "vm"
 run = ["npm", "run", "start:production"]
+ignorePorts = false
 
 [postMerge]
 path = "scripts/post-merge.sh"
