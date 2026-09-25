@@ -2,6 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import Fastify from 'fastify';
+import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
 import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview } from '../mailboxService.js';
@@ -174,7 +175,7 @@ describe('mailbox draft update service state machine', () => {
         const previous = { api: process.env.API_KEY, legacy: process.env.LEGACY_TENANT_ID };
         process.env.API_KEY = 'mailbox-http-test-key';
         process.env.LEGACY_TENANT_ID = tenant;
-        const app = Fastify();
+        const app = Fastify(serverOptions);
         const db = new MemoryDb();
         await app.register(v1Routes, { prefix: '/v1', database: db });
         try {
@@ -182,6 +183,14 @@ describe('mailbox draft update service state machine', () => {
                 method: 'PATCH', url: `/v1/mailboxes/${connectionId}/drafts/draft-1`, payload: input,
             });
             assert.equal(unauthenticated.statusCode, 401);
+            const longId = 'AAMk' + 'x'.repeat(180) + '/+=';
+            const longUrl = `/v1/mailboxes/${connectionId}/drafts/${encodeURIComponent(longId)}`;
+            assert.equal((await app.inject({ method: 'GET', url: longUrl })).statusCode, 401);
+            const longDraft = await app.inject({ method: 'GET', url: longUrl, headers: { 'x-api-key': 'mailbox-http-test-key', 'x-tenant-id': tenant } });
+            assert.equal(longDraft.statusCode, 404);
+            assert.equal(longDraft.json().error, 'Mailbox draft not found');
+            const oversized = await app.inject({ method: 'GET', url: `/v1/mailboxes/${connectionId}/drafts/${'x'.repeat(2049)}` });
+            assert.equal(oversized.statusCode, 414);
             db.tables.api_clients = [{
                 id: 'draft-capability-client', key_id: 'draft-capability',
                 secret_hash: await hashApiSecret('draft-capability-secret-1234567890'),
