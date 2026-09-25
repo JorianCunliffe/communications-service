@@ -1,6 +1,7 @@
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import Fastify from 'fastify';
+import { serverOptions } from './serverOptions.js';
 import WebSocket from 'ws';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
@@ -43,7 +44,7 @@ if (!OPENAI_API_KEY) {
 }
 
 // Initialize Fastify
-const fastify = Fastify();
+const fastify = Fastify(serverOptions);
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 installRawJsonParser(fastify);
