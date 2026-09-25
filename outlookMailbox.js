@@ -79,11 +79,11 @@ async function graphRequest(accessToken, pathOrUrl, options = {}) {
     return payload;
 }
 
-export async function usableOutlookCredential(credential) {
+export async function usableOutlookCredential(credential, { forceRefresh = false, refresh = refreshOutlookToken } = {}) {
     const expiresAt = Number(credential?.expires_at || 0);
-    if (credential?.access_token && expiresAt > Date.now() + 60_000) return { credential, refreshed: false };
+    if (!forceRefresh && credential?.access_token && expiresAt > Date.now() + 60_000) return { credential, refreshed: false };
     if (!credential?.refresh_token) throw new Error('Outlook refresh token is unavailable');
-    const refreshed = await refreshOutlookToken(credential.refresh_token);
+    const refreshed = await refresh(credential.refresh_token);
     return {
         credential: {
             ...credential,

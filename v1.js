@@ -295,6 +295,7 @@ export default async function v1Routes(fastify, options = {}) {
                 tenantId: request.tenantId,
                 connectionId: request.params.connectionId,
                 actorId: request.body?.initiator_id || request.authContext?.keyId,
+                forceRefresh: request.body?.force_refresh === true,
             });
         } catch (error) { return errorReply(reply, error, error.status || 502); }
     });

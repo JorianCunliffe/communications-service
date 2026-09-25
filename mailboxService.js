@@ -95,14 +95,18 @@ async function loadCredential(db, tenantId, connectionId) {
     return openMailboxCredential(result.data.encrypted_payload, credentialAad(tenantId, connectionId));
 }
 
-async function accessCredential(db, tenantId, connection) {
+async function accessCredentialWithStatus(db, tenantId, connection, { forceRefresh = false } = {}) {
     const connectionId = connection.id;
     const stored = await loadCredential(db, tenantId, connectionId);
     const usable = connection.provider === 'outlook'
-        ? await usableOutlookCredential(stored)
+        ? await usableOutlookCredential(stored, { forceRefresh })
         : await usableGmailCredential(stored);
     if (usable.refreshed) await saveCredential(db, tenantId, connectionId, usable.credential);
-    return usable.credential;
+    return usable;
+}
+
+async function accessCredential(db, tenantId, connection) {
+    return (await accessCredentialWithStatus(db, tenantId, connection)).credential;
 }
 
 async function selectedConnection(db, tenantId, connectionId) {
@@ -372,7 +376,7 @@ export async function syncGmailMailbox(db, { tenantId, connectionId, actorId = n
     }
 }
 
-export async function syncOutlookMailbox(db, { tenantId, connectionId, actorId = null, maxMessages = 1000 }) {
+export async function syncOutlookMailbox(db, { tenantId, connectionId, actorId = null, maxMessages = 1000, forceRefresh = false }) {
     const connection = await selectedConnection(db, tenantId, connectionId);
     if (connection.provider !== 'outlook') throw new Error('Outlook mailbox connection is unavailable');
     const identity = await receivingIdentity(db, tenantId, connectionId);
@@ -384,7 +388,7 @@ export async function syncOutlookMailbox(db, { tenantId, connectionId, actorId =
     if (claimed.error) throw new Error(`Could not claim mailbox sync: ${claimed.error.message}`);
     if (claimed.data !== true) return { connection_id: connectionId, status: 'syncing', in_progress: true };
     try {
-        const credential = await accessCredential(db, tenantId, connection);
+        const { credential, refreshed } = await accessCredentialWithStatus(db, tenantId, connection, { forceRefresh });
         const state = await db.from('mailbox_sync_state').select('*')
             .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId).maybeSingle();
         if (state.error) throw new Error(state.error.message);
@@ -422,8 +426,8 @@ export async function syncOutlookMailbox(db, { tenantId, connectionId, actorId =
             last_successful_sync_at: new Date().toISOString(),
             last_error: null,
         });
-        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'succeeded', { provider: 'outlook', ingested, duplicates, skipped, recovered });
-        return { connection_id: connectionId, status: 'healthy', ingested, duplicates, skipped, recovered };
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.sync', 'succeeded', { provider: 'outlook', ingested, duplicates, skipped, recovered, token_refreshed: refreshed });
+        return { connection_id: connectionId, status: 'healthy', ingested, duplicates, skipped, recovered, token_refreshed: refreshed };
     } catch (error) {
         const state = error.oauthError === 'invalid_grant' || error.status === 403 ? 'revoked' : error.status === 401 ? 'expired' : 'degraded';
         await markSync(db, tenantId, connectionId, { status: state, last_error: String(error.message || error).slice(0, 500) }).catch(() => {});
