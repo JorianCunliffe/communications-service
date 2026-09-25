@@ -513,6 +513,22 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
     }
 }
 
+export function mailboxDraftPreview(providerName, provider, mailboxAddress) {
+    const fields = providerName === 'outlook' ? outlookDraftEditableFields(provider) : gmailDraftEditableFields(provider, mailboxAddress);
+    const content = fields.text || fields.html || '';
+    return {
+        provider: providerName,
+        subject: fields.subject,
+        to: fields.to, cc: fields.cc, bcc: fields.bcc,
+        body: content.slice(0, 200_000),
+        body_type: fields.text ? 'text' : fields.html ? 'html' : 'text',
+        truncated: content.length > 200_000,
+        web_url: providerName === 'outlook' ? provider.webLink || null : null,
+        mailbox_address: mailboxAddress,
+        fetched_at: new Date().toISOString(),
+    };
+}
+
 export async function getMailboxDraft(db, { tenantId, connectionId, draftId }) {
     const record = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId).eq('provider_draft_id', draftId).maybeSingle();
@@ -521,8 +537,8 @@ export async function getMailboxDraft(db, { tenantId, connectionId, draftId }) {
     const connection = await selectedConnection(db, tenantId, connectionId);
     const credential = await accessCredential(db, tenantId, connection);
     const provider = connection.provider === 'outlook'
-        ? await getOutlookDraft(credential.access_token, draftId)
-        : await getGmailDraft(credential.access_token, draftId);
+        ? await getOutlookDraft(credential.access_token, draftId, { textBody: true })
+        : await getGmailDraft(credential.access_token, draftId, { format: 'full' });
     if (!provider?.id || provider.id !== draftId) {
         throw draftUpdateError('Provider draft was not found', 404, 'DRAFT_NOT_FOUND');
     }
@@ -537,6 +553,7 @@ export async function getMailboxDraft(db, { tenantId, connectionId, draftId }) {
     }
     return {
         ...record.data,
+        preview: mailboxDraftPreview(connection.provider, provider, connection.provider_account_id),
         provider: connection.provider === 'outlook'
             ? { id: provider.id, message_id: provider.id, thread_id: provider.conversationId, is_draft: provider.isDraft }
             : { id: provider.id, message_id: provider.message?.id, thread_id: provider.message?.threadId, is_draft: true },

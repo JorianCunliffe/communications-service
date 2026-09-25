@@ -4,7 +4,37 @@ import { createHash } from 'node:crypto';
 import Fastify from 'fastify';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { outlookProviderTenantId, updateMailboxDraft } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview } from '../mailboxService.js';
+import { getOutlookDraft } from '../outlookMailbox.js';
+
+test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
+    const calls = [];
+    const request = async (...args) => { calls.push(args); return {}; };
+    await getOutlookDraft('token', 'draft/1', { request, textBody: true });
+    assert.match(calls[0][1], /draft%2F1.*webLink/);
+    assert.equal(calls[0][2].headers.Prefer, 'outlook.body-content-type="text"');
+    await getOutlookDraft('token', 'draft/1', { request });
+    assert.deepEqual(calls[1][2], {});
+});
+test('draft preview projects current Outlook content and Gmail full MIME content', () => {
+    const outlook = mailboxDraftPreview('outlook', {
+        subject: 'Edited in Outlook', body: { contentType: 'text', content: 'Hello\n\nCurrent body' },
+        toRecipients: [{ emailAddress: { address: 'person@example.com' } }], webLink: 'https://outlook.office.com/mail/draft',
+    }, 'owner@example.com');
+    assert.equal(outlook.body, 'Hello\n\nCurrent body');
+    assert.equal(outlook.subject, 'Edited in Outlook');
+    assert.equal(outlook.web_url, 'https://outlook.office.com/mail/draft');
+    assert.deepEqual(outlook.to, ['person@example.com']);
+    const gmail = mailboxDraftPreview('gmail', { message: { payload: {
+        headers: [{ name: 'Subject', value: 'Gmail draft' }, { name: 'To', value: 'person@example.com' }],
+        mimeType: 'text/plain', body: { data: Buffer.from('Gmail body\nTwo lines').toString('base64url') },
+    } } }, 'owner@example.com');
+    assert.equal(gmail.body, 'Gmail body\nTwo lines');
+    assert.equal(gmail.web_url, null);
+    const long = mailboxDraftPreview('outlook', { body: { contentType: 'text', content: 'x'.repeat(200001) } });
+    assert.equal(long.body.length, 200000);
+    assert.equal(long.truncated, true);
+});
 
 const tenant = 'service-test-tenant';
 const connectionId = '00000000-0000-4000-8000-000000000001';
