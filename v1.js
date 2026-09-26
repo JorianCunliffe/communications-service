@@ -1,3 +1,4 @@
+import { withAmbientCapture } from './ambientCapture.js';
 import { registerOperationalRoutes } from './operationalRoutes.js';
 import twilio from 'twilio';
 import { mutatePromise, listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
@@ -954,7 +955,7 @@ export default async function v1Routes(fastify, options = {}) {
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
             const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
-            const config = { ...resolved, ...overrides, tenantId: request.tenantId };
+            const config = withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from });
             const base = PUBLIC_URL.replace(/\/$/, '');
             let call = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
@@ -972,6 +973,8 @@ export default async function v1Routes(fastify, options = {}) {
                 callSid: call.sid, otherParty: to, serviceIdentity: from, direction: 'outbound', config,
                 metadata: { from }, communicationId, tenantId: request.tenantId, ...semantic, strict: true,
             });
+            config.threadId = stored.threadId;
+            storeCallConfig(call.sid, config);
             await enqueueEvent({
                 type: 'communication.created', communicationId, purpose: stored.purpose,
                 correlation: stored.correlation, destination: stored.callbackUrl,

@@ -1,3 +1,4 @@
+import { ambientCaptureTool, captureConfigured } from './ambientCapture.js';
 import { reviewVoiceTool } from './reviewVoice.js';
 // Tool definitions the assistant may call during a call.
 //
@@ -61,6 +62,7 @@ export function filterTurns(turns, query) {
 }
 
 const TOOLS = {
+    captureWorkItem: ambientCaptureTool,
     operational_review: reviewVoiceTool,
     select_hyperflow_project: {
         type: 'builtin',
@@ -300,6 +302,7 @@ const TOOLS = {
 // URL is defined but not available, so it is filtered out rather than offered
 // to the model and then failing mid-sentence.
 function isAvailable(name) {
+    if (name === 'captureWorkItem') return captureConfigured();
     const tool = TOOLS[name];
     if (!tool) return false;
     if (tool.type !== 'http') return true;
