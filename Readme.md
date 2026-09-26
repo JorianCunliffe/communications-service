@@ -626,3 +626,14 @@ Migration `020_thread_correction_boundaries.sql` must follow 019. Cross-project 
 ## Tenant operations
 
 Managed single-tenant API clients support expiry, rotation, revocation, request budgets and scoped administration history. See the [API reference](docs/API_REFERENCE.md#managed-tenant-api-clients), [Phase 11 contract supplement](contracts/phase11.openapi.json) and [standalone client](client/communications.js). These controls are independent of HyperFlow account credentials. Whole-tenant export and erasure are not delivered by this release.
+
+
+## Ambient side-task capture for HyperFlow
+
+The built-in `captureWorkItem` tool saves a caller's unrelated actionable thought for later review without interrupting the main conversation. Inbound HyperFlow context enables it only for the configured owner; outbound calls register it when the existing HyperFlow URL and webhook secret are configured. HyperFlow independently authorizes every request, including outbound callers.
+
+`ambientCapture.js` derives `/api/agent/capture-work` from `HYPERFLOW_AGENT_CONTEXT_URL` or `HYPERFLOW_EVENT_URL`, signs the exact body with the existing `COMMUNICATIONS_WEBHOOK_SECRET`, and forwards trusted tenant/person/communication/thread/line context. No extra per-contact tool setting, secret, or database migration is required. Deploy the matching HyperFlow endpoint first, then this service. Configure HyperFlow's primary person, primary user and phone identity through existing tenant setup.
+
+Only thought text, a stable retry key and optional kind/title/project-name suggestions come from the model. HyperFlow verifies the caller, membership and stored communication before persisting. The tool acknowledges only a confirmed `saved:true` result. Timeouts are uncertain outcomes: retry the same key and payload. Capture does not book a meeting, send a reminder or execute work. Review saved items in HyperFlow **Work → Unresolved Items** or its **Review Unresolved Items** flow node.
+
+Focused verification: `node --test test/ambientCapture.test.js test/tools.test.js test/security.test.js test/voiceTurns.test.js`. A release still needs a spoken-call smoke check against the deployed services.
