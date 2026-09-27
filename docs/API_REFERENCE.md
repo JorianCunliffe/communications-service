@@ -578,7 +578,7 @@ POST /v1/contacts
 
 Response: `201` with the created contact, `person_id`, and identity rows.
 
-Contact creation and identity insertion are currently separate writes rather than one transaction.
+Contact creation and identity insertion share one database transaction. The phone trigger identity is reused; conflicts with another person roll back the entire request.
 
 ### Read a person/contact
 
@@ -1414,3 +1414,5 @@ Tenant policy `enabled=false` pauses extraction, `shadow=true` suppresses outbou
 The Realtime tool `captureWorkItem` accepts `rawText` and `idempotencyKey`, with optional `title`, `kind` and `proposedProjectName`. Identity and source fields are excluded from the model schema. The adapter signs `POST /api/agent/capture-work` at the configured HyperFlow origin with V2 timestamped HMAC, passes trusted call context, disables redirects, and uses an eight-second deadline. HyperFlow verifies owner membership and the stored communication before acknowledging persistence.
 
 The tool is available when `COMMUNICATIONS_WEBHOOK_SECRET` and either existing HyperFlow URL setting are configured. Inbound context must return `captureEnabled:true`; outbound calls carry canonical communication/thread IDs into tool context. Missing identity, rejection, invalid response or timeout is a tool failure, never a successful capture. Retry an uncertain result with the same payload and key. This endpoint cannot execute, schedule or resolve captured work.
+
+Contact creation is atomic. Migration `040_contact_phone_identity.sql` reuses the phone identity inserted by the contact trigger, preserving explicit metadata and rejecting identities owned by a different person. Deploy with `npm run start:production` so the migration runner applies it before serving requests.
