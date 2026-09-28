@@ -5,7 +5,8 @@ import Fastify from 'fastify';
 import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt, getMailboxDraft } from '../mailboxService.js';
+import { getGmailDraft } from '../gmailMailbox.js';
 import { getOutlookDraft } from '../outlookMailbox.js';
 
 test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
@@ -38,6 +39,22 @@ test('draft preview projects current Outlook content and Gmail full MIME content
 });
 
 const tenant = 'service-test-tenant';
+
+test('receipt recovery is tenant scoped and reads the exact existing provider draft only', async () => {
+    let record = { status: 'created', provider_connection_id: 'outlook', provider_draft_id: 'draft' };
+    const filters = [];
+    const query = { select() { return this; }, eq(...args) { filters.push(args); return this; }, async maybeSingle() { return { data: record }; } };
+    const db = { from(table) { assert.equal(table, 'mailbox_drafts'); return query; } };
+    let reads = 0;
+    const read = async (_db, args) => { reads++; assert.deepEqual(args, { tenantId: tenant, connectionId: 'outlook', draftId: 'draft' }); return { verified: true }; };
+    assert.deepEqual(await getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'receipt' }, read), { verified: true });
+    assert.deepEqual(filters, [['tenant_id', tenant], ['id', 'receipt']]);
+    record = null;
+    assert.equal(await getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'receipt' }, read), null);
+    record = { status: 'failed', provider_connection_id: 'outlook', provider_draft_id: 'draft' };
+    await assert.rejects(getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'receipt' }, read), /successfully created/);
+    assert.equal(reads, 1);
+});
 const connectionId = '00000000-0000-4000-8000-000000000001';
 
 class Query {
@@ -125,6 +142,42 @@ class MemoryDb {
         return { data: result, error: null };
     }
 }
+
+test('Gmail receipt recovery reads the draft ID, preserves a changed message ID and renders full MIME', async () => {
+    const db = new MemoryDb({ draft: { provider_draft_id: 'r-123', provider_message_id: 'old-message' } });
+    db.tables.provider_connections[0].provider = 'gmail';
+    let provider = { id: 'r-123', message: { id: 'new-message', threadId: 'thread-1', labelIds: ['DRAFT'], payload: {
+        mimeType: 'multipart/alternative', headers: [{ name: 'Subject', value: 'Edited Gmail draft' }, { name: 'To', value: 'recipient@example.com' }],
+        parts: [{ mimeType: 'text/plain', body: { data: Buffer.from('Current Gmail text').toString('base64url') } }],
+    } } };
+    const calls = [];
+    const deps = {
+        accessCredential: async () => ({ access_token: 'test-only' }),
+        getOutlookDraft: async () => { throw new Error('Gmail must not use Outlook'); },
+        getGmailDraft: (token, id, options) => getGmailDraft(token, id, { ...options, request: async (_token, path) => { calls.push(path); return provider; } }),
+    };
+    const read = (database, args) => getMailboxDraft(database, args, deps);
+    const recover = () => getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'draft-row' }, read);
+    const before = JSON.stringify(db.tables);
+    const result = await recover();
+    assert.deepEqual(calls, ['/drafts/r-123?format=full']);
+    assert.equal(result.provider_draft_id, 'r-123');
+    assert.equal(result.provider.message_id, 'new-message');
+    assert.equal(result.provider.is_draft, true);
+    assert.equal(result.preview.provider, 'gmail');
+    assert.equal(result.preview.body, 'Current Gmail text');
+    assert.deepEqual(result.preview.to, ['recipient@example.com']);
+    assert.equal(JSON.stringify(db.tables), before);
+    provider.message.labelIds = ['SENT'];
+    await assert.rejects(recover(), /no longer an editable draft/);
+    provider.message.labelIds = ['DRAFT']; provider.id = 'other-draft';
+    await assert.rejects(recover(), /not found/);
+    provider = null;
+    await assert.rejects(recover(), /not found/);
+    deps.getGmailDraft = async () => { throw Object.assign(new Error('Gmail unavailable'), { status: 503 }); };
+    await assert.rejects(recover(), /Gmail unavailable/);
+    assert.equal(JSON.stringify(db.tables), before);
+});
 
 const providerOps = ({ subject = 'Updated' } = {}) => {
     const calls = { update: 0, get: 0 };
@@ -237,6 +290,10 @@ describe('mailbox draft update service state machine', () => {
                 method: 'PATCH', url: `/v1/mailboxes/${connectionId}/drafts/draft-1`, payload: input,
             });
             assert.equal(unauthenticated.statusCode, 401);
+            const receiptUrl = '/v1/mailboxes/drafts/receipts/missing';
+            assert.equal((await app.inject({ method: 'GET', url: receiptUrl })).statusCode, 401);
+            assert.equal((await app.inject({ method: 'GET', url: receiptUrl, headers: { 'x-api-key': 'mailbox-http-test-key', 'x-tenant-id': tenant } })).statusCode, 404);
+            assert.equal((await app.inject({ method: 'GET', url: receiptUrl, headers: { 'x-api-key': 'mailbox-http-test-key', 'x-tenant-id': 'foreign' } })).statusCode, 403);
             const longId = 'AAMk' + 'x'.repeat(180) + '/+=';
             const longUrl = `/v1/mailboxes/${connectionId}/drafts/${encodeURIComponent(longId)}`;
             assert.equal((await app.inject({ method: 'GET', url: longUrl })).statusCode, 401);
@@ -251,6 +308,11 @@ describe('mailbox draft update service state machine', () => {
                 allowed_tenants: [tenant], roles: [], capabilities: ['communications:write'],
             }];
             delete process.env.API_KEY;
+            db.tables.api_clients[0].capabilities.push('communications:read');
+            const deniedReceipt = await app.inject({ method: 'GET', url: receiptUrl,
+                headers: { 'x-api-key': 'draft-capability.draft-capability-secret-1234567890', 'x-tenant-id': tenant } });
+            assert.equal(deniedReceipt.statusCode, 403);
+            assert.match(deniedReceipt.json().error, /email:draft/);
             const denied = await app.inject({
                 method: 'PATCH', url: `/v1/mailboxes/${connectionId}/drafts/draft-1`,
                 headers: { 'x-api-key': 'draft-capability.draft-capability-secret-1234567890', 'x-tenant-id': tenant, 'Idempotency-Key': 'capability-denied' },

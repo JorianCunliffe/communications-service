@@ -562,16 +562,29 @@ export function mailboxDraftPreview(providerName, provider, mailboxAddress) {
     };
 }
 
-export async function getMailboxDraft(db, { tenantId, connectionId, draftId }) {
+// Resolve only an exact tenant-owned receipt; never search by subject or recipient.
+export async function getMailboxDraftByReceipt(db, { tenantId, receiptId }, readDraft = getMailboxDraft) {
+    const record = await db.from('mailbox_drafts').select('*').eq('tenant_id', tenantId).eq('id', receiptId).maybeSingle();
+    if (record.error) throw new Error(record.error.message);
+    if (!record.data) return null;
+    if (!record.data.provider_connection_id || !record.data.provider_draft_id || record.data.status !== 'created') {
+        throw draftUpdateError('Receipt does not identify a successfully created draft');
+    }
+    return readDraft(db, { tenantId, connectionId: record.data.provider_connection_id, draftId: record.data.provider_draft_id });
+}
+
+export async function getMailboxDraft(db, { tenantId, connectionId, draftId }, deps = {
+    accessCredential, getOutlookDraft, getGmailDraft,
+}) {
     const record = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId).eq('provider_draft_id', draftId).maybeSingle();
     if (record.error) throw new Error(record.error.message);
     if (!record.data) return null;
     const connection = await selectedConnection(db, tenantId, connectionId);
-    const credential = await accessCredential(db, tenantId, connection);
+    const credential = await deps.accessCredential(db, tenantId, connection);
     const provider = connection.provider === 'outlook'
-        ? await getOutlookDraft(credential.access_token, draftId, { textBody: true })
-        : await getGmailDraft(credential.access_token, draftId, { format: 'full' });
+        ? await deps.getOutlookDraft(credential.access_token, draftId, { textBody: true })
+        : await deps.getGmailDraft(credential.access_token, draftId, { format: 'full' });
     if (!provider?.id || provider.id !== draftId) {
         throw draftUpdateError('Provider draft was not found', 404, 'DRAFT_NOT_FOUND');
     }

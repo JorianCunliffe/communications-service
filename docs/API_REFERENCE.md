@@ -461,6 +461,10 @@ GET /v1/mailboxes/:connectionId/drafts/:draftId
 Retrieves a tenant-scoped draft record and verifies that the provider draft
 still exists and remains editable.
 
+Both Outlook and Gmail are supported. Gmail reads use the draft resource ID (not the contained message ID), request full MIME content for preview, and require the current message's `DRAFT` label. Editing a Gmail draft can change its message ID without changing the draft identity used for recovery.
+
+`GET /v1/mailboxes/drafts/receipts/:receiptId` performs the same live verification using the internal creation receipt ID. Requires `communications:read` and `email:draft`. The exact receipt is resolved within the authenticated tenant; its saved connection and provider draft ID are used. Missing receipts return 404; unsuccessful receipts or records lacking provider identity return 409. This read-only operation never replays creation, edits content, or sends email. The result includes receipt identity, original communication and connection IDs, and the live `provider` and `preview` fields, as on the existing draft read route.
+
 ```http
 PATCH /v1/mailboxes/:connectionId/drafts/:draftId
 Idempotency-Key: stable-update-key
