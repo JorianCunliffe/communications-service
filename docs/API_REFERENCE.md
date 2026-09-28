@@ -452,6 +452,8 @@ Content-Type: application/json
 
 Creates a provider-native Gmail or Outlook draft and never sends it. For an Outlook reply, the service resolves the stored provider message, calls Graph `createReply`, then updates the returned draft body. Standalone Outlook drafts use `/me/messages`. Reusing the key with changed content returns `409`; an uncertain provider result also requires reconciliation rather than an automatic duplicate retry.
 
+Exact retries reclaim a failed creation only when the stored receipt explicitly proves failure before provider dispatch. If a failed creation has a provider draft ID, an exact retry reads that same draft and restores success only when its editable content matches the request; it never creates a replacement or overwrites human edits. Legacy failures without such evidence remain held for investigation. Outlook reply failures retain the ID returned by `createReply`. An audit-write failure does not downgrade a durably saved creation receipt.
+
 ```http
 GET /v1/mailboxes/:connectionId/drafts/:draftId
 ```

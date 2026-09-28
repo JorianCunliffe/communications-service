@@ -298,6 +298,14 @@ describe('Outlook adapter contract', () => {
         assert.equal(calls.some(call => /send/i.test(call.path)), false);
     });
 
+    test('reply creation retains the provider draft identity after a PATCH failure', async () => {
+        let calls = 0;
+        await assert.rejects(createOutlookDraft('token', { provider_message_id: 'source', text: 'Body' }, {
+            request: async () => { if (++calls === 1) return { id: 'created-reply' }; throw new Error('PATCH timeout'); },
+        }), error => error.providerDraftId === 'created-reply' && error.providerAfterMutation === true);
+        assert.equal(calls, 2);
+    });
+
     test('re-reads Outlook after a partial or 204 PATCH and preserves the draft ID', async () => {
         const calls = [];
         const result = await updateOutlookDraft('token', 'draft-1', { subject: 'Updated' }, {

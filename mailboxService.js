@@ -441,13 +441,14 @@ function requestHash(value) {
     return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
-export async function createMailboxDraft(db, { tenantId, connectionId, actorId = null, idempotencyKey, request }) {
+export async function createMailboxDraft(db, { tenantId, connectionId, actorId = null, idempotencyKey, request, credentialOverride, providerOps = {} }) {
     if (!idempotencyKey) throw new Error('Idempotency-Key header is required for mailbox drafts');
     const connection = await selectedConnection(db, tenantId, connectionId);
     const hash = requestHash(request);
     const existing = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId).eq('idempotency_key', idempotencyKey).maybeSingle();
     if (existing.error) throw new Error(existing.error.message);
+    let reserved;
     if (existing.data) {
         if (existing.data.request_hash !== hash) {
             const error = new Error('Idempotency key was already used with different draft content');
@@ -455,17 +456,38 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
             throw error;
         }
         if (existing.data.status === 'created') return existing.data;
-        const error = new Error('Draft operation requires provider reconciliation before retry');
-        error.status = 409;
-        throw error;
+        // Only explicit pre-dispatch evidence permits another create. Legacy
+        // failures and unknown provider outcomes must never be guessed safe.
+        if (existing.data.status === 'failed' && !existing.data.provider_draft_id
+            && existing.data.last_error?.startsWith('[before-provider] ')) {
+            reserved = await db.from('mailbox_drafts').update({ status: 'creating', last_error: null, updated_at: new Date().toISOString() })
+                .eq('tenant_id', tenantId).eq('id', existing.data.id).eq('status', 'failed')
+                .eq('last_error', existing.data.last_error).select('*').maybeSingle();
+            if (reserved.error) throw new Error(reserved.error.message);
+            if (!reserved.data) throw draftUpdateError('Draft operation is already in progress');
+        } else {
+            if (existing.data.status === 'failed' && existing.data.provider_draft_id) {
+                const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+                const current = await currentEditableProviderDraft(connection, credential, existing.data.provider_draft_id, providerOps);
+                if (draftFieldsMatch(normalizedUpdateRequest(request), current.fields)) {
+                    const restored = await db.from('mailbox_drafts').update({ status: 'created', last_error: null, updated_at: new Date().toISOString() })
+                        .eq('tenant_id', tenantId).eq('id', existing.data.id).eq('status', 'failed').select('*').maybeSingle();
+                    if (restored.error) throw new Error(restored.error.message);
+                    if (restored.data) return restored.data;
+                }
+            }
+            const error = new Error('Draft operation requires provider reconciliation before retry');
+            error.status = 409;
+            throw error;
+        }
     }
-    const reserved = await db.from('mailbox_drafts').insert({
+    reserved ||= await db.from('mailbox_drafts').insert({
         tenant_id: tenantId,
         provider_connection_id: connectionId,
         communication_id: request.communication_id || null,
         idempotency_key: idempotencyKey,
         request_hash: hash,
-        status: 'reserved',
+        status: 'creating',
     }).select('*').single();
     if (reserved.error) {
         const raced = await db.from('mailbox_drafts').select('*')
@@ -482,8 +504,10 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
         error.status = 409;
         throw error;
     }
+    let providerStarted = false;
+    let createdDraft;
     try {
-        const credential = await accessCredential(db, tenantId, connection);
+        const credential = credentialOverride || await accessCredential(db, tenantId, connection);
         let providerRequest = request;
         if (connection.provider === 'outlook' && request.communication_id && !request.provider_message_id) {
             const email = await db.from('email_messages').select('provider_email_id')
@@ -491,9 +515,12 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
             if (email.error) throw new Error(email.error.message);
             providerRequest = { ...request, provider_message_id: email.data?.provider_email_id || undefined };
         }
+        providerStarted = true;
         const draft = connection.provider === 'outlook'
-            ? await createOutlookDraft(credential.access_token, providerRequest)
-            : await createGmailDraft(credential.access_token, providerRequest, connection.provider_account_id);
+            ? await (providerOps.createOutlookDraft || createOutlookDraft)(credential.access_token, providerRequest)
+            : await (providerOps.createGmailDraft || createGmailDraft)(credential.access_token, providerRequest, connection.provider_account_id);
+        createdDraft = draft;
+        if (!draft?.id) throw new Error('Provider did not confirm a draft identity');
         const updated = await db.from('mailbox_drafts').update({
             provider_draft_id: draft.id,
             provider_message_id: draft.message?.id || null,
@@ -503,10 +530,12 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
             updated_at: new Date().toISOString(),
         }).eq('tenant_id', tenantId).eq('id', reserved.data.id).select('*').single();
         if (updated.error) throw new Error(updated.error.message);
-        await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.created', 'succeeded', { draft_id: draft.id });
+        // A failed audit write must not downgrade an already durable success.
+        await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.created', 'succeeded', { draft_id: draft.id }).catch(() => {});
         return updated.data;
     } catch (error) {
-        await db.from('mailbox_drafts').update({ status: 'failed', last_error: String(error.message || error).slice(0, 500), updated_at: new Date().toISOString() })
+        const knownDraftId = createdDraft?.id || error.providerDraftId;
+        await db.from('mailbox_drafts').update({ status: 'failed', ...(knownDraftId ? { provider_draft_id: knownDraftId } : {}), last_error: `${providerStarted ? '' : '[before-provider] '}${String(error.message || error)}`.slice(0, 500), updated_at: new Date().toISOString() })
             .eq('tenant_id', tenantId).eq('id', reserved.data.id);
         await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.created', 'failed', { error: String(error.message || error).slice(0, 200) }).catch(() => {});
         throw error;

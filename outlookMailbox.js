@@ -148,14 +148,22 @@ function draftBody(input) {
 
 export async function createOutlookDraft(accessToken, input, { request = graphRequest } = {}) {
     if (input.provider_message_id) {
+        const body = draftBody(input);
         const draft = await request(accessToken, `me/messages/${encodeURIComponent(input.provider_message_id)}/createReply`, {
             method: 'POST', body: JSON.stringify({}),
         });
-        await request(accessToken, `me/messages/${encodeURIComponent(draft.id)}`, {
-            method: 'PATCH', body: JSON.stringify({ body: draftBody(input) }),
-        });
-        const verified = await getOutlookDraft(accessToken, draft.id, { request });
-        return { id: assertOutlookDraft(verified, draft.id).id, message: verified };
+        try {
+            if (!draft?.id) throw new Error('Microsoft Graph did not confirm a reply draft identity');
+            await request(accessToken, `me/messages/${encodeURIComponent(draft.id)}`, {
+                method: 'PATCH', body: JSON.stringify({ body }),
+            });
+            const verified = await getOutlookDraft(accessToken, draft.id, { request });
+            return { id: assertOutlookDraft(verified, draft.id).id, message: verified };
+        } catch (error) {
+            error.providerDraftId = draft?.id;
+            error.providerAfterMutation = true;
+            throw error;
+        }
     }
     const toRecipients = recipients(input.to);
     if (!toRecipients.length) throw new Error('to is required');

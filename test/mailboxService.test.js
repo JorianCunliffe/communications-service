@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft } from '../mailboxService.js';
 import { getOutlookDraft } from '../outlookMailbox.js';
 
 test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
@@ -168,6 +168,60 @@ describe('Outlook multitenant directory binding', () => {
 const options = (db, key, request = input, ops = providerOps()) => ({
     tenantId: tenant, connectionId, draftId: 'draft-1', idempotencyKey: key, request,
     credentialOverride: { access_token: 'test' }, providerOps: ops, db,
+});
+
+describe('mailbox draft create recovery', () => {
+    const make = () => { const db = new MemoryDb(); db.tables.mailbox_drafts = []; return db; };
+    const args = { tenantId: tenant, connectionId, idempotencyKey: 'create-test', request: { to: ['person@example.com'], subject: 'Test', text: 'Body' } };
+    const credentialOverride = { access_token: 'test' };
+    test('pre-provider credential failure can be retried once with the same receipt', async () => {
+        const db = make(); let calls = 0;
+        const providerOps = { createOutlookDraft: async () => { calls++; return { id: 'new-draft' }; } };
+        await assert.rejects(createMailboxDraft(db, { ...args, providerOps }));
+        assert.match(db.tables.mailbox_drafts[0].last_error, /^\[before-provider\]/);
+        const result = await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
+        assert.equal(result.status, 'created');
+        await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
+        assert.equal(calls, 1);
+        assert.equal(db.tables.mailbox_drafts.length, 1);
+    });
+    test('unknown create outcome and legacy errors cannot trigger another provider create', async () => {
+        const db = make(); let calls = 0;
+        const providerOps = { createOutlookDraft: async () => { calls++; throw new Error('socket timeout'); } };
+        await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /socket timeout/);
+        await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /reconciliation/);
+        assert.equal(calls, 1);
+    });
+    test('known partial reply identity is saved and exact provider content reconciles without create', async () => {
+        const db = make(); let calls = 0;
+        const providerOps = {
+            createOutlookDraft: async () => { calls++; throw Object.assign(new Error('read timeout'), { providerDraftId: 'known-draft' }); },
+            getOutlookDraft: async () => ({ id: 'known-draft', isDraft: true, subject: 'Test', toRecipients: [{ emailAddress: { address: 'person@example.com' } }], body: { contentType: 'text', content: 'Body' } }),
+        };
+        await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /read timeout/);
+        assert.equal(db.tables.mailbox_drafts[0].provider_draft_id, 'known-draft');
+        const result = await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
+        assert.equal(result.status, 'created');
+        assert.equal(calls, 1);
+    });
+    test('a changed provider draft remains held and is never overwritten', async () => {
+        const db = make();
+        const providerOps = {
+            createOutlookDraft: async () => { throw Object.assign(new Error('read timeout'), { providerDraftId: 'known-draft' }); },
+            getOutlookDraft: async () => ({ id: 'known-draft', isDraft: true, subject: 'Human edit', body: { contentType: 'text', content: 'Changed' } }),
+        };
+        await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }));
+        await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /reconciliation/);
+        assert.equal(db.tables.mailbox_drafts[0].status, 'failed');
+    });
+    test('audit outage does not downgrade successful creation', async () => {
+        const db = make(); const from = db.from.bind(db); let calls = 0;
+        db.from = table => { if (table === 'mailbox_audit_events') throw new Error('audit unavailable'); return from(table); };
+        const providerOps = { createOutlookDraft: async () => { calls++; return { id: 'new-draft' }; } };
+        await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
+        const result = await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
+        assert.equal(result.status, 'created'); assert.equal(calls, 1);
+    });
 });
 
 describe('mailbox draft update service state machine', () => {
