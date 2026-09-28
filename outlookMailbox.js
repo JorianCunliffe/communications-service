@@ -226,17 +226,15 @@ export async function updateOutlookDraft(accessToken, draftId, input, { request 
         error.code = 'DRAFT_PROVIDER_CHANGED';
         throw error;
     }
-    const merged = {
-        ...outlookDraftEditableFields(current),
-        ...Object.fromEntries(Object.entries(input || {}).filter(([, value]) => value !== undefined)),
-    };
-    // A supplied body replaces its old alternatives. Keeping old HTML beside
-    // new text can make mail clients display stale content instead of the edit.
-    if (input?.text !== undefined && input.text !== null && input.html === undefined) delete merged.html;
-    if (input?.html !== undefined && input.html !== null && input.text === undefined) delete merged.text;
-    let body;
+    // Graph preserves omitted properties. Do not copy the GET snapshot into
+    // PATCH: that would overwrite unrelated edits made after this read.
+    const patch = {};
     try {
-        body = draftBody(merged);
+        if (input?.subject !== undefined) patch.subject = String(input.subject || '').trim();
+        for (const [field, providerField] of Object.entries({ to: 'toRecipients', cc: 'ccRecipients', bcc: 'bccRecipients', reply_to: 'replyTo' })) {
+            if (input?.[field] !== undefined) patch[providerField] = recipients(input[field]);
+        }
+        if (input?.text !== undefined || input?.html !== undefined) patch.body = draftBody(input);
     } catch (error) {
         error.status = error.status || 422;
         error.code = error.code || 'DRAFT_INPUT_INVALID';
@@ -245,14 +243,7 @@ export async function updateOutlookDraft(accessToken, draftId, input, { request 
     try {
         await request(accessToken, `me/messages/${encodeURIComponent(draftId)}`, {
             method: 'PATCH',
-            body: JSON.stringify({
-                subject: String(merged.subject || '').trim(),
-                toRecipients: recipients(merged.to),
-                ccRecipients: recipients(merged.cc),
-                bccRecipients: recipients(merged.bcc),
-                replyTo: recipients(merged.reply_to),
-                body,
-            }),
+            body: JSON.stringify(patch),
         });
     } catch (error) {
         if (error.status === undefined) {

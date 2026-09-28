@@ -226,7 +226,7 @@ describe('Gmail adapter contract', () => {
             });
             assert.deepEqual(written.body, input.html ? { contentType: 'HTML', content: input.html }
                 : input.text ? { contentType: 'Text', content: input.text }
-                : { contentType: 'HTML', content: '<p>Old HTML body</p>' });
+                : undefined);
         });
     }
 
@@ -367,8 +367,33 @@ describe('Outlook adapter contract', () => {
         assert.equal(result.id, 'draft-1');
         assert.equal(calls.length, 3);
         assert.equal(calls[1].options.method, 'PATCH');
-        assert.match(calls[1].options.body, /Existing body/);
+        assert.deepEqual(JSON.parse(calls[1].options.body), { subject: 'Updated' });
         assert.match(calls[2].path, /draft-1\?/);
+    });
+
+    test('Outlook partial PATCH preserves unrelated edits made after its read', async () => {
+        let provider = { id: 'draft-1', isDraft: true, changeKey: 'before', subject: 'Old subject',
+            body: { contentType: 'Text', content: 'Old body' },
+            toRecipients: [{ emailAddress: { address: 'original@example.com' } }],
+            ccRecipients: [{ emailAddress: { address: 'clear@example.com' } }] };
+        let calls = 0;
+        const result = await updateOutlookDraft('token', 'draft-1', { subject: 'New subject', cc: [] }, {
+            expectedChangeKey: 'before', request: async (_token, _path, options) => {
+                calls++;
+                if (options?.method === 'PATCH') {
+                    provider.body = { contentType: 'HTML', content: '<p>Human body edit</p>' };
+                    provider.toRecipients = [{ emailAddress: { address: 'human@example.com' } }];
+                    const patch = JSON.parse(options.body);
+                    assert.deepEqual(patch, { subject: 'New subject', ccRecipients: [] });
+                    provider = { ...provider, ...patch, changeKey: 'after' };
+                }
+                return structuredClone(provider);
+            }
+        });
+        assert.equal(calls, 3);
+        assert.equal(result.body.content, '<p>Human body edit</p>');
+        assert.equal(result.toRecipients[0].emailAddress.address, 'human@example.com');
+        assert.deepEqual(result.ccRecipients, []);
     });
 
     test('classifies PATCH network and server failures as uncertain after mutation may have started', async () => {

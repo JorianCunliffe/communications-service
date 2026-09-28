@@ -496,7 +496,10 @@ marker at creation/recovery and atomically advances it with the service revision
 on update. Existing Outlook drafts without a baseline stay held for operator
 review; a normal preview does not silently authorize an overwrite. The Outlook
 read-before-write check is also not atomic protection against a concurrent
-provider edit. Provider-specific headers and thread metadata remain
+provider edit. Outlook PATCH sends only the fields supplied in the update, so
+an unrelated field edited between the version read and PATCH is not copied
+back from the older snapshot. A supplied empty recipient array still clears
+that recipient field. Provider-specific headers and thread metadata remain
 preserved, but are not client-editable through this provider-neutral route.
 At least one editable field must be supplied.
 Update receipts use `reserved` (not started), `applying`, `updated`, `failed`,
