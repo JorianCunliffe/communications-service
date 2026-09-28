@@ -7,7 +7,7 @@ import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
 import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt, getMailboxDraft } from '../mailboxService.js';
 import { getGmailDraft, updateGmailDraft } from '../gmailMailbox.js';
-import { getOutlookDraft } from '../outlookMailbox.js';
+import { getOutlookDraft, updateOutlookDraft } from '../outlookMailbox.js';
 
 test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
     const calls = [];
@@ -223,6 +223,41 @@ const options = (db, key, request = input, ops = providerOps()) => ({
     tenantId: tenant, connectionId, draftId: 'draft-1', idempotencyKey: key, request,
     credentialOverride: { access_token: 'test' }, providerOps: ops, db,
 });
+
+for (const provider of ['gmail', 'outlook']) for (const state of ['sent', 'deleted']) {
+    test(`${provider} ${state} draft remains held on exact retry without mutation or replacement`, async () => {
+        const db = new MemoryDb();
+        db.tables.provider_connections[0].provider = provider;
+        let reads = 0; let writes = 0;
+        const request = async (_token, _path, init) => {
+            if (init?.method && init.method !== 'GET') { writes++; throw new Error('Must not mutate a sent or deleted draft'); }
+            reads++;
+            if (state === 'deleted') throw Object.assign(new Error('Provider draft not found'), { status: 404 });
+            return provider === 'gmail'
+                ? { id: 'draft-1', message: { id: 'message-1', labelIds: ['SENT'] } }
+                : { id: 'draft-1', isDraft: false, changeKey: 'change-1' };
+        };
+        const ops = {
+            updateGmailDraft: (token, id, body, mailbox, opts) => updateGmailDraft(token, id, body, mailbox, { ...opts, request }),
+            updateOutlookDraft: (token, id, body, opts) => updateOutlookDraft(token, id, body, { ...opts, request }),
+            createGmailDraft: async () => { writes++; throw new Error('Must not create a replacement'); },
+            createOutlookDraft: async () => { writes++; throw new Error('Must not create a replacement'); },
+        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+            await assert.rejects(updateMailboxDraft(db, options(db, `${provider}-${state}`, input, ops)), error => {
+                assert.equal(error.status, state === 'deleted' ? 404 : 409);
+                if (state === 'sent') assert.equal(error.code, 'DRAFT_NOT_EDITABLE');
+                return true;
+            });
+        }
+        assert.equal(reads, 1);
+        assert.equal(writes, 0);
+        assert.equal(db.tables.mailbox_drafts[0].provider_draft_id, 'draft-1');
+        assert.equal(db.tables.mailbox_drafts[0].revision, 1);
+        assert.equal(db.tables.mailbox_drafts[0].active_update_id, null);
+        assert.equal(db.tables.mailbox_draft_update_receipts[0].status, 'failed');
+    });
+}
 
 test('Gmail update rejects a human replacement, retains the baseline, and does not replay a failed key', async () => {
     const db = new MemoryDb();
