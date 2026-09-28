@@ -5,7 +5,8 @@ import Fastify from 'fastify';
 import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt, getMailboxDraft } from '../mailboxService.js';
+import { getGmailDraft } from '../gmailMailbox.js';
 import { getOutlookDraft } from '../outlookMailbox.js';
 
 test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
@@ -141,6 +142,42 @@ class MemoryDb {
         return { data: result, error: null };
     }
 }
+
+test('Gmail receipt recovery reads the draft ID, preserves a changed message ID and renders full MIME', async () => {
+    const db = new MemoryDb({ draft: { provider_draft_id: 'r-123', provider_message_id: 'old-message' } });
+    db.tables.provider_connections[0].provider = 'gmail';
+    let provider = { id: 'r-123', message: { id: 'new-message', threadId: 'thread-1', labelIds: ['DRAFT'], payload: {
+        mimeType: 'multipart/alternative', headers: [{ name: 'Subject', value: 'Edited Gmail draft' }, { name: 'To', value: 'recipient@example.com' }],
+        parts: [{ mimeType: 'text/plain', body: { data: Buffer.from('Current Gmail text').toString('base64url') } }],
+    } } };
+    const calls = [];
+    const deps = {
+        accessCredential: async () => ({ access_token: 'test-only' }),
+        getOutlookDraft: async () => { throw new Error('Gmail must not use Outlook'); },
+        getGmailDraft: (token, id, options) => getGmailDraft(token, id, { ...options, request: async (_token, path) => { calls.push(path); return provider; } }),
+    };
+    const read = (database, args) => getMailboxDraft(database, args, deps);
+    const recover = () => getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'draft-row' }, read);
+    const before = JSON.stringify(db.tables);
+    const result = await recover();
+    assert.deepEqual(calls, ['/drafts/r-123?format=full']);
+    assert.equal(result.provider_draft_id, 'r-123');
+    assert.equal(result.provider.message_id, 'new-message');
+    assert.equal(result.provider.is_draft, true);
+    assert.equal(result.preview.provider, 'gmail');
+    assert.equal(result.preview.body, 'Current Gmail text');
+    assert.deepEqual(result.preview.to, ['recipient@example.com']);
+    assert.equal(JSON.stringify(db.tables), before);
+    provider.message.labelIds = ['SENT'];
+    await assert.rejects(recover(), /no longer an editable draft/);
+    provider.message.labelIds = ['DRAFT']; provider.id = 'other-draft';
+    await assert.rejects(recover(), /not found/);
+    provider = null;
+    await assert.rejects(recover(), /not found/);
+    deps.getGmailDraft = async () => { throw Object.assign(new Error('Gmail unavailable'), { status: 503 }); };
+    await assert.rejects(recover(), /Gmail unavailable/);
+    assert.equal(JSON.stringify(db.tables), before);
+});
 
 const providerOps = ({ subject = 'Updated' } = {}) => {
     const calls = { update: 0, get: 0 };
