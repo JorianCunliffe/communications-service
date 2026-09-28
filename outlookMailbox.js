@@ -224,6 +224,10 @@ export async function updateOutlookDraft(accessToken, draftId, input, { request 
         ...outlookDraftEditableFields(current),
         ...Object.fromEntries(Object.entries(input || {}).filter(([, value]) => value !== undefined)),
     };
+    // A supplied body replaces its old alternatives. Keeping old HTML beside
+    // new text can make mail clients display stale content instead of the edit.
+    if (input?.text !== undefined && input.text !== null && input.html === undefined) delete merged.html;
+    if (input?.html !== undefined && input.html !== null && input.text === undefined) delete merged.text;
     let body;
     try {
         body = draftBody(merged);

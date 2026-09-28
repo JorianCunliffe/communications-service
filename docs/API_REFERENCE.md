@@ -472,10 +472,15 @@ Content-Type: application/json
 ```
 
 Updates the existing provider draft in place and never sends it or changes
-`provider_draft_id`. All editable fields are optional; omitted recipients,
-subject, and body fields remain unchanged (`to`, `cc`, `bcc`, `reply_to`,
-`subject`, `text`, or `html`). `revision` is an optional current revision for
-optimistic concurrency. Provider-specific headers and thread metadata remain
+`provider_draft_id`. All editable fields are optional (`to`, `cc`, `bcc`,
+`reply_to`, `subject`, `text`, or `html`). Omitted recipients and subject remain
+unchanged. Omitting both body fields preserves the existing body. Supplying
+only `text` replaces the body with plain text and removes the old HTML
+alternative; supplying only `html` replaces the body with HTML and removes
+the old plain-text alternative. When both are supplied, Gmail retains both
+alternatives and Outlook uses HTML. `revision` is an optional current service
+revision for optimistic concurrency between service updates; it does not
+detect edits made directly in the provider mailbox. Provider-specific headers and thread metadata remain
 preserved, but are not client-editable through this provider-neutral route.
 At least one editable field must be supplied.
 Update receipts use `reserved` (not started), `applying`, `updated`, `failed`,

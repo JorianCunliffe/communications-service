@@ -356,6 +356,10 @@ export async function updateGmailDraft(accessToken, draftId, input, mailboxAddre
         preserved_headers: [...preservedHeaders.values()],
         provider_thread_id: input?.provider_thread_id || current.provider_thread_id,
     };
+    // A supplied body replaces its old alternatives. Keeping old HTML beside
+    // new text can make mail clients display stale content instead of the edit.
+    if (input?.text !== undefined && input.text !== null && input.html === undefined) delete merged.html;
+    if (input?.html !== undefined && input.html !== null && input.text === undefined) delete merged.text;
     let message;
     try {
         message = gmailDraftMessage(merged, mailboxAddress);

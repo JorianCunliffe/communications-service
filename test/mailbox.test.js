@@ -186,6 +186,50 @@ describe('Gmail adapter contract', () => {
         assert.equal(draft.threadId, 'gmail-thread-1');
     });
 
+    for (const input of [{ text: 'New plain body' }, { html: '<p>New HTML body</p>' }, { text: 'New plain body', html: '<p>New HTML body</p>' }, { subject: 'Updated subject' }]) {
+        test(`Gmail body replacement removes stale alternatives: ${Object.keys(input).join('+')}`, async () => {
+            let written;
+            await updateGmailDraft('token', 'draft-1', input, 'coach@example.com', {
+                request: async (_token, _path, options) => {
+                    if (options?.method === 'PUT') {
+                        written = JSON.parse(options.body);
+                        return { id: 'draft-1', message: { id: 'message-2', labelIds: ['DRAFT'] } };
+                    }
+                    return { id: 'draft-1', message: { id: 'message-1', labelIds: ['DRAFT'], threadId: 'thread-1', payload: {
+                        headers: [{ name: 'To', value: 'alex@example.com' }, { name: 'Subject', value: 'Original' }],
+                        parts: [{ mimeType: 'text/plain', body: { data: Buffer.from('Old plain body').toString('base64url') } },
+                            { mimeType: 'text/html', body: { data: Buffer.from('<p>Old HTML body</p>').toString('base64url') } }]
+                    } } };
+                }
+            });
+            const mime = Buffer.from(written.message.raw, 'base64url').toString('utf8');
+            if (input.subject) {
+                assert.match(mime, /Old plain body/); assert.match(mime, /Old HTML body/);
+            } else {
+                assert.doesNotMatch(mime, /Old plain body|Old HTML body/);
+                if (input.text) assert.match(mime, /New plain body/);
+                if (input.html) assert.match(mime, /New HTML body/);
+                if (!input.html) assert.doesNotMatch(mime, /Content-Type: text\/html/);
+                if (!input.text) assert.doesNotMatch(mime, /Content-Type: text\/plain/);
+            }
+            assert.equal(written.id, 'draft-1');
+            assert.equal(written.message.threadId, 'thread-1');
+        });
+        test(`Outlook body replacement selects supplied content: ${Object.keys(input).join('+')}`, async () => {
+            let written;
+            await updateOutlookDraft('token', 'draft-1', input, {
+                request: async (_token, _path, options) => {
+                    if (options?.method === 'PATCH') { written = JSON.parse(options.body); return {}; }
+                    return { id: 'draft-1', isDraft: true, subject: 'Original', toRecipients: [{ emailAddress: { address: 'alex@example.com' } }],
+                        body: { contentType: 'HTML', content: '<p>Old HTML body</p>' } };
+                }
+            });
+            assert.deepEqual(written.body, input.html ? { contentType: 'HTML', content: input.html }
+                : input.text ? { contentType: 'Text', content: input.text }
+                : { contentType: 'HTML', content: '<p>Old HTML body</p>' });
+        });
+    }
+
     test('updates Gmail drafts partially while preserving body, headers, thread and ID', async () => {
         const calls = [];
         const encoded = value => Buffer.from(value).toString('base64url');
