@@ -477,6 +477,7 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
                     const restored = await db.from('mailbox_drafts').update({ status: 'created', last_error: null,
                         provider_message_id: current.provider_message_id || existing.data.provider_message_id,
                         provider_thread_id: current.provider_thread_id || existing.data.provider_thread_id,
+                        provider_change_key: current.provider_change_key,
                         updated_at: new Date().toISOString() })
                         .eq('tenant_id', tenantId).eq('id', existing.data.id).eq('status', 'failed').select('*').maybeSingle();
                     if (restored.error) throw new Error(restored.error.message);
@@ -531,6 +532,7 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
         const updated = await db.from('mailbox_drafts').update({
             provider_draft_id: draft.id,
             provider_message_id: draft.message?.id || null,
+            provider_change_key: connection.provider === 'outlook' ? draft.message?.changeKey || null : null,
             provider_thread_id: draft.message?.threadId || draft.message?.conversationId || request.provider_thread_id || null,
             status: 'created',
             last_error: null,
@@ -656,6 +658,7 @@ function providerDraftData(provider, providerName, mailboxAddress) {
             : gmailDraftEditableFields(provider, mailboxAddress),
         provider_message_id: provider?.message?.id || (providerName === 'outlook' ? provider?.id : null),
         provider_thread_id: provider?.message?.threadId || provider?.conversationId || null,
+        provider_change_key: providerName === 'outlook' ? provider?.changeKey || null : null,
     };
 }
 
@@ -689,6 +692,7 @@ async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptI
         revision: nextRevision,
         updated_at: null,
     });
+    result.provider_change_key = providerData.provider_change_key;
     const finalized = await db.rpc('finalize_mailbox_draft_update', {
         p_tenant_id: tenantId,
         p_provider_connection_id: connectionId,
@@ -871,9 +875,13 @@ export async function updateMailboxDraft(db, {
         if (connection.provider === 'gmail' && !draft.data.provider_message_id) {
             throw draftUpdateError('Gmail draft has no saved message version; review and reconcile it before updating', 409, 'DRAFT_VERSION_UNAVAILABLE');
         }
+        if (connection.provider === 'outlook' && !draft.data.provider_change_key) {
+            throw draftUpdateError('Outlook draft has no saved change key; review and reconcile it before updating', 409, 'DRAFT_VERSION_UNAVAILABLE');
+        }
         providerStarted = true;
         const providerDraft = connection.provider === 'outlook'
-            ? await (providerOps.updateOutlookDraft || updateOutlookDraft)(credential.access_token, draftId, providerRequest)
+            ? await (providerOps.updateOutlookDraft || updateOutlookDraft)(credential.access_token, draftId, providerRequest,
+                { expectedChangeKey: draft.data.provider_change_key })
             : await (providerOps.updateGmailDraft || updateGmailDraft)(credential.access_token, draftId, providerRequest, connection.provider_account_id,
                 { expectedMessageId: draft.data.provider_message_id });
         if (!providerDraft || providerDraft.id !== draftId) {

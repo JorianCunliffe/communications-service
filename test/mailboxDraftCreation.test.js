@@ -14,6 +14,8 @@ test('draft creation obeys the migrated SQL status constraint and replay never d
   await sql.exec("create table tenants(tenant_id text primary key); create table provider_connections(id uuid primary key,tenant_id text,provider text,enabled boolean,channels text[],provider_account_id text,unique(tenant_id,id)); create table mailbox_oauth_credentials(tenant_id text,provider_connection_id uuid,encrypted_payload text); create table mailbox_audit_events(tenant_id text,provider_connection_id uuid,actor_id text,action text,outcome text,details jsonb);");
   const migration=readFileSync(new URL('../migrations/016_connected_mailboxes.sql',import.meta.url),'utf8');
   const ddl=migration.match(/create table if not exists public\.mailbox_drafts \([\s\S]*?\n\);/i)?.[0];assert.ok(ddl);await sql.exec(ddl);
+  const versionMigration=readFileSync(new URL('../migrations/041_mailbox_outlook_change_key.sql',import.meta.url),'utf8');
+  const versionDdl=versionMigration.match(/alter table public\.mailbox_drafts[^;]+;/)?.[0];assert.ok(versionDdl);await sql.exec(versionDdl);
   await sql.query('insert into tenants values ($1)',[tenant]);
   await sql.query("insert into provider_connections values ($1,$2,'outlook',true,ARRAY['email'],'owner@example.com')",[connection,tenant]);
   await sql.query('insert into mailbox_oauth_credentials values ($1,$2,$3)',[tenant,connection,sealMailboxCredential({access_token:'fake-access',expires_at:Date.now()+3600000},'communications-mailbox:'+tenant+':'+connection)]);

@@ -97,7 +97,7 @@ class MemoryDb {
         this.tables = {
             tenants: [{ tenant_id: tenant, status: 'active' }],
             provider_connections: [{ id: connectionId, tenant_id: tenant, provider: 'outlook', enabled: true, channels: ['email'], provider_account_id: 'owner@example.com' }],
-            mailbox_drafts: [{ id: 'draft-row', tenant_id: tenant, provider_connection_id: connectionId, provider_draft_id: 'draft-1', provider_message_id: 'message-1', provider_thread_id: 'thread-1', status: 'created', revision: 1, active_update_id: null, ...(draft || {}) }],
+            mailbox_drafts: [{ id: 'draft-row', tenant_id: tenant, provider_connection_id: connectionId, provider_draft_id: 'draft-1', provider_message_id: 'message-1', provider_thread_id: 'thread-1', provider_change_key: 'change-1', status: 'created', revision: 1, active_update_id: null, ...(draft || {}) }],
             mailbox_draft_update_receipts: receipts,
             mailbox_audit_events: [],
         };
@@ -134,6 +134,7 @@ class MemoryDb {
             provider_draft_id: args.p_provider_draft_id,
             provider_message_id: args.p_provider_message_id || draft.provider_message_id,
             provider_thread_id: args.p_provider_thread_id || draft.provider_thread_id,
+            provider_change_key: args.p_result.provider_change_key || null,
             revision: draft.revision + 1,
             active_update_id: null,
         });
@@ -185,7 +186,7 @@ const providerOps = ({ subject = 'Updated' } = {}) => {
         calls,
         updateOutlookDraft: async () => {
             calls.update += 1;
-            return { id: 'draft-1', isDraft: true, conversationId: 'thread-1', subject };
+            return { id: 'draft-1', isDraft: true, changeKey: 'change-2', conversationId: 'thread-1', subject };
         },
         getOutlookDraft: async () => {
             calls.get += 1;
@@ -305,12 +306,13 @@ describe('mailbox draft create recovery', () => {
         const db = make(); let calls = 0;
         const providerOps = {
             createOutlookDraft: async () => { calls++; throw Object.assign(new Error('read timeout'), { providerDraftId: 'known-draft' }); },
-            getOutlookDraft: async () => ({ id: 'known-draft', isDraft: true, subject: 'Test', toRecipients: [{ emailAddress: { address: 'person@example.com' } }], body: { contentType: 'text', content: 'Body' } }),
+            getOutlookDraft: async () => ({ id: 'known-draft', isDraft: true, changeKey: 'recovered-version', subject: 'Test', toRecipients: [{ emailAddress: { address: 'person@example.com' } }], body: { contentType: 'text', content: 'Body' } }),
         };
         await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /read timeout/);
         assert.equal(db.tables.mailbox_drafts[0].provider_draft_id, 'known-draft');
         const result = await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
         assert.equal(result.status, 'created');
+        assert.equal(result.provider_change_key, 'recovered-version');
         assert.equal(calls, 1);
     });
     test('a changed provider draft remains held and is never overwritten', async () => {

@@ -217,9 +217,15 @@ export function outlookDraftEditableFields(message) {
     };
 }
 
-export async function updateOutlookDraft(accessToken, draftId, input, { request = graphRequest } = {}) {
+export async function updateOutlookDraft(accessToken, draftId, input, { request = graphRequest, expectedChangeKey } = {}) {
     const current = await getOutlookDraft(accessToken, draftId, { request });
     assertOutlookDraft(current, draftId);
+    if (expectedChangeKey !== undefined && current.changeKey !== expectedChangeKey) {
+        const error = new Error('Outlook draft changed outside this service; review the current draft before updating');
+        error.status = 409;
+        error.code = 'DRAFT_PROVIDER_CHANGED';
+        throw error;
+    }
     const merged = {
         ...outlookDraftEditableFields(current),
         ...Object.fromEntries(Object.entries(input || {}).filter(([, value]) => value !== undefined)),
@@ -275,6 +281,6 @@ export async function updateOutlookDraft(accessToken, draftId, input, { request 
 }
 
 export function getOutlookDraft(accessToken, draftId, { request = graphRequest, textBody = false } = {}) {
-    return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,conversationId,internetMessageId,isDraft,subject,toRecipients,ccRecipients,bccRecipients,replyTo,body,bodyPreview,webLink`,
+    return request(accessToken, `me/messages/${encodeURIComponent(draftId)}?$select=id,changeKey,conversationId,internetMessageId,isDraft,subject,toRecipients,ccRecipients,bccRecipients,replyTo,body,bodyPreview,webLink`,
         textBody ? { headers: { Prefer: 'outlook.body-content-type="text"' } } : {});
 }

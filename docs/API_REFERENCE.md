@@ -488,8 +488,15 @@ neither silently adopts a newly edited draft as its baseline. Successful
 updates save the replacement message ID for the next update. Gmail's [draft
 message ID changes when its content is replaced](https://developers.google.com/workspace/gmail/api/guides/drafts).
 This read-before-write guard is not an atomic provider compare-and-swap and
-does not prove protection against edits racing the PUT. Outlook direct-edit
-conflict detection remains unsupported. Provider-specific headers and thread metadata remain
+does not prove protection against edits racing the PUT. Outlook similarly
+compares the current [message changeKey](https://learn.microsoft.com/en-us/graph/api/resources/message?view=graph-rest-1.0)
+with its saved `provider_change_key`, returning the same conflict/missing-version
+codes before PATCH. Migration `041_mailbox_outlook_change_key.sql` stores that
+marker at creation/recovery and atomically advances it with the service revision
+on update. Existing Outlook drafts without a baseline stay held for operator
+review; a normal preview does not silently authorize an overwrite. The Outlook
+read-before-write check is also not atomic protection against a concurrent
+provider edit. Provider-specific headers and thread metadata remain
 preserved, but are not client-editable through this provider-neutral route.
 At least one editable field must be supplied.
 Update receipts use `reserved` (not started), `applying`, `updated`, `failed`,
