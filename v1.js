@@ -22,7 +22,7 @@ import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { normaliseAddresses, outboundEmailRequest } from './email.js';
 import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
-import { createMailboxDraft, getMailboxDraft, listMailboxConnections, syncMailbox, updateMailboxDraft } from './mailboxService.js';
+import { createMailboxDraft, getMailboxDraft, getMailboxDraftByReceipt, listMailboxConnections, syncMailbox, updateMailboxDraft } from './mailboxService.js';
 import { ingestMeeting, getMeeting, findMeetingBySource, listMeetings, MeetingError } from './meetings.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
@@ -320,6 +320,14 @@ export default async function v1Routes(fastify, options = {}) {
                 revision: draft.revision || 1,
                 created_at: draft.created_at,
             });
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
+    });
+
+    fastify.get('/mailboxes/drafts/receipts/:receiptId', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const draft = await getMailboxDraftByReceipt(db, { tenantId: request.tenantId, receiptId: request.params.receiptId });
+            return draft || reply.code(404).send({ error: 'Mailbox draft receipt not found' });
         } catch (error) { return errorReply(reply, error, error.status || 502); }
     });
 

@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt } from '../mailboxService.js';
 import { getOutlookDraft } from '../outlookMailbox.js';
 
 test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
@@ -38,6 +38,22 @@ test('draft preview projects current Outlook content and Gmail full MIME content
 });
 
 const tenant = 'service-test-tenant';
+
+test('receipt recovery is tenant scoped and reads the exact existing provider draft only', async () => {
+    let record = { status: 'created', provider_connection_id: 'outlook', provider_draft_id: 'draft' };
+    const filters = [];
+    const query = { select() { return this; }, eq(...args) { filters.push(args); return this; }, async maybeSingle() { return { data: record }; } };
+    const db = { from(table) { assert.equal(table, 'mailbox_drafts'); return query; } };
+    let reads = 0;
+    const read = async (_db, args) => { reads++; assert.deepEqual(args, { tenantId: tenant, connectionId: 'outlook', draftId: 'draft' }); return { verified: true }; };
+    assert.deepEqual(await getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'receipt' }, read), { verified: true });
+    assert.deepEqual(filters, [['tenant_id', tenant], ['id', 'receipt']]);
+    record = null;
+    assert.equal(await getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'receipt' }, read), null);
+    record = { status: 'failed', provider_connection_id: 'outlook', provider_draft_id: 'draft' };
+    await assert.rejects(getMailboxDraftByReceipt(db, { tenantId: tenant, receiptId: 'receipt' }, read), /successfully created/);
+    assert.equal(reads, 1);
+});
 const connectionId = '00000000-0000-4000-8000-000000000001';
 
 class Query {
@@ -237,6 +253,10 @@ describe('mailbox draft update service state machine', () => {
                 method: 'PATCH', url: `/v1/mailboxes/${connectionId}/drafts/draft-1`, payload: input,
             });
             assert.equal(unauthenticated.statusCode, 401);
+            const receiptUrl = '/v1/mailboxes/drafts/receipts/missing';
+            assert.equal((await app.inject({ method: 'GET', url: receiptUrl })).statusCode, 401);
+            assert.equal((await app.inject({ method: 'GET', url: receiptUrl, headers: { 'x-api-key': 'mailbox-http-test-key', 'x-tenant-id': tenant } })).statusCode, 404);
+            assert.equal((await app.inject({ method: 'GET', url: receiptUrl, headers: { 'x-api-key': 'mailbox-http-test-key', 'x-tenant-id': 'foreign' } })).statusCode, 403);
             const longId = 'AAMk' + 'x'.repeat(180) + '/+=';
             const longUrl = `/v1/mailboxes/${connectionId}/drafts/${encodeURIComponent(longId)}`;
             assert.equal((await app.inject({ method: 'GET', url: longUrl })).statusCode, 401);
@@ -251,6 +271,11 @@ describe('mailbox draft update service state machine', () => {
                 allowed_tenants: [tenant], roles: [], capabilities: ['communications:write'],
             }];
             delete process.env.API_KEY;
+            db.tables.api_clients[0].capabilities.push('communications:read');
+            const deniedReceipt = await app.inject({ method: 'GET', url: receiptUrl,
+                headers: { 'x-api-key': 'draft-capability.draft-capability-secret-1234567890', 'x-tenant-id': tenant } });
+            assert.equal(deniedReceipt.statusCode, 403);
+            assert.match(deniedReceipt.json().error, /email:draft/);
             const denied = await app.inject({
                 method: 'PATCH', url: `/v1/mailboxes/${connectionId}/drafts/draft-1`,
                 headers: { 'x-api-key': 'draft-capability.draft-capability-secret-1234567890', 'x-tenant-id': tenant, 'Idempotency-Key': 'capability-denied' },

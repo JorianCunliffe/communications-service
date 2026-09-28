@@ -562,6 +562,17 @@ export function mailboxDraftPreview(providerName, provider, mailboxAddress) {
     };
 }
 
+// Resolve only an exact tenant-owned receipt; never search by subject or recipient.
+export async function getMailboxDraftByReceipt(db, { tenantId, receiptId }, readDraft = getMailboxDraft) {
+    const record = await db.from('mailbox_drafts').select('*').eq('tenant_id', tenantId).eq('id', receiptId).maybeSingle();
+    if (record.error) throw new Error(record.error.message);
+    if (!record.data) return null;
+    if (!record.data.provider_connection_id || !record.data.provider_draft_id || record.data.status !== 'created') {
+        throw draftUpdateError('Receipt does not identify a successfully created draft');
+    }
+    return readDraft(db, { tenantId, connectionId: record.data.provider_connection_id, draftId: record.data.provider_draft_id });
+}
+
 export async function getMailboxDraft(db, { tenantId, connectionId, draftId }) {
     const record = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId).eq('provider_draft_id', draftId).maybeSingle();
