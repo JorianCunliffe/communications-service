@@ -474,7 +474,10 @@ export async function createMailboxDraft(db, { tenantId, connectionId, actorId =
                 const credential = credentialOverride || await accessCredential(db, tenantId, connection);
                 const current = await currentEditableProviderDraft(connection, credential, existing.data.provider_draft_id, providerOps);
                 if (draftFieldsMatch(normalizedUpdateRequest(request), current.fields)) {
-                    const restored = await db.from('mailbox_drafts').update({ status: 'created', last_error: null, updated_at: new Date().toISOString() })
+                    const restored = await db.from('mailbox_drafts').update({ status: 'created', last_error: null,
+                        provider_message_id: current.provider_message_id || existing.data.provider_message_id,
+                        provider_thread_id: current.provider_thread_id || existing.data.provider_thread_id,
+                        updated_at: new Date().toISOString() })
                         .eq('tenant_id', tenantId).eq('id', existing.data.id).eq('status', 'failed').select('*').maybeSingle();
                     if (restored.error) throw new Error(restored.error.message);
                     if (restored.data) return restored.data;
@@ -865,10 +868,14 @@ export async function updateMailboxDraft(db, {
     let receiptCommitted = false;
     try {
         const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+        if (connection.provider === 'gmail' && !draft.data.provider_message_id) {
+            throw draftUpdateError('Gmail draft has no saved message version; review and reconcile it before updating', 409, 'DRAFT_VERSION_UNAVAILABLE');
+        }
         providerStarted = true;
         const providerDraft = connection.provider === 'outlook'
             ? await (providerOps.updateOutlookDraft || updateOutlookDraft)(credential.access_token, draftId, providerRequest)
-            : await (providerOps.updateGmailDraft || updateGmailDraft)(credential.access_token, draftId, providerRequest, connection.provider_account_id);
+            : await (providerOps.updateGmailDraft || updateGmailDraft)(credential.access_token, draftId, providerRequest, connection.provider_account_id,
+                { expectedMessageId: draft.data.provider_message_id });
         if (!providerDraft || providerDraft.id !== draftId) {
             throw draftUpdateError('Provider changed the draft identifier', 409, 'DRAFT_ID_CHANGED');
         }

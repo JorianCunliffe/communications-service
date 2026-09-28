@@ -6,7 +6,7 @@ import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
 import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt, getMailboxDraft } from '../mailboxService.js';
-import { getGmailDraft } from '../gmailMailbox.js';
+import { getGmailDraft, updateGmailDraft } from '../gmailMailbox.js';
 import { getOutlookDraft } from '../outlookMailbox.js';
 
 test('Outlook draft read requests provider web link and plain text without changing update reads', async () => {
@@ -223,6 +223,62 @@ const options = (db, key, request = input, ops = providerOps()) => ({
     credentialOverride: { access_token: 'test' }, providerOps: ops, db,
 });
 
+test('Gmail update rejects a human replacement, retains the baseline, and does not replay a failed key', async () => {
+    const db = new MemoryDb();
+    db.tables.provider_connections[0].provider = 'gmail';
+    let reads = 0; let writes = 0;
+    const ops = { updateGmailDraft: (token, id, body, mailbox, options) => updateGmailDraft(token, id, body, mailbox, {
+        ...options, request: async (_token, _path, request) => {
+            if (request?.method === 'PUT') { writes++; throw new Error('Must not overwrite human content'); }
+            reads++;
+            return { id: 'draft-1', message: { id: 'human-version', labelIds: ['DRAFT'] } };
+        }
+    }) };
+    for (let attempt = 0; attempt < 2; attempt++) {
+        await assert.rejects(updateMailboxDraft(db, options(db, 'human-conflict', input, ops)),
+            error => error.status === 409 && error.code === 'DRAFT_PROVIDER_CHANGED');
+    }
+    assert.equal(reads, 1); assert.equal(writes, 0);
+    assert.equal(db.tables.mailbox_drafts[0].provider_message_id, 'message-1');
+    assert.equal(db.tables.mailbox_drafts[0].revision, 1);
+    assert.equal(db.tables.mailbox_drafts[0].active_update_id, null);
+    assert.equal(db.tables.mailbox_draft_update_receipts[0].status, 'failed');
+});
+
+test('Gmail update persists each replacement message ID as the next guarded baseline', async () => {
+    const db = new MemoryDb();
+    db.tables.provider_connections[0].provider = 'gmail';
+    let version = 1; let writes = 0;
+    const provider = () => ({ id: 'draft-1', message: { id: `message-${version}`, threadId: 'thread-1', labelIds: ['DRAFT'], payload: {
+        headers: [{ name: 'To', value: 'recipient@example.com' }, { name: 'Subject', value: 'Test' }],
+        mimeType: 'text/plain', body: { data: Buffer.from('Original').toString('base64url') }
+    } } });
+    const ops = { updateGmailDraft: (token, id, body, mailbox, options) => updateGmailDraft(token, id, body, mailbox, {
+        ...options, request: async (_token, _path, request) => {
+            if (request?.method === 'PUT') { writes++; version++; }
+            return provider();
+        }
+    }) };
+    for (let i = 1; i <= 2; i++) {
+        const result = await updateMailboxDraft(db, options(db, `update-${i}`, { ...input, revision: i }, ops));
+        assert.equal(result.provider_message_id, `message-${i + 1}`);
+        assert.equal(result.revision, i + 1);
+    }
+    assert.equal(writes, 2);
+    assert.equal(db.tables.mailbox_drafts[0].provider_message_id, 'message-3');
+});
+
+test('Gmail legacy draft without a saved message version is held before any provider mutation', async () => {
+    const db = new MemoryDb({ draft: { provider_message_id: null } });
+    db.tables.provider_connections[0].provider = 'gmail';
+    let calls = 0;
+    await assert.rejects(updateMailboxDraft(db, options(db, 'missing-version', input, {
+        updateGmailDraft: async () => { calls++; }
+    })), error => error.status === 409 && error.code === 'DRAFT_VERSION_UNAVAILABLE');
+    assert.equal(calls, 0);
+    assert.equal(db.tables.mailbox_drafts[0].active_update_id, null);
+});
+
 describe('mailbox draft create recovery', () => {
     const make = () => { const db = new MemoryDb(); db.tables.mailbox_drafts = []; return db; };
     const args = { tenantId: tenant, connectionId, idempotencyKey: 'create-test', request: { to: ['person@example.com'], subject: 'Test', text: 'Body' } };
@@ -266,6 +322,21 @@ describe('mailbox draft create recovery', () => {
         await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }));
         await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /reconciliation/);
         assert.equal(db.tables.mailbox_drafts[0].status, 'failed');
+    });
+    test('Gmail create reconciliation retains the verified message baseline for later updates', async () => {
+        const db = make(); db.tables.provider_connections[0].provider = 'gmail';
+        const providerOps = {
+            createGmailDraft: async () => { throw Object.assign(new Error('read timeout'), { providerDraftId: 'known-draft' }); },
+            getGmailDraft: async () => ({ id: 'known-draft', message: { id: 'verified-message', threadId: 'verified-thread', labelIds: ['DRAFT'], payload: {
+                headers: [{ name: 'Subject', value: 'Test' }, { name: 'To', value: 'person@example.com' }],
+                mimeType: 'text/plain', body: { data: Buffer.from('Body').toString('base64url') }
+            } } }),
+        };
+        await assert.rejects(createMailboxDraft(db, { ...args, credentialOverride, providerOps }), /read timeout/);
+        const result = await createMailboxDraft(db, { ...args, credentialOverride, providerOps });
+        assert.equal(result.status, 'created');
+        assert.equal(result.provider_message_id, 'verified-message');
+        assert.equal(result.provider_thread_id, 'verified-thread');
     });
     test('audit outage does not downgrade successful creation', async () => {
         const db = make(); const from = db.from.bind(db); let calls = 0;

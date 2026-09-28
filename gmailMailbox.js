@@ -330,9 +330,15 @@ export function gmailDraftHasAttachments(draft) {
     return contents.attachments.length > 0;
 }
 
-export async function updateGmailDraft(accessToken, draftId, input, mailboxAddress, { request = gmailRequest } = {}) {
+export async function updateGmailDraft(accessToken, draftId, input, mailboxAddress, { request = gmailRequest, expectedMessageId } = {}) {
     const draft = await request(accessToken, `/drafts/${encodeURIComponent(draftId)}?format=full`);
     assertGmailDraft(draft, draftId);
+    if (expectedMessageId !== undefined && draft.message?.id !== expectedMessageId) {
+        const error = new Error('Gmail draft changed outside this service; review the current draft before updating');
+        error.status = 409;
+        error.code = 'DRAFT_PROVIDER_CHANGED';
+        throw error;
+    }
     if (gmailDraftHasAttachments(draft)) {
         const error = new Error('Gmail drafts with attachments are not supported for in-place updates');
         error.status = 409;

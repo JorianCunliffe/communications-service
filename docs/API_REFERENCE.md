@@ -479,8 +479,17 @@ only `text` replaces the body with plain text and removes the old HTML
 alternative; supplying only `html` replaces the body with HTML and removes
 the old plain-text alternative. When both are supplied, Gmail retains both
 alternatives and Outlook uses HTML. `revision` is an optional current service
-revision for optimistic concurrency between service updates; it does not
-detect edits made directly in the provider mailbox. Provider-specific headers and thread metadata remain
+revision for optimistic concurrency between service updates. Gmail updates
+also compare the provider's current message ID with the last message ID saved
+by this service before issuing the replacement: a mismatch returns `409
+DRAFT_PROVIDER_CHANGED`, and a missing saved baseline returns `409
+DRAFT_VERSION_UNAVAILABLE`. Both require operator review and reconciliation;
+neither silently adopts a newly edited draft as its baseline. Successful
+updates save the replacement message ID for the next update. Gmail's [draft
+message ID changes when its content is replaced](https://developers.google.com/workspace/gmail/api/guides/drafts).
+This read-before-write guard is not an atomic provider compare-and-swap and
+does not prove protection against edits racing the PUT. Outlook direct-edit
+conflict detection remains unsupported. Provider-specific headers and thread metadata remain
 preserved, but are not client-editable through this provider-neutral route.
 At least one editable field must be supplied.
 Update receipts use `reserved` (not started), `applying`, `updated`, `failed`,
