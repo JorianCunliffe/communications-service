@@ -22,7 +22,7 @@ import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { normaliseAddresses, outboundEmailRequest } from './email.js';
 import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
-import { createMailboxDraft, getMailboxDraft, getMailboxDraftByReceipt, listMailboxConnections, syncMailbox, updateMailboxDraft } from './mailboxService.js';
+import { adoptMailboxDraftBaseline, createMailboxDraft, getMailboxDraft, getMailboxDraftByReceipt, listMailboxConnections, syncMailbox, updateMailboxDraft } from './mailboxService.js';
 import { ingestMeeting, getMeeting, findMeetingBySource, listMeetings, MeetingError } from './meetings.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
@@ -340,6 +340,21 @@ export default async function v1Routes(fastify, options = {}) {
                 draftId: request.params.draftId,
             });
             return draft || reply.code(404).send({ error: 'Mailbox draft not found' });
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
+    });
+
+    fastify.post('/mailboxes/:connectionId/drafts/:draftId/baseline', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const draft = await adoptMailboxDraftBaseline(db, {
+                tenantId: request.tenantId,
+                connectionId: request.params.connectionId,
+                draftId: request.params.draftId,
+                actorId: request.body?.initiator_id || request.authContext?.keyId,
+                reviewedContentHash: request.body?.reviewed_content_hash,
+                expectedRevision: request.body?.expected_revision,
+            });
+            return reply.code(200).send(draft);
         } catch (error) { return errorReply(reply, error, error.status || 502); }
     });
 

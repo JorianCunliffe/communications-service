@@ -578,9 +578,7 @@ export async function getMailboxDraftByReceipt(db, { tenantId, receiptId }, read
     return readDraft(db, { tenantId, connectionId: record.data.provider_connection_id, draftId: record.data.provider_draft_id });
 }
 
-export async function getMailboxDraft(db, { tenantId, connectionId, draftId }, deps = {
-    accessCredential, getOutlookDraft, getGmailDraft,
-}) {
+async function readReviewableProviderDraft(db, { tenantId, connectionId, draftId }, deps) {
     const record = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId).eq('provider_draft_id', draftId).maybeSingle();
     if (record.error) throw new Error(record.error.message);
@@ -602,13 +600,84 @@ export async function getMailboxDraft(db, { tenantId, connectionId, draftId }, d
             throw draftUpdateError('Provider object is no longer an editable draft', 409, 'DRAFT_NOT_EDITABLE');
         }
     }
+    const preview = mailboxDraftPreview(connection.provider, provider, connection.provider_account_id);
+    return { record: record.data, connection, provider, preview: { ...preview, content_hash: draftContentHash(preview) } };
+}
+
+/** Hash of exactly what a reviewer sees; fetch time and links are excluded. */
+export function draftContentHash(preview) {
+    const list = value => (Array.isArray(value) ? value : []).map(item => String(item).trim().toLowerCase()).sort();
+    return requestHash({
+        subject: String(preview.subject ?? ''), to: list(preview.to), cc: list(preview.cc), bcc: list(preview.bcc),
+        body: String(preview.body ?? ''), body_type: preview.body_type, truncated: preview.truncated === true,
+    });
+}
+
+export async function getMailboxDraft(db, { tenantId, connectionId, draftId }, deps = {
+    accessCredential, getOutlookDraft, getGmailDraft,
+}) {
+    const read = await readReviewableProviderDraft(db, { tenantId, connectionId, draftId }, deps);
+    if (!read) return null;
+    const { record, connection, provider, preview } = read;
     return {
-        ...record.data,
-        preview: mailboxDraftPreview(connection.provider, provider, connection.provider_account_id),
+        ...record,
+        preview,
         provider: connection.provider === 'outlook'
             ? { id: provider.id, message_id: provider.id, thread_id: provider.conversationId, is_draft: provider.isDraft }
             : { id: provider.id, message_id: provider.message?.id, thread_id: provider.message?.threadId, is_draft: true },
     };
+}
+
+/**
+ * Adopt a reviewed provider version for a legacy draft saved before version
+ * tracking. The provider is read, never written: the saved version is taken
+ * from the same read whose content matched the reviewer's approved hash, and
+ * it is stored only while no version, update or newer revision exists.
+ */
+export async function adoptMailboxDraftBaseline(db, {
+    tenantId, connectionId, draftId, actorId = null, reviewedContentHash, expectedRevision,
+}, deps = { accessCredential, getOutlookDraft, getGmailDraft }) {
+    if (typeof reviewedContentHash !== 'string' || !/^[a-f0-9]{64}$/.test(reviewedContentHash)) {
+        throw draftUpdateError('reviewed_content_hash from the draft preview is required', 422, 'INVALID_BASELINE_REVIEW');
+    }
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+        throw draftUpdateError('expected_revision must be a positive integer', 422, 'INVALID_REVISION');
+    }
+    const read = await readReviewableProviderDraft(db, { tenantId, connectionId, draftId }, deps);
+    if (!read) throw draftUpdateError('Mailbox draft not found', 404, 'DRAFT_NOT_FOUND');
+    const { record, connection, provider, preview } = read;
+    const versionField = connection.provider === 'outlook' ? 'provider_change_key' : 'provider_message_id';
+    if (record.status !== 'created') {
+        throw draftUpdateError('Mailbox draft is not editable until its provider state is reconciled', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    if (record.active_update_id) {
+        throw draftUpdateError('Another draft update is in progress; retry after the active update completes', 409, 'DRAFT_UPDATE_IN_PROGRESS');
+    }
+    if (Number(record.revision || 1) !== expectedRevision) {
+        throw draftUpdateError('Draft revision changed; reload the draft before reviewing it', 409, 'STALE_REVISION');
+    }
+    if (record[versionField]) {
+        throw draftUpdateError('Draft already has a saved provider version', 409, 'BASELINE_NOT_REQUIRED');
+    }
+    if (preview.content_hash !== reviewedContentHash) {
+        throw draftUpdateError('Draft changed in the mailbox since it was reviewed; review the current draft', 409, 'DRAFT_PROVIDER_CHANGED');
+    }
+    const version = connection.provider === 'outlook' ? provider.changeKey : provider.message?.id;
+    if (typeof version !== 'string' || !version) {
+        throw draftUpdateError('Provider did not return a draft version', 409, 'DRAFT_VERSION_UNAVAILABLE');
+    }
+    const adopted = await db.from('mailbox_drafts').update({ [versionField]: version, updated_at: new Date().toISOString() })
+        .eq('tenant_id', tenantId).eq('id', record.id).eq('provider_draft_id', draftId).eq('status', 'created')
+        .eq('revision', expectedRevision).is('active_update_id', null).is(versionField, null)
+        .select('*').maybeSingle();
+    if (adopted.error) throw new Error(adopted.error.message);
+    if (!adopted.data) {
+        throw draftUpdateError('Draft changed while its baseline was being saved; review it again', 409, 'DRAFT_UPDATE_CONFLICT');
+    }
+    await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.baseline_adopted', 'succeeded', {
+        draft_id: draftId, revision: expectedRevision, content_hash: reviewedContentHash,
+    }).catch(() => {});
+    return { ...updateResult(adopted.data), baseline_adopted: true, content_hash: reviewedContentHash };
 }
 
 function draftUpdateError(message, status = 409, code = 'DRAFT_UPDATE_CONFLICT') {
