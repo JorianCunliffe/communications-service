@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
-import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt, getMailboxDraft } from '../mailboxService.js';
+import { outlookProviderTenantId, updateMailboxDraft, mailboxDraftPreview, createMailboxDraft, getMailboxDraftByReceipt, getMailboxDraft, adoptMailboxDraftBaseline, draftContentHash } from '../mailboxService.js';
 import { getGmailDraft, updateGmailDraft } from '../gmailMailbox.js';
 import { getOutlookDraft, updateOutlookDraft } from '../outlookMailbox.js';
 
@@ -606,4 +606,57 @@ describe('mailbox draft update service state machine', () => {
         assert.equal(db.tables.mailbox_drafts[0].active_update_id, null);
         assert.equal(db.tables.mailbox_draft_update_receipts[0].status, 'failed');
     });
+});
+
+test('reviewed baseline adoption saves the exact read version of a legacy Outlook draft and never writes the provider', async () => {
+    const db = new MemoryDb({ draft: { provider_change_key: null } });
+    let provider = { id: 'draft-1', isDraft: true, changeKey: 'reviewed-key', conversationId: 'thread-1', subject: 'Old routing question',
+        toRecipients: [{ emailAddress: { address: 'Person@Example.com' } }], body: { contentType: 'text', content: 'Which team should handle this?' } };
+    const deps = { accessCredential: async () => ({ access_token: 'test-only' }), getOutlookDraft: async () => provider,
+        getGmailDraft: async () => { throw new Error('Outlook only'); } };
+    const args = { tenantId: tenant, connectionId, draftId: 'draft-1', actorId: 'reviewer' };
+    const reviewed = await getMailboxDraft(db, args, deps);
+    assert.equal(reviewed.preview.content_hash, draftContentHash(reviewed.preview));
+    const hash = reviewed.preview.content_hash;
+
+    await assert.rejects(adoptMailboxDraftBaseline(db, { ...args, reviewedContentHash: 'nope', expectedRevision: 1 }, deps), error => error.status === 422);
+    await assert.rejects(adoptMailboxDraftBaseline(db, { ...args, reviewedContentHash: hash, expectedRevision: 2 }, deps), error => error.code === 'STALE_REVISION');
+    provider = { ...provider, changeKey: 'human-edit', body: { contentType: 'text', content: 'Edited in Outlook' } };
+    await assert.rejects(adoptMailboxDraftBaseline(db, { ...args, reviewedContentHash: hash, expectedRevision: 1 }, deps), error => error.code === 'DRAFT_PROVIDER_CHANGED');
+    db.tables.mailbox_drafts[0].active_update_id = 'other-update';
+    provider = { ...provider, changeKey: 'reviewed-key', body: { contentType: 'text', content: 'Which team should handle this?' } };
+    await assert.rejects(adoptMailboxDraftBaseline(db, { ...args, reviewedContentHash: hash, expectedRevision: 1 }, deps), error => error.code === 'DRAFT_UPDATE_IN_PROGRESS');
+    db.tables.mailbox_drafts[0].active_update_id = null;
+    assert.equal(db.tables.mailbox_drafts[0].provider_change_key, null);
+
+    const adopted = await adoptMailboxDraftBaseline(db, { ...args, reviewedContentHash: hash, expectedRevision: 1 }, deps);
+    assert.equal(adopted.baseline_adopted, true);
+    assert.equal(adopted.revision, 1);
+    assert.equal(db.tables.mailbox_drafts[0].provider_change_key, 'reviewed-key');
+    assert.equal(db.tables.mailbox_audit_events.at(-1).action, 'mailbox.draft.baseline_adopted');
+    await assert.rejects(adoptMailboxDraftBaseline(db, { ...args, reviewedContentHash: hash, expectedRevision: 1 }, deps), error => error.code === 'BASELINE_NOT_REQUIRED');
+
+    // The update then runs under the adopted version guard.
+    const guards = [];
+    const updated = await updateMailboxDraft(db, { ...args, idempotencyKey: 'after-baseline', request: { subject: 'Inspection confirmed', text: 'See you Thursday' },
+        credentialOverride: { access_token: 'test-only' }, providerOps: {
+            updateOutlookDraft: async (_token, id, _request, options) => { guards.push(options.expectedChangeKey); return { id, isDraft: true, changeKey: 'next-key', conversationId: 'thread-1' }; },
+        } });
+    assert.deepEqual(guards, ['reviewed-key']);
+    assert.equal(updated.revision, 2);
+    assert.equal(db.tables.mailbox_drafts[0].provider_change_key, 'next-key');
+});
+
+test('baseline adoption refuses a version saved concurrently during review', async () => {
+    const db = new MemoryDb({ draft: { provider_change_key: null } });
+    const provider = { id: 'draft-1', isDraft: true, changeKey: 'reviewed-key', subject: 'S', body: { contentType: 'text', content: 'B' } };
+    const deps = { accessCredential: async () => ({ access_token: 'test-only' }), getOutlookDraft: async () => {
+        // Another writer saves a version after the record read but before the conditional update.
+        db.tables.mailbox_drafts[0] = { ...db.tables.mailbox_drafts[0], provider_change_key: 'raced-key' };
+        return provider;
+    }, getGmailDraft: async () => null };
+    const hash = draftContentHash(mailboxDraftPreview('outlook', provider, 'owner@example.com'));
+    await assert.rejects(adoptMailboxDraftBaseline(db, { tenantId: tenant, connectionId, draftId: 'draft-1', reviewedContentHash: hash, expectedRevision: 1 }, deps),
+        error => error.code === 'DRAFT_UPDATE_CONFLICT');
+    assert.equal(db.tables.mailbox_drafts[0].provider_change_key, 'raced-key');
 });
