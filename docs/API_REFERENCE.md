@@ -465,6 +465,23 @@ Both Outlook and Gmail are supported. Gmail reads use the draft resource ID (not
 
 `GET /v1/mailboxes/drafts/receipts/:receiptId` performs the same live verification using the internal creation receipt ID. Requires `communications:read` and `email:draft`. The exact receipt is resolved within the authenticated tenant; its saved connection and provider draft ID are used. Missing receipts return 404; unsuccessful receipts or records lacking provider identity return 409. This read-only operation never replays creation, edits content, or sends email. The result includes receipt identity, original communication and connection IDs, and the live `provider` and `preview` fields, as on the existing draft read route.
 
+The draft read's `preview.content_hash` is a SHA-256 of the previewed subject, recipients, body, body type and truncation flag. It excludes fetch time and links.
+
+```http
+POST /v1/mailboxes/:connectionId/drafts/:draftId/baseline
+Content-Type: application/json
+
+{ "reviewed_content_hash": "<preview.content_hash>", "expected_revision": 1 }
+```
+
+Adopts a reviewed provider version for a legacy draft that was saved before version tracking. Outlook drafts have no `provider_change_key`; Gmail drafts have no `provider_message_id`. Updates to such drafts return `409 DRAFT_VERSION_UNAVAILABLE` until this is done. Requires `email:draft`. The service reads the provider draft and never writes to it. It stores the version from that same read only if all of these hold:
+
+- the content hash still equals the reviewer's approved hash;
+- the record is `created`, at `expected_revision`, with no active update;
+- the record still has no saved version.
+
+Errors are `409 DRAFT_PROVIDER_CHANGED`, `STALE_REVISION`, `DRAFT_UPDATE_IN_PROGRESS`, `BASELINE_NOT_REQUIRED` or `DRAFT_UPDATE_CONFLICT`, or `422` for invalid input. A later `PATCH` then updates the draft under the normal provider-version guard. The adoption is audited as `mailbox.draft.baseline_adopted`.
+
 ```http
 PATCH /v1/mailboxes/:connectionId/drafts/:draftId
 Idempotency-Key: stable-update-key
