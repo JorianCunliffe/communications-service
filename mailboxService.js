@@ -445,6 +445,20 @@ function requestHash(value) {
     return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+const UPDATE_REQUEST_HASH_FIELDS = ['to', 'cc', 'bcc', 'reply_to', 'subject', 'text', 'html', 'revision'];
+
+function updateRequestHash(request, recoveryBinding = null) {
+    const hashRequest = Object.fromEntries(UPDATE_REQUEST_HASH_FIELDS
+        .filter(key => request?.[key] !== undefined)
+        .map(key => [key, request[key]]));
+    const canonicalBinding = recoveryBinding ? {
+        failed_update_receipt_id: recoveryBinding.failed_update_receipt_id,
+        reviewed_content_hash: recoveryBinding.reviewed_content_hash,
+        expected_revision: recoveryBinding.expected_revision,
+    } : null;
+    return requestHash(canonicalBinding ? { ...hashRequest, recovery_binding: canonicalBinding } : hashRequest);
+}
+
 export async function createMailboxDraft(db, { tenantId, connectionId, actorId = null, idempotencyKey, request, credentialOverride, providerOps = {} }) {
     if (!idempotencyKey) throw new Error('Idempotency-Key header is required for mailbox drafts');
     const connection = await selectedConnection(db, tenantId, connectionId);
@@ -740,6 +754,99 @@ function recoveryBindingFromReceipt(receipt) {
     return binding;
 }
 
+function validStoredEditableRequest(request) {
+    if (!request || typeof request !== 'object' || Array.isArray(request)
+        || Object.keys(request).length === 0
+        || Object.keys(request).some(key => !DRAFT_EDITABLE_FIELDS.includes(key))) return false;
+    return Object.entries(request).every(([key, value]) => {
+        const isRecipientList = ['to', 'cc', 'bcc', 'reply_to'].includes(key);
+        return isRecipientList
+            ? Array.isArray(value) && value.every(item => typeof item === 'string')
+            : typeof value === 'string';
+    });
+}
+
+function hasExactKeys(value, keys) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value).length === keys.length
+        && keys.every(key => Object.hasOwn(value, key));
+}
+
+function matchingStoredEditableRequest(left, right) {
+    const leftFields = editableReceiptRequest(left);
+    const rightFields = editableReceiptRequest(right);
+    return Object.keys(leftFields).length === Object.keys(rightFields).length
+        && Object.keys(leftFields).every(key => Object.hasOwn(rightFields, key)
+            && JSON.stringify(leftFields[key]) === JSON.stringify(rightFields[key]));
+}
+
+function verifiedLinkedRecoveryResult(candidate, {
+    original, draft, tenantId, connectionId, draftId,
+}) {
+    const baseRevision = original.base_revision;
+    if (!Number.isInteger(baseRevision) || baseRevision < 1
+        || original.status !== 'failed' || original.error_code !== 'DRAFT_PROVIDER_CHANGED'
+        || Number(original.error_status) !== 409
+        || !validStoredEditableRequest(original.update_request)) return null;
+
+    const request = candidate?.update_request;
+    const binding = request?.recovery_binding;
+    if (candidate?.status !== 'updated'
+        || typeof candidate.id !== 'string' || !candidate.id || candidate.id === original.id
+        || typeof candidate.idempotency_key !== 'string' || !candidate.idempotency_key
+        || candidate.idempotency_key === original.idempotency_key
+        || candidate.tenant_id !== tenantId
+        || candidate.provider_connection_id !== connectionId
+        || candidate.mailbox_draft_id !== draft.id
+        || !Number.isInteger(candidate.base_revision) || candidate.base_revision !== baseRevision
+        || !request || typeof request !== 'object' || Array.isArray(request)
+        || !hasExactKeys(binding, ['failed_update_receipt_id', 'reviewed_content_hash', 'expected_revision'])
+        || binding.failed_update_receipt_id !== original.id
+        || typeof binding.reviewed_content_hash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(binding.reviewed_content_hash)
+        || !Number.isInteger(binding.expected_revision) || binding.expected_revision !== baseRevision
+        || Object.keys(request).some(key => key !== 'recovery_binding' && !DRAFT_EDITABLE_FIELDS.includes(key))) return null;
+
+    const candidateEditable = editableReceiptRequest(request);
+    if (!validStoredEditableRequest(candidateEditable)
+        || Object.keys(request).length !== Object.keys(candidateEditable).length + 1
+        || !matchingStoredEditableRequest(original.update_request, candidateEditable)
+        || candidate.request_hash !== updateRequestHash({
+            ...candidateEditable,
+            revision: binding.expected_revision,
+        }, binding)) return null;
+
+    const result = candidate.result;
+    const currentRevision = Number(draft.revision || 1);
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+        || result.id !== draft.id
+        || result.status !== 'created'
+        || result.provider_draft_id !== draftId
+        || result.provider_message_id !== draftId
+        || !Number.isInteger(result.revision) || result.revision !== baseRevision + 1
+        || !Number.isInteger(currentRevision) || currentRevision < result.revision
+        || typeof result.provider_change_key !== 'string' || !result.provider_change_key.trim()
+        || result.update_receipt_id !== candidate.id
+        || result.recovered_from_receipt_id !== original.id
+        || result.reviewed_content_hash !== binding.reviewed_content_hash) return null;
+    return result;
+}
+
+async function completedLinkedRecoveryResult(db, {
+    tenantId, connectionId, draft, draftId, original,
+}) {
+    const linked = await db.from('mailbox_draft_update_receipts').select('*')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+        .eq('mailbox_draft_id', draft.id)
+        .contains('update_request', { recovery_binding: { failed_update_receipt_id: original.id } });
+    if (linked.error) throw new Error(linked.error.message);
+    const completed = (linked.data || []).filter(receipt => receipt.status === 'updated');
+    if (completed.length !== 1) return null;
+    return verifiedLinkedRecoveryResult(completed[0], {
+        original, draft, tenantId, connectionId, draftId,
+    });
+}
+
 function editableReceiptRequest(request = {}) {
     return Object.fromEntries(DRAFT_EDITABLE_FIELDS
         .filter(key => request[key] !== undefined)
@@ -882,15 +989,12 @@ export async function updateMailboxDraft(db, {
 }) {
     if (!idempotencyKey) throw draftUpdateError('Idempotency-Key header is required for mailbox draft updates', 400, 'IDEMPOTENCY_REQUIRED');
     const connection = await selectedConnection(db, tenantId, connectionId);
-    const hashRequest = Object.fromEntries(['to', 'cc', 'bcc', 'reply_to', 'subject', 'text', 'html', 'revision']
-        .filter(key => request?.[key] !== undefined)
-        .map(key => [key, request[key]]));
     const recoveryBinding = reviewedRecovery ? {
         failed_update_receipt_id: reviewedRecovery.failedUpdateReceiptId,
         reviewed_content_hash: reviewedRecovery.reviewedContentHash,
         expected_revision: reviewedRecovery.expectedRevision,
     } : null;
-    const hash = requestHash(recoveryBinding ? { ...hashRequest, recovery_binding: recoveryBinding } : hashRequest);
+    const hash = updateRequestHash(request, recoveryBinding);
     const draft = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
         .eq('provider_draft_id', draftId).maybeSingle();
@@ -910,6 +1014,14 @@ export async function updateMailboxDraft(db, {
         }
         if (existing.data.status === 'updated') return existing.data.result || updateResult(draft.data);
         if (existing.data.status === 'failed') {
+            if (connection.provider === 'outlook'
+                && existing.data.error_code === 'DRAFT_PROVIDER_CHANGED'
+                && Number(existing.data.error_status) === 409) {
+                const recovered = await completedLinkedRecoveryResult(db, {
+                    tenantId, connectionId, draft: draft.data, draftId, original: existing.data,
+                });
+                if (recovered) return recovered;
+            }
             throw draftUpdateError(existing.data.last_error || 'Draft update previously failed', existing.data.error_status || 502, existing.data.error_code || 'DRAFT_PROVIDER_FAILED');
         }
         if (['applying', 'uncertain'].includes(existing.data.status)) {

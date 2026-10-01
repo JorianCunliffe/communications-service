@@ -526,8 +526,22 @@ successful response includes `update_receipt_id` and
 `recovered_from_receipt_id` alongside the unchanged provider draft ID and
 incremented revision, so a caller can resume its existing workflow with the
 superseding receipt. Exact retries return that same durable result, including
-after the draft revision advances. The failed original receipt remains failed;
-it is never replayed or rewritten.
+after the draft revision advances. Keep using this `POST .../recover` flow for
+new recovery attempts; it always requires a new idempotency key.
+
+After a recovery has durably completed and its linked result passes receipt,
+scope, payload, revision, provider-ID, change-key and hash checks, retrying the
+`PATCH /v1/mailboxes/:connectionId/drafts/:draftId` with the original
+idempotency key and the same editable field values and optional `revision`
+(including the same revision value, if supplied) now returns that verified
+recovery result. This lookup is read-only: it performs no provider request,
+claim, receipt update, or new audit write, even when later edits have advanced
+the current service revision. It returns the historical verified result; it
+does not recheck or assert current Outlook content. An incomplete, unrelated,
+or still-uncertain recovery does not resolve the old key, which continues to
+return its original `409 DRAFT_PROVIDER_CHANGED` failure until a properly
+verified recovery is finalized. The original failed receipt, error, history
+and audits remain unchanged; it is never replayed or rewritten.
 
 ```http
 PATCH /v1/mailboxes/:connectionId/drafts/:draftId

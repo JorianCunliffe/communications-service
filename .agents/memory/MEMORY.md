@@ -3,3 +3,4 @@
 - [GitHub graph-preserving fallback](github-graph-preserving-push.md) — if shell auth fails, Git Data API can preserve exact local-only history with verified non-force ref updates.
 - [Phase 03 production migration](phase03-production-migration.md) — skip Replit's destructive generic diff; let the transactional repository runner backfill identities.
 - [Outlook body verification](outlook-body-verification.md) — Graph's default HTML projection can differ from a text update; recovery must verify the effective body representation and its version.
+- [Recovery idempotency](recovery-idempotency.md) — paused runs retain their original operation key; verified successor replay preserves failure history, and receipt hashes must survive JSONB ordering.
