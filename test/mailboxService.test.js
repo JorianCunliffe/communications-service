@@ -115,6 +115,15 @@ class MemoryDb {
         };
     }
     from(table) { return new Query(this, table); }
+    async transaction(work) { return work(this); }
+    async lockMailboxDraftUpdateClaim(args) {
+        return this.tables.mailbox_drafts.some(row => row.tenant_id === args.p_tenant_id
+            && row.provider_connection_id === args.p_provider_connection_id
+            && row.id === args.p_mailbox_draft_id
+            && row.provider_draft_id === args.p_provider_draft_id
+            && row.revision === args.p_expected_revision
+            && row.active_update_id === args.p_receipt_id);
+    }
     async rpc(name, args) {
         if (name === 'claim_mailbox_draft_update') {
             const draft = this.tables.mailbox_drafts.find(row => row.id === args.p_mailbox_draft_id
@@ -875,6 +884,271 @@ const recoveryCall = (db, reviewedContentHash, extras = {}) => recoverMailboxDra
     providerOps: extras.providerOps || {},
 });
 
+// Exact controlled-test body from the production preview: no CRLF or trailing LF.
+const controlledRecoveryBody = 'Hi Jorian,\n\nThis is a controlled test response to your enquiry regarding 80 Martyn St.\n\nPlease note that our minimum stay requirement is one month, and we do not offer shorter-stay exceptions, so we cannot accommodate your request for a one-week stay.\n\nAs part of this controlled test, we have proposed the following TEST ONLY inspection slots on Tuesday, 6 October 2026 (Australia/Brisbane):\n- Lady Loeven (8 Loeven St) at 15:15-15:30\n- The Martyn (80 Martyn St) at 16:00-16:15\n\nThese slots are for testing purposes only and do not represent a real booking.\n\nRegards,\nThe Cairns Sharehouse Team';
+
+const uncertainLinkedFixture = ({ includeRevision = true, allRecipients = false } = {}) => {
+    const editable = {
+        to: ['person@example.com'],
+        ...(allRecipients ? { cc: [], bcc: [], reply_to: [] } : {}),
+        subject: 'RE: 80 Martyn st enquiry',
+        text: controlledRecoveryBody,
+    };
+    const request = { ...editable, ...(includeRevision ? { revision: 3 } : {}) };
+    const original = failedChangedReceipt({
+        base_revision: 3, update_request: editable, request_hash: requestHash(request),
+    });
+    const receipt = completedRecoveryReceipt(original, {
+        status: 'uncertain', result: null, error_code: 'DRAFT_RECONCILIATION_REQUIRED',
+        last_error: 'Outlook recovery response does not verify the requested draft update',
+        lease_until: '2026-01-01T00:00:00.000Z',
+    });
+    const db = new MemoryDb({
+        draft: { revision: 3, active_update_id: receipt.id, active_update_lease_until: receipt.lease_until },
+        receipts: [original, receipt],
+    });
+    const provider = liveRecoveryProvider({
+        subject: editable.subject,
+        toRecipients: [{ emailAddress: { name: 'Jorian Cunliffe', address: editable.to[0] } }],
+        body: { contentType: 'Text', content: editable.text },
+    });
+    return { db, original, receipt, request, provider };
+};
+
+test('original unchanged PATCH reconciles the existing uncertain receipt despite Outlook display names and refreshed review hash', async () => {
+    for (const includeRevision of [true, false]) {
+        const { db, original, receipt, request, provider } = uncertainLinkedFixture({ includeRevision });
+        const originalBefore = structuredClone(original);
+        const storedRequest = structuredClone(receipt.update_request);
+        const storedHash = receipt.request_hash;
+        assert.equal(controlledRecoveryBody.length, 595);
+        const preview = mailboxDraftPreview('outlook', provider);
+        assert.deepEqual(preview.to, ['Jorian Cunliffe <person@example.com>']);
+        assert.notEqual(draftContentHash(preview), receipt.update_request.recovery_binding.reviewed_content_hash);
+        let reads = 0;
+        const ops = {
+            getOutlookDraft: (_token, id, opts) => getOutlookDraft(_token, id, {
+                ...opts,
+                request: async (_credential, path, init) => {
+                    reads++;
+                    assert.match(path, /^me\/messages\/draft-1\?\$select=/);
+                    assert.deepEqual(init, { headers: { Prefer: 'outlook.body-content-type="text"' } });
+                    return provider;
+                },
+            }),
+            updateOutlookDraft: async () => assert.fail('Reconciliation must not PATCH Outlook'),
+            createOutlookDraft: async () => assert.fail('Reconciliation must not create another draft'),
+        };
+        const result = await updateMailboxDraft(db, options(db, original.idempotency_key, request, ops));
+        assert.equal(reads, 1);
+        assert.equal(db.rpcCalls, 1);
+        assert.equal(db.tables.mailbox_draft_update_receipts.length, 2);
+        assert.equal(result.revision, 4);
+        assert.equal(result.provider_draft_id, 'draft-1');
+        assert.equal(result.provider_change_key, provider.changeKey);
+        assert.equal(result.update_receipt_id, receipt.id);
+        assert.equal(result.recovered_from_receipt_id, original.id);
+        assert.equal(result.reviewed_content_hash, storedRequest.recovery_binding.reviewed_content_hash);
+        assert.equal(receipt.status, 'updated');
+        assert.deepEqual(receipt.update_request, storedRequest);
+        assert.equal(receipt.request_hash, storedHash);
+        assert.deepEqual(original, originalBefore);
+        assert.equal(db.tables.mailbox_drafts[0].active_update_id, null);
+        assert.equal(db.tables.mailbox_audit_events.length, 0);
+        const after = JSON.stringify(db.tables);
+        db.tables.mailbox_drafts[0].revision = 6;
+        const later = JSON.stringify(db.tables);
+        assert.deepEqual(await updateMailboxDraft(db, options(db, original.idempotency_key, request, ops)), result);
+        assert.equal(JSON.stringify(db.tables), later);
+        assert.equal(reads, 1);
+        assert.notEqual(after, later);
+    }
+});
+
+test('original retry reconciliation blocks substantive provider differences without modifying either receipt', async () => {
+    const mutations = [
+        p => { p.subject += ' changed'; },
+        p => { p.body.content += '\n'; },
+        p => { p.body.content = p.body.content.replace(/\n/g, '\r\n'); },
+        p => { p.body.content = p.body.content.replace('one month', 'one week'); },
+        p => { p.body.content = p.body.content.replace('15:15-15:30', '15:30-15:45'); },
+        p => { p.body.content = p.body.content.replace('TEST ONLY', 'CONFIRMED'); },
+        p => { p.toRecipients[0].emailAddress.address = 'other@example.com'; },
+        p => { p.toRecipients.push(structuredClone(p.toRecipients[0])); },
+        p => { p.toRecipients = []; },
+        p => { p.ccRecipients = [{ emailAddress: { address: 'other@example.com' } }]; },
+        p => { p.bccRecipients = [{ emailAddress: { address: 'other@example.com' } }]; },
+        p => { p.replyTo = [{ emailAddress: { address: 'other@example.com' } }]; },
+        p => { p.toRecipients[0].emailAddress.name = 'other@example.com, Jorian'; },
+        p => { p.id = 'another-draft'; },
+        p => { p.isDraft = false; },
+        p => { p.changeKey = ''; },
+        p => { delete p.bccRecipients; },
+        p => { p.body.contentType = 'HTML'; },
+    ];
+    for (const mutate of mutations) {
+        const { db, original, request, provider } = uncertainLinkedFixture({ allRecipients: true });
+        mutate(provider);
+        const before = JSON.stringify(db.tables);
+        let reads = 0;
+        await assert.rejects(updateMailboxDraft(db, options(db, original.idempotency_key, request, {
+            getOutlookDraft: async () => { reads++; return provider; },
+            updateOutlookDraft: async () => assert.fail('Must never overwrite a provider mismatch'),
+        })), error => error.code === 'DRAFT_RECONCILIATION_REQUIRED');
+        assert.equal(reads, 1);
+        assert.equal(db.rpcCalls, 0);
+        assert.equal(JSON.stringify(db.tables), before);
+    }
+});
+
+test('invalid, foreign, inactive and ambiguous uncertain successors block before provider access', async () => {
+    const mutations = [
+        ({ receipt }) => { receipt.tenant_id = 'foreign'; },
+        ({ receipt }) => { receipt.provider_connection_id = 'foreign'; },
+        ({ receipt }) => { receipt.mailbox_draft_id = 'foreign'; },
+        ({ receipt }) => { receipt.update_request.recovery_binding.failed_update_receipt_id = 'foreign'; },
+        ({ receipt }) => { receipt.update_request.recovery_binding.extra = true; },
+        ({ receipt }) => { receipt.update_request.recovery_binding.reviewed_content_hash = 'invalid'; },
+        ({ receipt }) => { receipt.update_request.recovery_binding.expected_revision = 4; },
+        ({ receipt }) => { receipt.request_hash = 'a'.repeat(64); },
+        ({ receipt }) => { receipt.update_request.text += 'Changed'; },
+        ({ receipt }) => { receipt.base_revision = 4; },
+        ({ receipt, original }) => { receipt.idempotency_key = original.idempotency_key; },
+        ({ receipt }) => { receipt.result = { status: 'created' }; },
+        ({ receipt }) => { receipt.status = 'reserved'; },
+        ({ db }) => { db.tables.mailbox_drafts[0].revision = 4; },
+        ({ db }) => { db.tables.mailbox_drafts[0].active_update_id = null; },
+        ({ db }) => { db.tables.mailbox_drafts[0].active_update_id = 'someone-else'; },
+        ({ db, receipt }) => { db.tables.mailbox_draft_update_receipts.push({ ...structuredClone(receipt), id: 'ambiguous' }); },
+        ({ db, original }) => { db.tables.mailbox_draft_update_receipts.push(completedRecoveryReceipt(original, { id: 'already-completed' })); },
+    ];
+    for (const mutate of mutations) {
+        const fixture = uncertainLinkedFixture();
+        mutate(fixture);
+        const { db, original, request } = fixture;
+        const before = JSON.stringify(db.tables);
+        await assert.rejects(updateMailboxDraft(db, options(db, original.idempotency_key, request, {
+            getOutlookDraft: async () => assert.fail('Invalid linkage must not read provider'),
+            updateOutlookDraft: async () => assert.fail('Invalid linkage must not write provider'),
+        })), error => error.code === 'DRAFT_PROVIDER_CHANGED');
+        assert.equal(JSON.stringify(db.tables), before);
+        assert.equal(db.rpcCalls, 0);
+    }
+});
+
+test('changed raw original request and live or unverifiable leases cannot reconcile', async () => {
+    for (const change of [
+        f => { f.request.revision = 4; },
+        f => { f.request.to = ['Jorian Cunliffe <person@example.com>']; },
+        f => { f.request.text += '\n'; },
+    ]) {
+        const f = uncertainLinkedFixture();
+        change(f);
+        await assert.rejects(updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
+            getOutlookDraft: async () => assert.fail('Changed raw input must not read provider'),
+        })), e => e.code === 'IDEMPOTENCY_CONFLICT');
+    }
+    for (const change of [
+        f => { f.receipt.lease_until = new Date(Date.now() + 90_000).toISOString(); },
+        f => { f.receipt.lease_until = null; },
+        f => { f.receipt.lease_until = 'invalid'; },
+        f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = new Date(Date.now() + 90_000).toISOString(); },
+    ]) {
+        const f = uncertainLinkedFixture();
+        change(f);
+        const before = JSON.stringify(f.db.tables);
+        await assert.rejects(updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
+            getOutlookDraft: async () => assert.fail('Lease must expire before provider access'),
+        })), e => e.code === 'DRAFT_UPDATE_IN_PROGRESS');
+        assert.equal(JSON.stringify(f.db.tables), before);
+    }
+});
+
+test('a provider outage or concurrent claim change leaves original retry reconciliation held', async () => {
+    for (const failure of ['provider', 'claim', 'cleared-claim', 'revision']) {
+        const f = uncertainLinkedFixture();
+        const originalBefore = structuredClone(f.original);
+        await assert.rejects(updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
+            getOutlookDraft: async () => {
+                if (failure === 'provider') throw new Error('Graph unavailable');
+                if (failure === 'claim') f.db.tables.mailbox_drafts[0].active_update_id = 'another-claim';
+                if (failure === 'cleared-claim') f.db.tables.mailbox_drafts[0].active_update_id = null;
+                if (failure === 'revision') f.db.tables.mailbox_drafts[0].revision++;
+                return f.provider;
+            },
+            updateOutlookDraft: async () => assert.fail('Must not write Outlook'),
+        })), e => e.code === 'DRAFT_RECONCILIATION_REQUIRED');
+        assert.deepEqual(f.original, originalBefore);
+        assert.equal(f.receipt.status, 'uncertain');
+        assert.equal(f.receipt.result, null);
+        assert.equal(f.db.tables.mailbox_drafts[0].provider_change_key, 'change-1');
+        assert.equal(f.db.tables.mailbox_draft_update_receipts.length, 2);
+    }
+});
+
+test('original uncertain recovery continuation cannot silently downgrade when transactions are unsupported', async () => {
+    const f = uncertainLinkedFixture();
+    f.db.transaction = undefined;
+    const before = JSON.stringify(f.db.tables);
+    await assert.rejects(updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
+        getOutlookDraft: async () => assert.fail('Unsupported atomic guard must fail before reading provider'),
+    })), e => e.code === 'DRAFT_RECONCILIATION_REQUIRED');
+    assert.equal(JSON.stringify(f.db.tables), before);
+});
+
+test('uncertain original-operation reconciliation survives a real JSONB round-trip', async () => {
+    const f = uncertainLinkedFixture();
+    const pg = new PGlite();
+    try {
+        const { rows } = await pg.query('SELECT $1::jsonb AS receipt', [JSON.stringify(f.receipt)]);
+        f.receipt = rows[0].receipt;
+        f.db.tables.mailbox_draft_update_receipts[1] = f.receipt;
+        const result = await updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
+            getOutlookDraft: async () => f.provider,
+            updateOutlookDraft: async () => assert.fail('Must not write Outlook after JSONB round-trip'),
+        }));
+        assert.equal(result.revision, 4);
+        assert.equal(result.update_receipt_id, f.receipt.id);
+        assert.equal(f.receipt.status, 'updated');
+    } finally {
+        await pg.close();
+    }
+});
+
+test('direct reviewed recovery verifies display-name recipients without weakening stored hashes', async () => {
+    const original = failedChangedReceipt({
+        update_request: { to: ['person@example.com'], subject: 'Approved', text: controlledRecoveryBody },
+    });
+    const db = new MemoryDb({ receipts: [original] });
+    const provider = liveRecoveryProvider({
+        toRecipients: [{ emailAddress: { address: 'person@example.com', name: 'Jorian Cunliffe' } }],
+    });
+    const hash = draftContentHash(mailboxDraftPreview('outlook', provider));
+    let writes = 0;
+    let applied = false;
+    const result = await recoveryCall(db, hash, {
+        providerOps: {
+            getOutlookDraft: async () => applied ? {
+                ...provider, changeKey: 'after-write', subject: 'Approved',
+                body: { contentType: 'Text', content: controlledRecoveryBody },
+            } : provider,
+            updateOutlookDraft: async (_token, _id, request) => {
+                assert.deepEqual(request.to, ['person@example.com']);
+                writes++;
+                applied = true;
+                return {
+                    ...provider, changeKey: 'after-write', subject: 'Approved',
+                    body: { contentType: 'Text', content: controlledRecoveryBody },
+                };
+            },
+        },
+    });
+    assert.equal(writes, 1);
+    assert.equal(result.revision, 2);
+    assert.equal(db.tables.mailbox_draft_update_receipts[1].status, 'updated');
+    assert.deepEqual(db.tables.mailbox_draft_update_receipts[1].update_request.to, ['person@example.com']);
+});
+
 test('reviewed Outlook recovery uses the approved live change key and retains the rejected receipt', async () => {
     const original = failedChangedReceipt();
     const db = new MemoryDb({ receipts: [original] });
@@ -1246,7 +1520,7 @@ test('uncertain recovery reconciliation preserves source linkage in the durable 
     const uncertainState = JSON.stringify(db.tables);
     await assert.rejects(updateMailboxDraft(db, options(db, original.idempotency_key, {
         subject: 'Approved', revision: 1,
-    }, providerOps)), error => error.code === 'DRAFT_PROVIDER_CHANGED');
+    }, providerOps)), error => error.code === 'DRAFT_UPDATE_IN_PROGRESS');
     assert.equal(JSON.stringify(db.tables), uncertainState);
     receipt.lease_until = new Date(Date.now() - 1000).toISOString();
     db.tables.mailbox_drafts[0].active_update_lease_until = receipt.lease_until;

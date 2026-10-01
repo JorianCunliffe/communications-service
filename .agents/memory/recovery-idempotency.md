@@ -7,7 +7,13 @@ A reviewed recovery must preserve the failed operation's immutable history while
 
 **Why:** Paused HyperFlow runs retry stable operation keys. Requiring a permanently different operation identity after recovery leaves the existing run blocked and risks duplicate work.
 
-**How to apply:** Check the original request hash first. Resolve only completed recovery receipts with matching source, scope, payload, version, and durable result linkage. Never interpret an incomplete or unrelated recovery as success, and do not rewrite the original failure to make it appear successful.
+**How to apply:** Check the original request hash first. Return historical results only from completed recovery receipts with matching source, scope, payload, version, and durable result linkage. An unchanged original retry may also reconcile one already-authorized uncertain successor after its leases expire: preserve its binding, read fresh provider evidence, and finalize atomically under the exact active claim. Never interpret uncertainty itself as success, and do not rewrite the original failure.
+
+A refreshed post-write preview hash is not a new recovery authorization requirement for resuming an existing uncertain receipt.
+
+**Why:** The stored review hash describes the pre-write draft that authorized that specific operation. Rebinding it to a post-write preview or requiring a new key would abandon the original operation and risk duplicate writes.
+
+**How to apply:** Validate the existing successor's source, scope, request hash, payload, base revision and claim before reading the provider. Verify its effective requested fields against fresh complete provider evidence, and preserve its original review hash and key through normal finalization. An ambiguous link or changed substantive content stays blocked.
 
 Hash persisted nested metadata using an explicitly reconstructed field order compatible with the original hash algorithm, not the property order returned from storage.
 

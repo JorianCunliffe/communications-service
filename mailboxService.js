@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ingestCanonicalInboundEmail } from './emailWebhook.js';
 import { safeHtml } from './email.js';
+import { draftRecipientListsMatch } from './draftRecipientComparison.js';
 import {
     createGmailDraft,
     updateGmailDraft,
@@ -742,7 +743,10 @@ function normalizedUpdateRequest(request = {}) {
 
 function draftFieldsMatch(request, current) {
     const entries = Object.entries(request);
-    return entries.length > 0 && entries.every(([key, value]) => JSON.stringify(value) === JSON.stringify(normalizeDraftValue(key, current[key])));
+    return entries.length > 0 && entries.every(([key, value]) =>
+        ['to', 'cc', 'bcc', 'reply_to'].includes(key)
+            ? draftRecipientListsMatch(value, current[key])
+            : JSON.stringify(value) === JSON.stringify(normalizeDraftValue(key, current[key])));
 }
 
 function recoveryBindingFromReceipt(receipt) {
@@ -780,7 +784,7 @@ function matchingStoredEditableRequest(left, right) {
             && JSON.stringify(leftFields[key]) === JSON.stringify(rightFields[key]));
 }
 
-function verifiedLinkedRecoveryResult(candidate, {
+function verifiedLinkedRecoveryBinding(candidate, {
     original, draft, tenantId, connectionId, draftId,
 }) {
     const baseRevision = original.base_revision;
@@ -791,7 +795,7 @@ function verifiedLinkedRecoveryResult(candidate, {
 
     const request = candidate?.update_request;
     const binding = request?.recovery_binding;
-    if (candidate?.status !== 'updated'
+    if (!candidate
         || typeof candidate.id !== 'string' || !candidate.id || candidate.id === original.id
         || typeof candidate.idempotency_key !== 'string' || !candidate.idempotency_key
         || candidate.idempotency_key === original.idempotency_key
@@ -815,7 +819,14 @@ function verifiedLinkedRecoveryResult(candidate, {
             ...candidateEditable,
             revision: binding.expected_revision,
         }, binding)) return null;
+    return binding;
+}
 
+function verifiedLinkedRecoveryResult(candidate, scope) {
+    const binding = verifiedLinkedRecoveryBinding(candidate, scope);
+    if (!binding || candidate.status !== 'updated') return null;
+    const { original, draft, draftId } = scope;
+    const baseRevision = original.base_revision;
     const result = candidate.result;
     const currentRevision = Number(draft.revision || 1);
     if (!result || typeof result !== 'object' || Array.isArray(result)
@@ -832,19 +843,49 @@ function verifiedLinkedRecoveryResult(candidate, {
     return result;
 }
 
-async function completedLinkedRecoveryResult(db, {
-    tenantId, connectionId, draft, draftId, original,
+async function resolveLinkedRecoveryResult(db, {
+    tenantId, connectionId, draft, draftId, original, connection, credentialOverride, providerOps,
 }) {
     const linked = await db.from('mailbox_draft_update_receipts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
         .eq('mailbox_draft_id', draft.id)
         .contains('update_request', { recovery_binding: { failed_update_receipt_id: original.id } });
     if (linked.error) throw new Error(linked.error.message);
-    const completed = (linked.data || []).filter(receipt => receipt.status === 'updated');
-    if (completed.length !== 1) return null;
-    return verifiedLinkedRecoveryResult(completed[0], {
-        original, draft, tenantId, connectionId, draftId,
-    });
+    // A completed successor and an outstanding successor are also ambiguous.
+    // Failed attempts remain history, not alternative successful outcomes.
+    const candidates = (linked.data || []).filter(receipt => receipt.status !== 'failed');
+    if (candidates.length !== 1) return null;
+    const candidate = candidates[0];
+    const scope = { original, draft, tenantId, connectionId, draftId };
+    if (candidate.status === 'updated') return verifiedLinkedRecoveryResult(candidate, scope);
+    if (!['uncertain', 'applying'].includes(candidate.status)
+        || !verifiedLinkedRecoveryBinding(candidate, scope)
+        || candidate.result != null
+        || draft.active_update_id !== candidate.id
+        || Number(draft.revision) !== candidate.base_revision) return null;
+
+    // Resume the existing claim, not the original failed operation or a new
+    // recovery. The original review hash authorizes that receipt; it is not a
+    // requirement that the post-write draft still hash to its pre-write body.
+    const expires = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
+        && Date.parse(value) <= Date.now();
+    if (!expires(candidate.lease_until)
+        || (draft.active_update_lease_until != null && !expires(draft.active_update_lease_until))) {
+        throw draftUpdateError('Another draft update is in progress; retry after its lease expires', 409, 'DRAFT_UPDATE_IN_PROGRESS');
+    }
+    if (typeof db.transaction !== 'function') {
+        throw draftUpdateError('Atomic draft claim verification is unavailable; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    try {
+        const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+        return await reconcileDraftUpdate(db, {
+            tenantId, connectionId, draft, receipt: candidate, draftId, connection, credential, providerOps,
+            requireActiveClaim: true,
+        });
+    } catch (error) {
+        if (error.code === 'DRAFT_RECONCILIATION_REQUIRED' || error.code === 'DRAFT_UPDATE_IN_PROGRESS') throw error;
+        throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
 }
 
 function editableReceiptRequest(request = {}) {
@@ -905,7 +946,7 @@ async function currentEditableProviderDraft(connection, credential, draftId, pro
     return { provider, ...providerDraftData(provider, connection.provider, connection.provider_account_id) };
 }
 
-async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptId, draftId, providerData, expectedRevision, recoveryBinding = null }) {
+async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptId, draftId, providerData, expectedRevision, recoveryBinding = null, requireActiveClaim = false }) {
     const nextRevision = expectedRevision + 1;
     const result = updateResult({
         ...draft,
@@ -921,7 +962,7 @@ async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptI
         result.recovered_from_receipt_id = recoveryBinding.failed_update_receipt_id;
         result.reviewed_content_hash = recoveryBinding.reviewed_content_hash;
     }
-    const finalized = await db.rpc('finalize_mailbox_draft_update', {
+    const args = {
         p_tenant_id: tenantId,
         p_provider_connection_id: connectionId,
         p_mailbox_draft_id: draft.id,
@@ -931,14 +972,33 @@ async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptI
         p_provider_thread_id: result.provider_thread_id,
         p_expected_revision: expectedRevision,
         p_result: result,
-    });
+    };
+    if (requireActiveClaim) {
+        if (typeof db.transaction !== 'function') {
+            throw draftUpdateError('Atomic draft claim verification is unavailable; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+        }
+        return db.transaction(async tx => {
+            if (typeof tx.lockMailboxDraftUpdateClaim !== 'function'
+                || !await tx.lockMailboxDraftUpdateClaim(args)) {
+                throw draftUpdateError('Draft update claim changed; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            }
+            const finalized = await tx.rpc('finalize_mailbox_draft_update', args);
+            // Throw within the transaction so failed finalization rolls back.
+            // A missing durable result is never replaced by fabricated success.
+            if (finalized.error || !finalized.data) {
+                throw draftUpdateError('Draft update finalization is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            }
+            return finalized.data;
+        });
+    }
+    const finalized = await db.rpc('finalize_mailbox_draft_update', args);
     if (finalized.error) {
         throw draftUpdateError('Draft update finalization is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
     }
     return finalized.data || result;
 }
 
-async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt, draftId, connection, credential, providerOps }) {
+async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt, draftId, connection, credential, providerOps, requireActiveClaim = false }) {
     const leaseActive = draft.active_update_id === receipt.id
         && (!receipt.lease_until || new Date(receipt.lease_until).valueOf() > Date.now());
     if (leaseActive) {
@@ -974,7 +1034,7 @@ async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt
     return finalizeDraftUpdate(db, {
         tenantId, connectionId, draft, receiptId: receipt.id, draftId,
         providerData: current, expectedRevision: Number(receipt.base_revision || draft.revision || 1),
-        recoveryBinding,
+        recoveryBinding, requireActiveClaim,
     });
 }
 
@@ -1017,8 +1077,9 @@ export async function updateMailboxDraft(db, {
             if (connection.provider === 'outlook'
                 && existing.data.error_code === 'DRAFT_PROVIDER_CHANGED'
                 && Number(existing.data.error_status) === 409) {
-                const recovered = await completedLinkedRecoveryResult(db, {
+                const recovered = await resolveLinkedRecoveryResult(db, {
                     tenantId, connectionId, draft: draft.data, draftId, original: existing.data,
+                    connection, credentialOverride, providerOps,
                 });
                 if (recovered) return recovered;
             }

@@ -90,7 +90,7 @@ const BUILD = (() => {
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',
         'tenantContext.js', 'tenantOperations.js', 'tenantLifecycle.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
         'emailDelivery.js', 'emailTriage.js', 'emailReplyRoutes.js',
-        'mailboxService.js', 'mailboxRoutes.js', 'gmailMailbox.js', 'outlookMailbox.js',
+        'mailboxService.js', 'draftRecipientComparison.js', 'mailboxRoutes.js', 'gmailMailbox.js', 'outlookMailbox.js',
         'mailboxOAuth.js', 'mailboxCrypto.js',
         'console.html', 'home.html', 'package.json',
     ];

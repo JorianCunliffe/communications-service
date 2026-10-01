@@ -529,6 +529,12 @@ superseding receipt. Exact retries return that same durable result, including
 after the draft revision advances. Keep using this `POST .../recover` flow for
 new recovery attempts; it always requires a new idempotency key.
 
+Recipient verification compares parsed email addresses, not Outlook display
+names. Ordering and case are ignored; recipient multiplicity is preserved.
+Malformed or ambiguous recipient strings never match. Stored requests,
+idempotency hashes and reviewed preview hashes are not rewritten, and plain-text
+verification remains exact (including line endings and trailing whitespace).
+
 After a recovery has durably completed and its linked result passes receipt,
 scope, payload, revision, provider-ID, change-key and hash checks, retrying the
 `PATCH /v1/mailboxes/:connectionId/drafts/:draftId` with the original
@@ -538,10 +544,21 @@ recovery result. This lookup is read-only: it performs no provider request,
 claim, receipt update, or new audit write, even when later edits have advanced
 the current service revision. It returns the historical verified result; it
 does not recheck or assert current Outlook content. An incomplete, unrelated,
-or still-uncertain recovery does not resolve the old key, which continues to
-return its original `409 DRAFT_PROVIDER_CHANGED` failure until a properly
-verified recovery is finalized. The original failed receipt, error, history
-and audits remain unchanged; it is never replayed or rewritten.
+recovery does not resolve the old key. If exactly one linked recovery is
+`uncertain` or `applying`, the original unchanged PATCH may reconcile that
+existing receipt after its lease expires. Its scope, original payload, bound
+request hash, base revision and active claim must all match. The service reads
+the same native unsent draft afresh and requires a complete provider resource,
+a nonempty change key, and matching effective requested fields before normal
+atomic finalization. It performs no provider write, creates no new receipt,
+and does not require a new review hash or recovery key. Finalization locks and
+checks the exact active claim in the same PostgreSQL transaction as the
+existing finalizer; adapters without this capability fail closed. No schema
+migration is needed. Changed content remains
+`409 DRAFT_RECONCILIATION_REQUIRED`; an active lease remains
+`409 DRAFT_UPDATE_IN_PROGRESS`. Foreign, invalid or ambiguous links remain
+blocked. The original failed receipt, error, history and audits remain
+unchanged; it is never replayed or rewritten.
 
 ```http
 PATCH /v1/mailboxes/:connectionId/drafts/:draftId
