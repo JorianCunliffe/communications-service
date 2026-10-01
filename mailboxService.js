@@ -843,6 +843,14 @@ function verifiedLinkedRecoveryResult(candidate, scope) {
     return result;
 }
 
+function draftUpdateLeaseExpired(value, now = Date.now()) {
+    // Native pg reads preserve timestamptz as Date; JSON clients return strings.
+    // Do not coerce missing, numeric or malformed values into an expired lease.
+    const timestamp = value instanceof Date ? value.getTime()
+        : typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(timestamp) && timestamp <= now;
+}
+
 async function resolveLinkedRecoveryResult(db, {
     tenantId, connectionId, draft, draftId, original, connection, credentialOverride, providerOps,
 }) {
@@ -867,10 +875,9 @@ async function resolveLinkedRecoveryResult(db, {
     // Resume the existing claim, not the original failed operation or a new
     // recovery. The original review hash authorizes that receipt; it is not a
     // requirement that the post-write draft still hash to its pre-write body.
-    const expires = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
-        && Date.parse(value) <= Date.now();
-    if (!expires(candidate.lease_until)
-        || (draft.active_update_lease_until != null && !expires(draft.active_update_lease_until))) {
+    const now = Date.now();
+    if (!draftUpdateLeaseExpired(candidate.lease_until, now)
+        || !draftUpdateLeaseExpired(draft.active_update_lease_until, now)) {
         throw draftUpdateError('Another draft update is in progress; retry after its lease expires', 409, 'DRAFT_UPDATE_IN_PROGRESS');
     }
     if (typeof db.transaction !== 'function') {
@@ -1000,7 +1007,7 @@ async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptI
 
 async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt, draftId, connection, credential, providerOps, requireActiveClaim = false }) {
     const leaseActive = draft.active_update_id === receipt.id
-        && (!receipt.lease_until || new Date(receipt.lease_until).valueOf() > Date.now());
+        && !draftUpdateLeaseExpired(receipt.lease_until);
     if (leaseActive) {
         throw draftUpdateError('Another draft update is in progress; retry after its lease expires', 409, 'DRAFT_UPDATE_IN_PROGRESS');
     }

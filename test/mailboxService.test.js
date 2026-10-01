@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import Fastify from 'fastify';
 import { PGlite } from '@electric-sql/pglite';
+import pg from 'pg';
 import { serverOptions } from '../serverOptions.js';
 import v1Routes from '../v1.js';
 import { hashApiSecret } from '../auth.js';
@@ -915,9 +916,24 @@ const uncertainLinkedFixture = ({ includeRevision = true, allRecipients = false 
     return { db, original, receipt, request, provider };
 };
 
+// pg's native parser consumes PostgreSQL wire syntax, not JSON ISO syntax.
+const nativePgTimestamp = iso => {
+    const value = pg.types.getTypeParser(1184)(iso.replace('T', ' ').replace(/Z$/, '+00'));
+    assert.ok(value instanceof Date);
+    return value;
+};
+
 test('original unchanged PATCH reconciles the existing uncertain receipt despite Outlook display names and refreshed review hash', async () => {
-    for (const includeRevision of [true, false]) {
+    for (const { includeRevision, nativeLeases } of [true, false].flatMap(includeRevision =>
+        [true, false].map(nativeLeases => ({ includeRevision, nativeLeases })))) {
         const { db, original, receipt, request, provider } = uncertainLinkedFixture({ includeRevision });
+        if (nativeLeases) {
+            receipt.lease_until = nativePgTimestamp(receipt.lease_until);
+            db.tables.mailbox_drafts[0].active_update_lease_until = nativePgTimestamp(
+                db.tables.mailbox_drafts[0].active_update_lease_until);
+            assert.ok(receipt.lease_until instanceof Date);
+            assert.ok(db.tables.mailbox_drafts[0].active_update_lease_until instanceof Date);
+        }
         const originalBefore = structuredClone(original);
         const storedRequest = structuredClone(receipt.update_request);
         const storedHash = receipt.request_hash;
@@ -1050,16 +1066,84 @@ test('changed raw original request and live or unverifiable leases cannot reconc
     }
     for (const change of [
         f => { f.receipt.lease_until = new Date(Date.now() + 90_000).toISOString(); },
+        f => { f.receipt.lease_until = nativePgTimestamp(new Date(Date.now() + 90_000).toISOString()); },
         f => { f.receipt.lease_until = null; },
+        f => { delete f.receipt.lease_until; },
         f => { f.receipt.lease_until = 'invalid'; },
+        f => { f.receipt.lease_until = new Date(NaN); },
+        f => { f.receipt.lease_until = 0; },
         f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = new Date(Date.now() + 90_000).toISOString(); },
+        f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = nativePgTimestamp(new Date(Date.now() + 90_000).toISOString()); },
+        f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = null; },
+        f => { delete f.db.tables.mailbox_drafts[0].active_update_lease_until; },
+        f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = 'invalid'; },
+        f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = new Date(NaN); },
+        f => { f.db.tables.mailbox_drafts[0].active_update_lease_until = 0; },
     ]) {
         const f = uncertainLinkedFixture();
         change(f);
         const before = JSON.stringify(f.db.tables);
+        let reads = 0;
         await assert.rejects(updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
-            getOutlookDraft: async () => assert.fail('Lease must expire before provider access'),
+            getOutlookDraft: async () => { reads++; assert.fail('Lease must expire before provider access'); },
         })), e => e.code === 'DRAFT_UPDATE_IN_PROGRESS');
+        assert.equal(reads, 0);
+        assert.equal(f.db.rpcCalls, 0);
+        assert.equal(JSON.stringify(f.db.tables), before);
+    }
+});
+
+test('lease expiry keeps millisecond boundaries identical for native PostgreSQL Dates and ISO strings', async t => {
+    const now = Date.parse('2026-10-01T01:53:00.638Z');
+    t.mock.method(Date, 'now', () => now);
+    for (const delta of [-1, 0, 1]) {
+        for (const native of [false, true]) {
+            const f = uncertainLinkedFixture();
+            const iso = new Date(now + delta).toISOString();
+            const lease = native ? nativePgTimestamp(iso) : iso;
+            f.receipt.lease_until = lease;
+            f.db.tables.mailbox_drafts[0].active_update_lease_until = lease;
+            const before = JSON.stringify(f.db.tables);
+            let reads = 0;
+            const retry = () => updateMailboxDraft(f.db, options(f.db, f.original.idempotency_key, f.request, {
+                getOutlookDraft: async () => { reads++; return f.provider; },
+                updateOutlookDraft: async () => assert.fail('Lease continuation must not write provider'),
+            }));
+            if (delta <= 0) {
+                const result = await retry();
+                assert.equal(result.update_receipt_id, f.receipt.id);
+                assert.equal(result.revision, 4);
+                assert.equal(reads, 1);
+                assert.equal(f.db.tables.mailbox_draft_update_receipts.length, 2);
+            } else {
+                await assert.rejects(retry(), e => e.code === 'DRAFT_UPDATE_IN_PROGRESS');
+                assert.equal(reads, 0);
+                assert.equal(f.db.rpcCalls, 0);
+                assert.equal(JSON.stringify(f.db.tables), before);
+            }
+        }
+    }
+});
+
+test('direct retry of an existing recovery also holds missing, invalid and future receipt leases', async () => {
+    for (const lease of [
+        null, undefined, 'invalid', new Date(NaN), 0,
+        new Date(Date.now() + 90_000).toISOString(),
+        nativePgTimestamp(new Date(Date.now() + 90_000).toISOString()),
+    ]) {
+        const f = uncertainLinkedFixture();
+        f.receipt.lease_until = lease;
+        const before = JSON.stringify(f.db.tables);
+        let reads = 0;
+        await assert.rejects(recoveryCall(f.db, f.receipt.update_request.recovery_binding.reviewed_content_hash, {
+            expectedRevision: 3,
+            providerOps: {
+                getOutlookDraft: async () => { reads++; assert.fail('Unverifiable or future lease must stay held'); },
+                updateOutlookDraft: async () => assert.fail('Must not apply another recovery write'),
+            },
+        }), e => e.code === 'DRAFT_UPDATE_IN_PROGRESS');
+        assert.equal(reads, 0);
+        assert.equal(f.db.rpcCalls, 0);
         assert.equal(JSON.stringify(f.db.tables), before);
     }
 });

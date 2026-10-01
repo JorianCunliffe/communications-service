@@ -25,4 +25,4 @@ Lease checks must handle valid native PostgreSQL `Date` objects as well as seria
 
 **Why:** The native `pg` timestamp parser returns `Date` objects and the adapter preserves them. String-only expiry checks can classify an expired lease as active indefinitely; JSON-based fixtures hide that production-only difference.
 
-**How to apply:** Test lease boundaries through the native PostgreSQL adapter and both timestamp representations, including future, expired, missing and invalid values. Do not change stored leases merely to work around a representation mismatch.
+**How to apply:** Compare native dates by epoch milliseconds, not an implicit string conversion that loses millisecond precision. Test lease boundaries through the native PostgreSQL adapter and both timestamp representations, including future, expired, missing and invalid values. Do not change stored leases merely to work around a representation mismatch.
