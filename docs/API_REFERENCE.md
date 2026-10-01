@@ -483,6 +483,53 @@ Adopts a reviewed provider version for a legacy draft that was saved before vers
 Errors are `409 DRAFT_PROVIDER_CHANGED`, `STALE_REVISION`, `DRAFT_UPDATE_IN_PROGRESS`, `BASELINE_NOT_REQUIRED` or `DRAFT_UPDATE_CONFLICT`, or `422` for invalid input. A later `PATCH` then updates the draft under the normal provider-version guard. The adoption is audited as `mailbox.draft.baseline_adopted`.
 
 ```http
+POST /v1/mailboxes/:connectionId/drafts/:draftId/recover
+Idempotency-Key: new-recovery-key
+Content-Type: application/json
+
+{
+  "failed_update_receipt_id": "receipt-id",
+  "reviewed_content_hash": "<preview.content_hash>",
+  "expected_revision": 1
+}
+```
+
+This narrow recovery is only for an existing Outlook draft update receipt that
+is `failed` with `DRAFT_PROVIDER_CHANGED`. It requires both
+`communications:write` and `email:draft`, and the new idempotency key must not
+be the rejected update's key. The receipt, connection and native draft ID are
+resolved together within the authenticated tenant. The rejected receipt and
+its stored editable fields are retained unchanged; clients cannot supply a
+replacement payload. Gmail, unsupported or malformed stored fields, a stale
+revision, an active update, a missing saved Outlook change key, or a sent,
+deleted, or ID-changed provider object are refused.
+
+After claiming a new durable update receipt, the service reads the live
+editable Outlook draft with the same plain-text preview representation as the
+draft GET. A truncated or unverifiable preview, missing change key, or content
+hash mismatch prevents any provider write. The change key from that exact
+reviewed read is passed to the ordinary Outlook update guard, which reads
+again and checks the key before its in-place PATCH. The saved baseline and
+service revision change only in normal atomic finalization after the provider
+confirms the same unsent draft ID with a complete, verifiable Outlook resource
+and a nonempty change key. Partial or versionless results remain uncertain for
+reconciliation and never clear the saved baseline or advance the revision.
+Text-only recovery compares text-preferred reads; when both text and HTML were
+stored in the rejected request, reconciliation follows Outlook's HTML
+precedence without changing that stored request.
+Recovery never sends mail or creates a replacement draft.
+
+The recovery authorization audit is mandatory before provider mutation and
+links the rejected receipt, new receipt and reviewed hash. Recovery binding is
+included in the new receipt's idempotency hash and durable request/result. A
+successful response includes `update_receipt_id` and
+`recovered_from_receipt_id` alongside the unchanged provider draft ID and
+incremented revision, so a caller can resume its existing workflow with the
+superseding receipt. Exact retries return that same durable result, including
+after the draft revision advances. The failed original receipt remains failed;
+it is never replayed or rewritten.
+
+```http
 PATCH /v1/mailboxes/:connectionId/drafts/:draftId
 Idempotency-Key: stable-update-key
 Content-Type: application/json

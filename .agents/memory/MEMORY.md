@@ -2,3 +2,4 @@
 - [Git cherry-pick identity](git-cherry-pick-identity.md) — missing committer identity can stop a cherry-pick after staging its patch; verify the index before retrying.
 - [GitHub graph-preserving fallback](github-graph-preserving-push.md) — if shell auth fails, Git Data API can preserve exact local-only history with verified non-force ref updates.
 - [Phase 03 production migration](phase03-production-migration.md) — skip Replit's destructive generic diff; let the transactional repository runner backfill identities.
+- [Outlook body verification](outlook-body-verification.md) — Graph's default HTML projection can differ from a text update; recovery must verify the effective body representation and its version.
