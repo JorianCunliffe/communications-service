@@ -20,3 +20,9 @@ Hash persisted nested metadata using an explicitly reconstructed field order com
 **Why:** PostgreSQL JSONB can reorder object keys. An in-memory receipt store preserves insertion order and can mask a production-only failure to recognize a legitimate recovery.
 
 **How to apply:** Include a real JSONB round-trip in receipt replay regression tests. Preserve historical hash compatibility when canonicalizing metadata; do not silently change the hashing algorithm for existing operations.
+
+Lease checks must handle valid native PostgreSQL `Date` objects as well as serialized ISO timestamp strings, while rejecting missing or invalid values.
+
+**Why:** The native `pg` timestamp parser returns `Date` objects and the adapter preserves them. String-only expiry checks can classify an expired lease as active indefinitely; JSON-based fixtures hide that production-only difference.
+
+**How to apply:** Test lease boundaries through the native PostgreSQL adapter and both timestamp representations, including future, expired, missing and invalid values. Do not change stored leases merely to work around a representation mismatch.
