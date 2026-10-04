@@ -106,13 +106,15 @@
       chip(h.version || 'unknown', null);
       if (h.build) chip('build ' + h.build, null);
       chip('model ' + h.model, null);
+      chip('Twilio ' + (h.twilio?.stale ? 'stale' : h.twilio?.status || 'not checked'), h.twilio?.accountReady === true);
+      if (h.twilio?.balanceState) chip('Twilio balance ' + h.twilio.balanceState, h.twilio.balanceState === 'ok' && h.twilio.accountReady);
       chip('LLMs ' + (h.llm?.stale ? 'stale' : h.llm?.status || 'not checked'), h.llm?.allWorking && !h.llm?.stale && !h.llm?.checking);
       for (const model of h.llm?.models || []) {
         chip(model.model + ' (' + model.transport + '): ' + model.status, model.usable && !h.llm.stale);
       }
       if (h.llm?.checkedAt) chip('models checked ' + new Date(h.llm.checkedAt).toLocaleString(), null);
       chip(h.persistenceProvider ? `${h.persistenceProvider} persistence` : 'persistence off', Boolean(h.persistenceProvider));
-      chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
+      chip(h.outboundCalls ? 'outbound configured' : 'outbound not configured', h.outboundCalls);
       chip(h.communicationsApi ? 'v1 API ready' : 'v1 API not configured', h.communicationsApi);
       chip(h.memoryEnrichment ? 'memory ready' : 'memory not configured', h.memoryEnrichment);
       chip(h.durableEvents ? 'events ready' : 'events not configured', h.durableEvents);

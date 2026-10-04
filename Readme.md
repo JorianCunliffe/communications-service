@@ -661,3 +661,11 @@ Focused verification: `node --test test/ambientCapture.test.js test/tools.test.j
 A working result means a small billable request was accepted at `checkedAt`; it does not expose or guarantee a remaining account balance. Credit/quota exhaustion, throttling, authentication, missing models, timeouts and provider outages remain separate failures. Stale or checking results are not current readiness evidence. The inventory covers service defaults and environment overrides; per-contact voice overrides and HyperFlow's separately hosted Gemini integration are outside its scope. No call, SMS, email, or diary operation is created by a check. See [health semantics](docs/API_REFERENCE.md#health).
 
 Production startup applies all numbered migrations through `041`. Migrations `026`-`041` add draft review/version recovery, promise evidence and publication constraints, operational review, contact identity, and Outlook change keys. Keep the Replit checkout and published fingerprint aligned with GitHub before resuming held operations.
+
+### Twilio account readiness
+
+`/health` includes a cached `twilio` account/balance check, refreshed on startup and every five minutes. A suspended or closed account, depleted or low balance, missing credentials, stale check or provider error will not show account readiness. The home page and console display these warnings separately from credential configuration and LLM health.
+
+The check performs only read-only Twilio account and balance requests (ten-second timeout each); it never places calls, sends SMS or changes billing. `TWILIO_LOW_BALANCE_THRESHOLD` defaults to 10 **in the account balance currency**. Subaccounts report `parent_account_required` for balance rather than assuming their parent has funds. Account readiness is not a delivery or inbound-routing test.
+
+Public health excludes account identifiers, credentials and exact balance. Operator-only `GET /health/twilio` and `POST /health/twilio/refresh` require `X-API-Key`; they include amount, currency and threshold. Refresh is coalesced and limited to once a minute. A suspension reason cannot be inferred solely from account status; check Twilio billing/support for the cause.

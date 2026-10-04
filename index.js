@@ -35,6 +35,7 @@ import emailWebhookRoutes, { emailEnabled, installRawJsonParser, startCommunicat
 import mailboxPublicRoutes from './mailboxRoutes.js';
 import { startHyperFlowScheduler } from './hyperflowScheduler.js';
 import { createModelHealth } from './modelHealth.js';
+import { createTwilioHealth, registerTwilioHealthRoutes } from './twilioHealth.js';
 
 // Retrieve the OpenAI API key from environment variables.
 const { OPENAI_API_KEY } = process.env;
@@ -83,7 +84,7 @@ const VERSION = (() => {
 // does. Files are hashed by name as well as content so a rename still moves it.
 const BUILD = (() => {
     const SOURCES = [
-        'index.js', 'modelHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
+        'index.js', 'modelHealth.js', 'twilioHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
@@ -163,6 +164,11 @@ fastify.get('/console', async (request, reply) => {
     reply.type('text/html').send(CONSOLE_HTML);
 });
 
+const twilioHealth = createTwilioHealth();
+const stopTwilioHealth = twilioHealth.start();
+fastify.addHook('onClose', async () => stopTwilioHealth());
+registerTwilioHealthRoutes(fastify, twilioHealth);
+
 const modelHealth = createModelHealth();
 const stopModelHealth = modelHealth.start();
 fastify.addHook('onClose', async () => stopModelHealth());
@@ -175,6 +181,7 @@ fastify.get('/health', async (request, reply) => {
         version: VERSION,
         build: BUILD,
         llm: modelHealth.read(),
+        twilio: twilioHealth.read(),
         model: DEFAULT_CONFIG.model,
         playIntro: DEFAULT_CONFIG.playIntro,
         persistenceProvider,
