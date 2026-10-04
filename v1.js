@@ -22,7 +22,7 @@ import { loadEmailConnection, sendEmailWithProvider } from './emailDelivery.js';
 import { createEmailReplyRoute } from './emailReplyRoutes.js';
 import { normaliseAddresses, outboundEmailRequest } from './email.js';
 import { createMailboxOAuthState, gmailAuthorizationUrl, mailboxOAuthNonceHash, outlookAuthorizationUrl } from './mailboxOAuth.js';
-import { adoptMailboxDraftBaseline, createMailboxDraft, getMailboxDraft, getMailboxDraftByReceipt, listMailboxConnections, syncMailbox, updateMailboxDraft } from './mailboxService.js';
+import { adoptMailboxDraftBaseline, createMailboxDraft, getMailboxDraft, getMailboxDraftByReceipt, listMailboxConnections, recoverMailboxDraft, syncMailbox, updateMailboxDraft } from './mailboxService.js';
 import { ingestMeeting, getMeeting, findMeetingBySource, listMeetings, MeetingError } from './meetings.js';
 
 const CHANNELS = ['voice', 'sms', 'email', 'whatsapp', 'slack', 'teams', 'recording'];
@@ -351,6 +351,31 @@ export default async function v1Routes(fastify, options = {}) {
                 connectionId: request.params.connectionId,
                 draftId: request.params.draftId,
                 actorId: request.body?.initiator_id || request.authContext?.keyId,
+                reviewedContentHash: request.body?.reviewed_content_hash,
+                expectedRevision: request.body?.expected_revision,
+            });
+            return reply.code(200).send(draft);
+        } catch (error) { return errorReply(reply, error, error.status || 502); }
+    });
+
+    fastify.post('/mailboxes/:connectionId/drafts/:draftId/recover', async (request, reply) => {
+        const db = database(reply); if (!db) return reply;
+        try {
+            const allowedFields = new Set(['failed_update_receipt_id', 'reviewed_content_hash', 'expected_revision', 'initiator_id', 'tenant_id', 'correlation']);
+            if (request.body && typeof request.body === 'object'
+                && Object.keys(request.body).some(field => !allowedFields.has(field))) {
+                const error = new Error('Recovery accepts only the failed receipt, reviewed content hash and expected revision');
+                error.status = 422;
+                error.code = 'INVALID_RECOVERY_BODY';
+                throw error;
+            }
+            const draft = await recoverMailboxDraft(db, {
+                tenantId: request.tenantId,
+                connectionId: request.params.connectionId,
+                draftId: request.params.draftId,
+                actorId: request.body?.initiator_id || request.authContext?.keyId,
+                idempotencyKey: request.headers['idempotency-key'],
+                failedUpdateReceiptId: request.body?.failed_update_receipt_id,
                 reviewedContentHash: request.body?.reviewed_content_hash,
                 expectedRevision: request.body?.expected_revision,
             });

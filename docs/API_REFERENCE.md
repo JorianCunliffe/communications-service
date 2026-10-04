@@ -483,6 +483,84 @@ Adopts a reviewed provider version for a legacy draft that was saved before vers
 Errors are `409 DRAFT_PROVIDER_CHANGED`, `STALE_REVISION`, `DRAFT_UPDATE_IN_PROGRESS`, `BASELINE_NOT_REQUIRED` or `DRAFT_UPDATE_CONFLICT`, or `422` for invalid input. A later `PATCH` then updates the draft under the normal provider-version guard. The adoption is audited as `mailbox.draft.baseline_adopted`.
 
 ```http
+POST /v1/mailboxes/:connectionId/drafts/:draftId/recover
+Idempotency-Key: new-recovery-key
+Content-Type: application/json
+
+{
+  "failed_update_receipt_id": "receipt-id",
+  "reviewed_content_hash": "<preview.content_hash>",
+  "expected_revision": 1
+}
+```
+
+This narrow recovery is only for an existing Outlook draft update receipt that
+is `failed` with `DRAFT_PROVIDER_CHANGED`. It requires both
+`communications:write` and `email:draft`, and the new idempotency key must not
+be the rejected update's key. The receipt, connection and native draft ID are
+resolved together within the authenticated tenant. The rejected receipt and
+its stored editable fields are retained unchanged; clients cannot supply a
+replacement payload. Gmail, unsupported or malformed stored fields, a stale
+revision, an active update, a missing saved Outlook change key, or a sent,
+deleted, or ID-changed provider object are refused.
+
+After claiming a new durable update receipt, the service reads the live
+editable Outlook draft with the same plain-text preview representation as the
+draft GET. A truncated or unverifiable preview, missing change key, or content
+hash mismatch prevents any provider write. The change key from that exact
+reviewed read is passed to the ordinary Outlook update guard, which reads
+again and checks the key before its in-place PATCH. The saved baseline and
+service revision change only in normal atomic finalization after the provider
+confirms the same unsent draft ID with a complete, verifiable Outlook resource
+and a nonempty change key. Partial or versionless results remain uncertain for
+reconciliation and never clear the saved baseline or advance the revision.
+Text-only recovery compares text-preferred reads; when both text and HTML were
+stored in the rejected request, reconciliation follows Outlook's HTML
+precedence without changing that stored request.
+Recovery never sends mail or creates a replacement draft.
+
+The recovery authorization audit is mandatory before provider mutation and
+links the rejected receipt, new receipt and reviewed hash. Recovery binding is
+included in the new receipt's idempotency hash and durable request/result. A
+successful response includes `update_receipt_id` and
+`recovered_from_receipt_id` alongside the unchanged provider draft ID and
+incremented revision, so a caller can resume its existing workflow with the
+superseding receipt. Exact retries return that same durable result, including
+after the draft revision advances. Keep using this `POST .../recover` flow for
+new recovery attempts; it always requires a new idempotency key.
+
+Recipient verification compares parsed email addresses, not Outlook display
+names. Ordering and case are ignored; recipient multiplicity is preserved.
+Malformed or ambiguous recipient strings never match. Stored requests,
+idempotency hashes and reviewed preview hashes are not rewritten, and plain-text
+verification remains exact (including line endings and trailing whitespace).
+
+After a recovery has durably completed and its linked result passes receipt,
+scope, payload, revision, provider-ID, change-key and hash checks, retrying the
+`PATCH /v1/mailboxes/:connectionId/drafts/:draftId` with the original
+idempotency key and the same editable field values and optional `revision`
+(including the same revision value, if supplied) now returns that verified
+recovery result. This lookup is read-only: it performs no provider request,
+claim, receipt update, or new audit write, even when later edits have advanced
+the current service revision. It returns the historical verified result; it
+does not recheck or assert current Outlook content. An incomplete, unrelated,
+recovery does not resolve the old key. If exactly one linked recovery is
+`uncertain` or `applying`, the original unchanged PATCH may reconcile that
+existing receipt after its lease expires. Its scope, original payload, bound
+request hash, base revision and active claim must all match. The service reads
+the same native unsent draft afresh and requires a complete provider resource,
+a nonempty change key, and matching effective requested fields before normal
+atomic finalization. It performs no provider write, creates no new receipt,
+and does not require a new review hash or recovery key. Finalization locks and
+checks the exact active claim in the same PostgreSQL transaction as the
+existing finalizer; adapters without this capability fail closed. No schema
+migration is needed. Changed content remains
+`409 DRAFT_RECONCILIATION_REQUIRED`; an active lease remains
+`409 DRAFT_UPDATE_IN_PROGRESS`. Foreign, invalid or ambiguous links remain
+blocked. The original failed receipt, error, history and audits remain
+unchanged; it is never replayed or rewritten.
+
+```http
 PATCH /v1/mailboxes/:connectionId/drafts/:draftId
 Idempotency-Key: stable-update-key
 Content-Type: application/json
@@ -1207,7 +1285,7 @@ Example:
   "status": "ok",
   "version": "089d3cb",
   "build": "12-character-source-fingerprint",
-  "model": "gpt-realtime",
+  "model": "gpt-realtime-2.1",
   "playIntro": false,
   "persistenceProvider": "postgres",
   "supabaseConfig": false,
@@ -1225,6 +1303,37 @@ Example:
 ```
 
 `persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `email.enabled` reflects only `EMAIL_ENABLED`; `providerPipeline` reflects persistence, not provider-row or secret validity. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; per-thread callbacks may still work when it reports `false`. `hyperflowVoiceContext` means persistence, the shared HMAC secret, and either the explicit context URL or derivable event URL are configured; it is not a live endpoint probe.
+
+### Live model readiness
+
+`GET /health` remains an HTTP 200 process-liveness endpoint. Its `llm` object reports independent readiness:
+
+```json
+{
+  "status": "working",
+  "allWorking": true,
+  "checkedAt": "2026-10-04T00:30:00.000Z",
+  "stale": false,
+  "checking": false,
+  "intervalSeconds": 900,
+  "scope": "service_defaults_and_environment_overrides",
+  "creditBalance": "not_exposed_by_provider",
+  "models": [{"provider":"openai","model":"gpt-realtime-2.1","transport":"realtime","roles":["voice"],"status":"working","usable":true,"credits":"request_accepted"}]
+}
+```
+
+The full array includes default voice/live transcription, recording transcription (`TRANSCRIBE_MODEL`), summaries (`SUMMARY_MODEL`), memory (`MEMORY_MODEL`), call outcomes (`CALL_OUTCOME_MODEL`), promises and operational review (`PROMISE_MODEL`), with the same fallback order as the workers. Checks sharing a model and transport are deduplicated. Per-contact voice overrides and models hosted in HyperFlow are outside this inventory.
+
+At startup and every 15 minutes, bounded 15-second provider probes generate a short text response, complete a Realtime text response, or submit a synthetic one-second silent WAV to transcription. These incur small provider charges but create no communications or business records. Public health reads never trigger them. `working` requires provider completion; merely opening a WebSocket or configuring a key is insufficient. An accepted request demonstrates quota/credit access at that moment, not the remaining balance.
+
+Failures use safe categories: `not_configured`, `authentication_failed`, `quota_or_credit_exhausted`, `rate_limited`, `model_unavailable`, `provider_unavailable`, `timeout`, `connection_failed`, or `probe_failed`. Provider messages and credentials are omitted. Overall status is `checking` before the first result, otherwise `working` or `degraded`; `allWorking` describes the last result and must be read alongside `stale` and `checking`. Results become stale after 30 minutes.
+
+```http
+POST /health/models/refresh
+X-API-Key: <existing operator key>
+```
+
+Uses the existing service-wide operator key (not a tenant API client), returns the same `llm` object, and returns HTTP 401 for an invalid/missing key. Concurrent calls share one probe; refresh attempts within one minute return the cached result. Model degradation returns HTTP 200 with `allWorking:false`, keeping readiness distinct from liveness.
 
 ## Management and recording API (`/api`)
 

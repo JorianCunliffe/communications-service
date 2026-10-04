@@ -2,22 +2,22 @@
 
 Phase 01 adds an organization-wide email option: Draft only (default) or Allow authorized sending. Owners/admins manage it in HyperFlow Settings; Communications stores and enforces it. SMS/voice permissions remain separate. See [boundaries and rollout](docs/architecture/BOUNDARIES.md).
 
-Current contract release: `2.4.0`.
+Current service release: `2.8.2`.
 
 Purpose-aware, tenant-isolated communication memory with production Twilio SMS/voice and Resend email adapters, OpenAI Realtime voice conversations, Supabase or direct PostgreSQL persistence, cross-channel Ask threads, first-class calendar context, provenance-backed facts and commitments, and durable outbound events.
 
-Runtime requirement: Node.js `22` or newer.
+Runtime requirement: Node.js `22.12.0` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `025`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `041`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Threading model, correction workflow and verification](docs/THREADING.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/025_tenant_data_lifecycle.sql)
+- [Latest database migration](migrations/041_mailbox_outlook_change_key.sql)
 
 ## Architecture
 
@@ -637,3 +637,11 @@ The built-in `captureWorkItem` tool saves a caller's unrelated actionable though
 Only thought text, a stable retry key and optional kind/title/project-name suggestions come from the model. HyperFlow verifies the caller, membership and stored communication before persisting. The tool acknowledges only a confirmed `saved:true` result. Timeouts are uncertain outcomes: retry the same key and payload. Capture does not book a meeting, send a reminder or execute work. Review saved items in HyperFlow **Work → Unresolved Items** or its **Review Unresolved Items** flow node.
 
 Focused verification: `node --test test/ambientCapture.test.js test/tools.test.js test/security.test.js test/voiceTurns.test.js`. A release still needs a spoken-call smoke check against the deployed services.
+
+## LLM readiness
+
+`GET /health` retains HTTP 200 liveness and adds `llm`: cached live checks of each default or environment-configured OpenAI model using its actual voice, text, or transcription transport. The landing page and console display every result. Checks run at startup and every 15 minutes; ordinary health reads incur no model requests. `POST /health/models/refresh` requires the existing operator `X-API-Key`, shares in-flight work, and has a one-minute cooldown.
+
+A working result means a small billable request was accepted at `checkedAt`; it does not expose or guarantee a remaining account balance. Credit/quota exhaustion, throttling, authentication, missing models, timeouts and provider outages remain separate failures. Stale or checking results are not current readiness evidence. The inventory covers service defaults and environment overrides; per-contact voice overrides and HyperFlow's separately hosted Gemini integration are outside its scope. No call, SMS, email, or diary operation is created by a check. See [health semantics](docs/API_REFERENCE.md#health).
+
+Production startup applies all numbered migrations through `041`. Migrations `026`-`041` add draft review/version recovery, promise evidence and publication constraints, operational review, contact identity, and Outlook change keys. Keep the Replit checkout and published fingerprint aligned with GitHub before resuming held operations.

@@ -34,6 +34,7 @@ import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperati
 import emailWebhookRoutes, { emailEnabled, installRawJsonParser, startCommunicationJobSweeper } from './emailWebhook.js';
 import mailboxPublicRoutes from './mailboxRoutes.js';
 import { startHyperFlowScheduler } from './hyperflowScheduler.js';
+import { createModelHealth } from './modelHealth.js';
 
 // Retrieve the OpenAI API key from environment variables.
 const { OPENAI_API_KEY } = process.env;
@@ -82,7 +83,7 @@ const VERSION = (() => {
 // does. Files are hashed by name as well as content so a rename still moves it.
 const BUILD = (() => {
     const SOURCES = [
-        'index.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
+        'index.js', 'modelHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
@@ -90,7 +91,7 @@ const BUILD = (() => {
         'plaud.js', 'safeFetch.js', 'outboundOperations.js',
         'tenantContext.js', 'tenantOperations.js', 'tenantLifecycle.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
         'emailDelivery.js', 'emailTriage.js', 'emailReplyRoutes.js',
-        'mailboxService.js', 'mailboxRoutes.js', 'gmailMailbox.js', 'outlookMailbox.js',
+        'mailboxService.js', 'draftRecipientComparison.js', 'mailboxRoutes.js', 'gmailMailbox.js', 'outlookMailbox.js',
         'mailboxOAuth.js', 'mailboxCrypto.js',
         'console.html', 'home.html', 'package.json',
     ];
@@ -162,13 +163,18 @@ fastify.get('/console', async (request, reply) => {
     reply.type('text/html').send(CONSOLE_HTML);
 });
 
-// Health check: reports which optional features are wired up.
+const modelHealth = createModelHealth();
+const stopModelHealth = modelHealth.start();
+fastify.addHook('onClose', async () => stopModelHealth());
+
+// Liveness stays cheap; model readiness is a cached, independently timed probe.
 fastify.get('/health', async (request, reply) => {
     const persistenceProvider = databaseProvider();
     reply.send({
         status: 'ok',
         version: VERSION,
         build: BUILD,
+        llm: modelHealth.read(),
         model: DEFAULT_CONFIG.model,
         playIntro: DEFAULT_CONFIG.playIntro,
         persistenceProvider,
@@ -197,6 +203,11 @@ fastify.get('/health', async (request, reply) => {
         // any length of time means streams are not claiming them.
         preconnect: preconnectEnabled() ? { enabled: true, pending: pendingCount() } : { enabled: false },
     });
+});
+
+fastify.post('/health/models/refresh', async (request, reply) => {
+    if (!isAuthorized(request)) return reply.code(401).send({ error: 'Invalid or missing X-API-Key' });
+    return reply.send(await modelHealth.refresh());
 });
 
 // --- First-word latency instrumentation ------------------------------------
