@@ -661,3 +661,7 @@ Focused verification: `node --test test/ambientCapture.test.js test/tools.test.j
 A working result means a small billable request was accepted at `checkedAt`; it does not expose or guarantee a remaining account balance. Credit/quota exhaustion, throttling, authentication, missing models, timeouts and provider outages remain separate failures. Stale or checking results are not current readiness evidence. The inventory covers service defaults and environment overrides; per-contact voice overrides and HyperFlow's separately hosted Gemini integration are outside its scope. No call, SMS, email, or diary operation is created by a check. See [health semantics](docs/API_REFERENCE.md#health).
 
 Production startup applies all numbered migrations through `041`. Migrations `026`-`041` add draft review/version recovery, promise evidence and publication constraints, operational review, contact identity, and Outlook change keys. Keep the Replit checkout and published fingerprint aligned with GitHub before resuming held operations.
+
+### Project reception
+
+Supports HyperFlow number-to-project receptionist directories, scoped context switching, caller verification and bounded enquiry/booking/Ask tools. See [the API reference](docs/API_REFERENCE.md#project-reception-opt-in-hyperflow-directory). Activation is controlled by HyperFlow; deploying Communications alone does not publish services.

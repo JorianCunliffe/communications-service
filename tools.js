@@ -1,3 +1,4 @@
+import { receptionTools } from './receptionVoice.js';
 import { ambientCaptureTool, captureConfigured } from './ambientCapture.js';
 import { reviewVoiceTool } from './reviewVoice.js';
 // Tool definitions the assistant may call during a call.
@@ -62,6 +63,7 @@ export function filterTurns(turns, query) {
 }
 
 const TOOLS = {
+    ...receptionTools,
     captureWorkItem: ambientCaptureTool,
     operational_review: reviewVoiceTool,
     select_hyperflow_project: {

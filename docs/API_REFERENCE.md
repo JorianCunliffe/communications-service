@@ -1572,3 +1572,15 @@ The Realtime tool `captureWorkItem` accepts `rawText` and `idempotencyKey`, with
 The tool is available when `COMMUNICATIONS_WEBHOOK_SECRET` and either existing HyperFlow URL setting are configured. Inbound context must return `captureEnabled:true`; outbound calls carry canonical communication/thread IDs into tool context. Missing identity, rejection, invalid response or timeout is a tool failure, never a successful capture. Retry an uncertain result with the same payload and key. This endpoint cannot execute, schedule or resolve captured work.
 
 Contact creation is atomic. Migration `040_contact_phone_identity.sql` reuses the phone identity inserted by the contact trigger, preserving explicit metadata and rejecting identities owned by a different person. Deploy with `npm run start:production` so the migration runner applies it before serving requests.
+
+## Project reception (opt-in HyperFlow directory)
+
+`GET /v1/reception/lines` requires authenticated tenant `communications:read`. Returns only `{data:[{identity,enabled}]}` from the tenant's configured `twilio_number` rows. No prompts, credentials or contact overrides are returned. HyperFlow uses this read-only endpoint for line ownership readiness.
+
+Inbound context continues to use the signed `/api/agent/voice-context` contract. New `reception` response metadata identifies the server-owned session, policy version and current project segment. Fixed `reception_*` voice tools POST signed exact bodies to `/api/agent/reception`; tenant/person/call/thread/line and the stable operation ID come from server call state, not tool arguments.
+
+Project selection removes prior model messages and tools from the working context. Reception identity replaces contact persona prompts. All inbound prompts suppress unscoped legacy `combined_history`; routine history comes from scoped HyperFlow context. Mixed reception calls and verification messages are memory-ineligible. Routine project segments are submitted separately; verification/staff segments are excluded. Raw calls retain their original reception purpose and are never relabelled to the last selected project.
+
+`record_segments` is an internal signed service command, never a model tool. The bounded tool set is enquiry capture/selection, caller verification, pending Ask selection, availability, action preparation/confirmation and reconciliation. No arbitrary URL, project authority, code or credential tool is exposed. Verification tool arguments are redacted. Inbound call completion does not resolve a Human Ask; verified answers go through its owning HyperFlow mechanism.
+
+Deploy with the matching HyperFlow release and keep `PROJECT_RECEPTION_ENABLED=false` there until fixture and controlled Jorian tests pass. Existing unconfigured lines retain legacy routing. Provider acceptance still requires fresh controlled handset tests.

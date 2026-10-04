@@ -1,3 +1,4 @@
+import { receptionToolNames } from './receptionVoice.js';
 import { ambientCaptureInstructions } from './ambientCapture.js';
 import { createHmac, randomUUID } from 'node:crypto';
 import { safeFetch } from './safeFetch.js';
@@ -80,7 +81,7 @@ export async function requestHyperFlowVoiceContext({
 export function applyHyperFlowVoiceContext(config, context) {
     // Keep explicit line/contact instructions, but not the generic demo persona.
     // Retain the original base so a project switch replaces stale context.
-    const base = config.hyperflowBaseInstructions ??
+    const base = context.reception ? 'You are the receptionist identified by the trusted reception context.' : config.hyperflowBaseInstructions ??
         (config.systemMessage === DEFAULT_CONFIG.systemMessage ? 'You are HyperFlow, a concise and practical assistant.' : config.systemMessage);
     const evidence = context.project?.context ? JSON.stringify(context.project.context).slice(0, 30000) : null;
     const scopedInstructions = [
@@ -94,14 +95,16 @@ export function applyHyperFlowVoiceContext(config, context) {
         hyperflowBaseInstructions: base,
         systemMessage: `${base}\n\n${scopedInstructions}`,
         greetingText: context.greeting,
+        ...(context.reception ? {playIntro:false,introMessage:null,introMessage2:null,assistantName:context.reception.name} : {}),
         aiSpeaksFirst: true,
         liveTranscript: true,
         wantsHistory: false,
         tools: [...new Set([
             ...(config.tools || []).filter((name) => ['end_call', 'get_current_time'].includes(name)),
             'select_hyperflow_project',
-            ...(context.captureEnabled === true ? ['captureWorkItem'] : []),
+            ...(context.reception ? receptionToolNames(context.reception) : context.captureEnabled === true ? ['captureWorkItem'] : []),
         ])],
         hyperflowRouting: context.routing || null,
+        reception: context.reception || null,
     };
 }

@@ -1,3 +1,4 @@
+import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import Fastify from 'fastify';
@@ -268,7 +269,7 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
         console.warn(`Inbound conversation resolution unavailable: ${error.message}`);
         return reply.code(503).type('text/xml').send('<Response><Say>Conversation context is temporarily unavailable. Please try again later.</Say><Hangup/></Response>');
     }
-    const semanticThreadId = semantic.threadId;
+    let semanticThreadId = semantic.threadId;
     let routingContext = null;
     if (config.personId) {
         try {
@@ -280,6 +281,7 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
                 serviceIdentity: params.To,
             });
             config = applyHyperFlowVoiceContext(config, routingContext);
+            if(routingContext.reception?.threadId)semanticThreadId=routingContext.reception.threadId;
         } catch (error) {
             console.warn(`HyperFlow voice context unavailable for ${params.CallSid}: ${error.message}`);
             config = {
@@ -345,12 +347,12 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
         communicationId,
         tenantId: config.tenantId,
         threadId: semanticThreadId,
-        purpose: semantic.purpose,
+        purpose: routingContext?.reception ? {type:'project_reception',session_id:routingContext.reception.sessionId} : semantic.purpose,
         correlation: {
-            ...semantic.correlation,
+            ...(routingContext?.reception ? {} : semantic.correlation),
             tenant_id: config.tenantId,
             person_id: config.personId,
-            ...(routingContext?.routing?.projectId ? { external_project_id: routingContext.routing.projectId } : {}),
+            ...(!routingContext?.reception && routingContext?.routing?.projectId ? { external_project_id: routingContext.routing.projectId } : {}),
         },
     }).then((stored) => {
         if (!stored) return;
@@ -1017,7 +1019,10 @@ fastify.register(async (fastify) => {
             return Number.isFinite(value) ? value : null;
         };
 
+        const receptionTranscript=new Map(), receptionItemScopes=new Map(), privateReceptionSegments=new Set();
         const noteSegment = (segment) => {
+            const scope=segment?.receptionScope;
+            if(scope?.segmentId){if(scope.verification==='verified')privateReceptionSegments.add(scope.segmentId);const group=receptionTranscript.get(scope.segmentId)||{id:scope.segmentId,text:'',private:false};group.text+=`${segment.role}: ${segment.text}\n`;receptionTranscript.set(scope.segmentId,group);}
             // The flag has to gate the capture, not just the session payload.
             // OpenAI returns the assistant's own output transcript whether or
             // not input transcription was asked for, so without this every call
@@ -1170,6 +1175,7 @@ fastify.register(async (fastify) => {
         // throws: executeTool resolves with an error rather than rejecting, so
         // a broken tool produces something the model can say out loud instead
         // of an exception that leaves the caller in silence.
+        const receptionContextItems = new Set();
         const handleToolCall = async (event) => {
             const toolCallId = event.call_id;
             const name = event.name;
@@ -1186,6 +1192,7 @@ fastify.register(async (fastify) => {
                 console.warn(`Tool ${name} sent arguments that would not parse: ${event.arguments}`);
             }
 
+            if(config.reception&&privateReceptionTool(name,args))privateReceptionSegments.add(config.reception.segmentId);
             const generation = toolGeneration;
             // The caller's number, so a tool can answer "what did we say last
             // time" about the right person. The media stream only ever sees a
@@ -1198,10 +1205,11 @@ fastify.register(async (fastify) => {
                 threadId: config.threadId || null,
                 communicationId: config.communicationId || null,
                 serviceIdentity: config.serviceIdentity || null,
+                toolCallId, reception:config.reception,
             });
             console.log(`Tool ${name} ${error ? `failed: ${error}` : 'ok'} (${durationMs}ms)`);
 
-            if (generation === toolGeneration && name === 'select_hyperflow_project' && !error && output?.routing?.kind === 'routed' && output.routing.projectId) {
+            if (generation === toolGeneration && name === 'select_hyperflow_project' && !error && !output?.reception && output?.routing?.kind === 'routed' && output.routing.projectId) {
                 try {
                     const selectedCorrelation = await updateCallProjectContext({
                         callSid,
@@ -1217,7 +1225,7 @@ fastify.register(async (fastify) => {
 
             // Not awaited: the model is waiting on the result, not the audit row.
             recordToolCall({
-                callSid, openAiCallId: toolCallId, name, args,
+                callSid, openAiCallId: toolCallId, name, args: name==='reception_verify'?{redacted:true}:args,
                 result: output ?? null, error: error ?? null, durationMs,
                 tenantId: config.tenantId || null,
             });
@@ -1229,7 +1237,9 @@ fastify.register(async (fastify) => {
             if (!openAiWs || openAiWs.readyState !== WebSocket.OPEN) return;
 
             if (name === 'select_hyperflow_project' && !error && output?.instructions) {
+                if(output.reception?.resetContext)clearReceptionContext(openAiWs,receptionContextItems,event.item_id);
                 config = applyHyperFlowVoiceContext(config, output);
+                storeCallConfig(callSid,config);
                 openAiWs.send(JSON.stringify(buildSessionUpdate(config)));
             }
 
@@ -1295,6 +1305,8 @@ fastify.register(async (fastify) => {
         const handleOpenAiMessage = (data) => {
             try {
                 const response = JSON.parse(data);
+                if(response.item?.id){receptionContextItems.add(response.item.id);if(!receptionItemScopes.has(response.item.id))receptionItemScopes.set(response.item.id,config.reception);}
+                if(response.item_id){receptionContextItems.add(response.item_id);if(!receptionItemScopes.has(response.item_id))receptionItemScopes.set(response.item_id,config.reception);}
 
                 if (LOG_EVENT_TYPES.includes(response.type)) {
                     console.log(`Received event: ${response.type}`, response);
@@ -1360,6 +1372,7 @@ fastify.register(async (fastify) => {
                         role: 'user',
                         speaker: 'caller',
                         text: response.transcript,
+                        receptionScope:receptionItemScopes.get(response.item_id),
                         startMs: turnStartMs.get(response.item_id) ?? null,
                     });
                     turnStartMs.delete(response.item_id);
@@ -1383,6 +1396,7 @@ fastify.register(async (fastify) => {
                         role: 'assistant',
                         speaker: 'assistant',
                         text: response.transcript,
+                        receptionScope:receptionItemScopes.get(response.item_id),
                         startMs: turnStartMs.get(response.item_id) ?? null,
                     });
                     turnStartMs.delete(response.item_id);
@@ -1491,6 +1505,10 @@ fastify.register(async (fastify) => {
         // must not raise into the close handler. saveTranscript ignores an
         // empty transcript, so a call with the flag off writes nothing.
         const flushTranscript = () => {
+            if(config.reception&&receptionTranscript.size){
+                const segments=[...receptionTranscript.values()].map(s=>({...s,text:s.text.trim(),private:privateReceptionSegments.has(s.id)}));
+                receptionCommand('record_segments',{segments},{tenantId:config.tenantId,personId:config.personId,threadId:config.threadId,communicationId:config.communicationId,serviceIdentity:config.serviceIdentity,reception:config.reception,toolCallId:`segments_${config.communicationId}`}).catch(()=>console.warn('Reception segment persistence unavailable; no continuity asserted'));
+            }
             if (transcriptSegments.length === 0) return;
 
             const transcript = buildTranscript({

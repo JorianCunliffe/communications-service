@@ -102,7 +102,7 @@ export function canonicalCommunication({
             business_status: businessStatus,
             disposition,
             successful,
-            memory_eligible: memoryEligible,
+            memory_eligible: ['project_reception','reception_verification'].includes(purpose?.type) ? false : memoryEligible,
             failure_code: failureCode,
             failure_reason: failureReason,
             source: outcomeSource,
