@@ -1207,7 +1207,7 @@ Example:
   "status": "ok",
   "version": "089d3cb",
   "build": "12-character-source-fingerprint",
-  "model": "gpt-realtime",
+  "model": "gpt-realtime-2.1",
   "playIntro": false,
   "persistenceProvider": "postgres",
   "supabaseConfig": false,
@@ -1225,6 +1225,37 @@ Example:
 ```
 
 `persistenceProvider` is `supabase`, `postgres`, or `null`. `supabaseConfig` is retained for existing health consumers and `postgresPersistence` identifies the direct PostgreSQL adapter used by Replit Database. These fields report configured clients, not a live database query. `outboundCalls` specifically reflects API key, Twilio credentials, and `PUBLIC_URL`. `memoryEnrichment` and `callOutcomeClassification` do not prove migrations are applied. `email.enabled` reflects only `EMAIL_ENABLED`; `providerPipeline` reflects persistence, not provider-row or secret validity. `durableEvents` requires both `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET`; per-thread callbacks may still work when it reports `false`. `hyperflowVoiceContext` means persistence, the shared HMAC secret, and either the explicit context URL or derivable event URL are configured; it is not a live endpoint probe.
+
+### Live model readiness
+
+`GET /health` remains an HTTP 200 process-liveness endpoint. Its `llm` object reports independent readiness:
+
+```json
+{
+  "status": "working",
+  "allWorking": true,
+  "checkedAt": "2026-10-04T00:30:00.000Z",
+  "stale": false,
+  "checking": false,
+  "intervalSeconds": 900,
+  "scope": "service_defaults_and_environment_overrides",
+  "creditBalance": "not_exposed_by_provider",
+  "models": [{"provider":"openai","model":"gpt-realtime-2.1","transport":"realtime","roles":["voice"],"status":"working","usable":true,"credits":"request_accepted"}]
+}
+```
+
+The full array includes default voice/live transcription, recording transcription (`TRANSCRIBE_MODEL`), summaries (`SUMMARY_MODEL`), memory (`MEMORY_MODEL`), call outcomes (`CALL_OUTCOME_MODEL`), promises and operational review (`PROMISE_MODEL`), with the same fallback order as the workers. Checks sharing a model and transport are deduplicated. Per-contact voice overrides and models hosted in HyperFlow are outside this inventory.
+
+At startup and every 15 minutes, bounded 15-second provider probes generate a short text response, complete a Realtime text response, or submit a synthetic one-second silent WAV to transcription. These incur small provider charges but create no communications or business records. Public health reads never trigger them. `working` requires provider completion; merely opening a WebSocket or configuring a key is insufficient. An accepted request demonstrates quota/credit access at that moment, not the remaining balance.
+
+Failures use safe categories: `not_configured`, `authentication_failed`, `quota_or_credit_exhausted`, `rate_limited`, `model_unavailable`, `provider_unavailable`, `timeout`, `connection_failed`, or `probe_failed`. Provider messages and credentials are omitted. Overall status is `checking` before the first result, otherwise `working` or `degraded`; `allWorking` describes the last result and must be read alongside `stale` and `checking`. Results become stale after 30 minutes.
+
+```http
+POST /health/models/refresh
+X-API-Key: <existing operator key>
+```
+
+Uses the existing service-wide operator key (not a tenant API client), returns the same `llm` object, and returns HTTP 401 for an invalid/missing key. Concurrent calls share one probe; refresh attempts within one minute return the cached result. Model degradation returns HTTP 200 with `allWorking:false`, keeping readiness distinct from liveness.
 
 ## Management and recording API (`/api`)
 

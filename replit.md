@@ -1,6 +1,6 @@
 # Communications Service
 
-A purpose-aware, tenant-isolated communications API (v2.4.0) built with Fastify, Twilio, OpenAI Realtime, and PostgreSQL.
+A purpose-aware, tenant-isolated communications API (v2.8.2) built with Fastify, Twilio, OpenAI Realtime, and PostgreSQL.
 
 ## How to run
 
@@ -10,13 +10,13 @@ The server will not start without `OPENAI_API_KEY`. Add it via the Secrets panel
 
 ## Database
 
-Replit uses its built-in PostgreSQL database. `DATABASE_URL` is injected automatically. The migration runner applies numbered migrations 000 through 038 once, in order:
+Replit uses its built-in PostgreSQL database. `DATABASE_URL` is injected automatically. The migration runner applies numbered migrations 000 through 041 once, in order:
 
 ```sh
 npm run db:migrate
 ```
 
-Release 2.4.0 requires migration `019_ranked_thread_resolution.sql`. Pull the release before republishing; a GitHub push alone does not update a published Replit snapshot. Check the deployed `/health` build against the intended source and verify an authenticated `/v1/thread-register` read after startup. No additional provider secret is required for the register.
+Release 2.8.2 requires all numbered migrations through `041_mailbox_outlook_change_key.sql`. Pull the release before republishing; a GitHub push alone does not update a published Replit snapshot. Check the deployed `/health` build against the intended source and verify an authenticated `/v1/thread-register` read after startup. No additional provider secret is required for the register.
 
 Run `npm run test:unit` and `npm run test:db` for credential-free checks. The latter uses an isolated PostgreSQL fixture, not the production database. See `docs/THREADING.md` for the model and rollout checks.
 
@@ -53,7 +53,7 @@ When `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET` are present, the 
 - `callOutcome.js` - durable post-call classification and terminal-event finalization
 - `memory.js` / `enrichment.js` - memory reads and asynchronous enrichment
 - `eventOutbox.js` - signed, replay-safe event delivery to HyperFlow
-- `migrations/` - SQL migrations 000 through 038
+- `migrations/` - SQL migrations 000 through 041
 - `scripts/migrate.js` - migration runner used by production startup
 - `docs/API_REFERENCE.md` - complete API reference
 
@@ -67,3 +67,5 @@ When `HYPERFLOW_EVENT_URL` and `COMMUNICATIONS_WEBHOOK_SECRET` are present, the 
 See [Phase 02 record](docs/implementation/P02.md) for migration 020, actor assertion capability, project safeguards and local acceptance limits.
 
 Operational review rollout requires current main and migrations 031–038. See `docs/OPERATIONAL_REVIEW_DELIVERY.md` for owner mappings, executor capabilities, source synchronization and opt-in dispatch controls.
+
+Model readiness is exposed in `/health.llm`, checked at startup and every 15 minutes. The public endpoint only reads cached results; authenticated `POST /health/models/refresh` permits a bounded operator refresh. Successful probes prove request acceptance, not an account balance.
