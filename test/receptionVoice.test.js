@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { applyHyperFlowVoiceContext } from "../hyperflowVoice.js";
 import {
   receptionCommand,
+  privateReceptionTool,
   receptionTools,
   clearReceptionContext,
 } from "../receptionVoice.js";
@@ -119,4 +120,10 @@ test("whole reception calls and verification SMS are not eligible cross-project 
     "utf8",
   );
   assert(resolver.includes("combined_history:null"));
+});
+
+test("staff answers remain private even when the model prepares a known Ask directly", () => {
+  assert(privateReceptionTool("reception_prepare_action", {kind:"ask"}));
+  assert(privateReceptionTool("reception_pending_asks"));
+  assert(!privateReceptionTool("reception_prepare_action", {kind:"booking"}));
 });

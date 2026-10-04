@@ -1,4 +1,4 @@
-import { clearReceptionContext, receptionCommand } from './receptionVoice.js';
+import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import Fastify from 'fastify';
@@ -1022,7 +1022,7 @@ fastify.register(async (fastify) => {
         const receptionTranscript=new Map(), receptionItemScopes=new Map(), privateReceptionSegments=new Set();
         const noteSegment = (segment) => {
             const scope=segment?.receptionScope;
-            if(scope?.segmentId){const group=receptionTranscript.get(scope.segmentId)||{id:scope.segmentId,text:'',private:false};group.text+=`${segment.role}: ${segment.text}\n`;receptionTranscript.set(scope.segmentId,group);}
+            if(scope?.segmentId){if(scope.verification==='verified')privateReceptionSegments.add(scope.segmentId);const group=receptionTranscript.get(scope.segmentId)||{id:scope.segmentId,text:'',private:false};group.text+=`${segment.role}: ${segment.text}\n`;receptionTranscript.set(scope.segmentId,group);}
             // The flag has to gate the capture, not just the session payload.
             // OpenAI returns the assistant's own output transcript whether or
             // not input transcription was asked for, so without this every call
@@ -1192,7 +1192,7 @@ fastify.register(async (fastify) => {
                 console.warn(`Tool ${name} sent arguments that would not parse: ${event.arguments}`);
             }
 
-            if(config.reception&&['reception_verify','reception_pending_asks','reception_select_ask'].includes(name))privateReceptionSegments.add(config.reception.segmentId);
+            if(config.reception&&privateReceptionTool(name,args))privateReceptionSegments.add(config.reception.segmentId);
             const generation = toolGeneration;
             // The caller's number, so a tool can answer "what did we say last
             // time" about the right person. The media stream only ever sees a

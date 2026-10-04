@@ -166,6 +166,11 @@ export function receptionToolNames(context) {
   ];
 }
 
+export function privateReceptionTool(name, args = {}) {
+  return ["reception_verify", "reception_pending_asks", "reception_select_ask"].includes(name)
+    || (name === "reception_prepare_action" && args.kind === "ask");
+}
+
 /** Delete every previous model conversation item on a service switch. No transcript
  * or tool output from the former service survives in the model context. */
 export function clearReceptionContext(socket, itemIds, currentItemId) {
