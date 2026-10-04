@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ingestCanonicalInboundEmail } from './emailWebhook.js';
 import { safeHtml } from './email.js';
+import { draftRecipientListsMatch } from './draftRecipientComparison.js';
 import {
     createGmailDraft,
     updateGmailDraft,
@@ -445,6 +446,20 @@ function requestHash(value) {
     return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+const UPDATE_REQUEST_HASH_FIELDS = ['to', 'cc', 'bcc', 'reply_to', 'subject', 'text', 'html', 'revision'];
+
+function updateRequestHash(request, recoveryBinding = null) {
+    const hashRequest = Object.fromEntries(UPDATE_REQUEST_HASH_FIELDS
+        .filter(key => request?.[key] !== undefined)
+        .map(key => [key, request[key]]));
+    const canonicalBinding = recoveryBinding ? {
+        failed_update_receipt_id: recoveryBinding.failed_update_receipt_id,
+        reviewed_content_hash: recoveryBinding.reviewed_content_hash,
+        expected_revision: recoveryBinding.expected_revision,
+    } : null;
+    return requestHash(canonicalBinding ? { ...hashRequest, recovery_binding: canonicalBinding } : hashRequest);
+}
+
 export async function createMailboxDraft(db, { tenantId, connectionId, actorId = null, idempotencyKey, request, credentialOverride, providerOps = {} }) {
     if (!idempotencyKey) throw new Error('Idempotency-Key header is required for mailbox drafts');
     const connection = await selectedConnection(db, tenantId, connectionId);
@@ -613,6 +628,17 @@ export function draftContentHash(preview) {
     });
 }
 
+function outlookDraftPreviewVerifiable(provider) {
+    const body = provider?.body;
+    const supportedBodyType = ['text', 'html'].includes(String(body?.contentType || '').toLowerCase());
+    const recipients = ['toRecipients', 'ccRecipients', 'bccRecipients', 'replyTo'];
+    return typeof provider?.subject === 'string'
+        && supportedBodyType
+        && typeof body?.content === 'string'
+        && recipients.every(field => Array.isArray(provider[field])
+            && provider[field].every(item => typeof item?.emailAddress?.address === 'string' && item.emailAddress.address.length > 0));
+}
+
 export async function getMailboxDraft(db, { tenantId, connectionId, draftId }, deps = {
     accessCredential, getOutlookDraft, getGmailDraft,
 }) {
@@ -717,7 +743,183 @@ function normalizedUpdateRequest(request = {}) {
 
 function draftFieldsMatch(request, current) {
     const entries = Object.entries(request);
-    return entries.length > 0 && entries.every(([key, value]) => JSON.stringify(value) === JSON.stringify(normalizeDraftValue(key, current[key])));
+    return entries.length > 0 && entries.every(([key, value]) =>
+        ['to', 'cc', 'bcc', 'reply_to'].includes(key)
+            ? draftRecipientListsMatch(value, current[key])
+            : JSON.stringify(value) === JSON.stringify(normalizeDraftValue(key, current[key])));
+}
+
+function recoveryBindingFromReceipt(receipt) {
+    const binding = receipt?.update_request?.recovery_binding;
+    if (!binding || typeof binding.failed_update_receipt_id !== 'string'
+        || typeof binding.reviewed_content_hash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(binding.reviewed_content_hash)
+        || !Number.isInteger(binding.expected_revision)) return null;
+    return binding;
+}
+
+function validStoredEditableRequest(request) {
+    if (!request || typeof request !== 'object' || Array.isArray(request)
+        || Object.keys(request).length === 0
+        || Object.keys(request).some(key => !DRAFT_EDITABLE_FIELDS.includes(key))) return false;
+    return Object.entries(request).every(([key, value]) => {
+        const isRecipientList = ['to', 'cc', 'bcc', 'reply_to'].includes(key);
+        return isRecipientList
+            ? Array.isArray(value) && value.every(item => typeof item === 'string')
+            : typeof value === 'string';
+    });
+}
+
+function hasExactKeys(value, keys) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value).length === keys.length
+        && keys.every(key => Object.hasOwn(value, key));
+}
+
+function matchingStoredEditableRequest(left, right) {
+    const leftFields = editableReceiptRequest(left);
+    const rightFields = editableReceiptRequest(right);
+    return Object.keys(leftFields).length === Object.keys(rightFields).length
+        && Object.keys(leftFields).every(key => Object.hasOwn(rightFields, key)
+            && JSON.stringify(leftFields[key]) === JSON.stringify(rightFields[key]));
+}
+
+function verifiedLinkedRecoveryBinding(candidate, {
+    original, draft, tenantId, connectionId, draftId,
+}) {
+    const baseRevision = original.base_revision;
+    if (!Number.isInteger(baseRevision) || baseRevision < 1
+        || original.status !== 'failed' || original.error_code !== 'DRAFT_PROVIDER_CHANGED'
+        || Number(original.error_status) !== 409
+        || !validStoredEditableRequest(original.update_request)) return null;
+
+    const request = candidate?.update_request;
+    const binding = request?.recovery_binding;
+    if (!candidate
+        || typeof candidate.id !== 'string' || !candidate.id || candidate.id === original.id
+        || typeof candidate.idempotency_key !== 'string' || !candidate.idempotency_key
+        || candidate.idempotency_key === original.idempotency_key
+        || candidate.tenant_id !== tenantId
+        || candidate.provider_connection_id !== connectionId
+        || candidate.mailbox_draft_id !== draft.id
+        || !Number.isInteger(candidate.base_revision) || candidate.base_revision !== baseRevision
+        || !request || typeof request !== 'object' || Array.isArray(request)
+        || !hasExactKeys(binding, ['failed_update_receipt_id', 'reviewed_content_hash', 'expected_revision'])
+        || binding.failed_update_receipt_id !== original.id
+        || typeof binding.reviewed_content_hash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(binding.reviewed_content_hash)
+        || !Number.isInteger(binding.expected_revision) || binding.expected_revision !== baseRevision
+        || Object.keys(request).some(key => key !== 'recovery_binding' && !DRAFT_EDITABLE_FIELDS.includes(key))) return null;
+
+    const candidateEditable = editableReceiptRequest(request);
+    if (!validStoredEditableRequest(candidateEditable)
+        || Object.keys(request).length !== Object.keys(candidateEditable).length + 1
+        || !matchingStoredEditableRequest(original.update_request, candidateEditable)
+        || candidate.request_hash !== updateRequestHash({
+            ...candidateEditable,
+            revision: binding.expected_revision,
+        }, binding)) return null;
+    return binding;
+}
+
+function verifiedLinkedRecoveryResult(candidate, scope) {
+    const binding = verifiedLinkedRecoveryBinding(candidate, scope);
+    if (!binding || candidate.status !== 'updated') return null;
+    const { original, draft, draftId } = scope;
+    const baseRevision = original.base_revision;
+    const result = candidate.result;
+    const currentRevision = Number(draft.revision || 1);
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+        || result.id !== draft.id
+        || result.status !== 'created'
+        || result.provider_draft_id !== draftId
+        || result.provider_message_id !== draftId
+        || !Number.isInteger(result.revision) || result.revision !== baseRevision + 1
+        || !Number.isInteger(currentRevision) || currentRevision < result.revision
+        || typeof result.provider_change_key !== 'string' || !result.provider_change_key.trim()
+        || result.update_receipt_id !== candidate.id
+        || result.recovered_from_receipt_id !== original.id
+        || result.reviewed_content_hash !== binding.reviewed_content_hash) return null;
+    return result;
+}
+
+function draftUpdateLeaseExpired(value, now = Date.now()) {
+    // Native pg reads preserve timestamptz as Date; JSON clients return strings.
+    // Do not coerce missing, numeric or malformed values into an expired lease.
+    const timestamp = value instanceof Date ? value.getTime()
+        : typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(timestamp) && timestamp <= now;
+}
+
+async function resolveLinkedRecoveryResult(db, {
+    tenantId, connectionId, draft, draftId, original, connection, credentialOverride, providerOps,
+}) {
+    const linked = await db.from('mailbox_draft_update_receipts').select('*')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+        .eq('mailbox_draft_id', draft.id)
+        .contains('update_request', { recovery_binding: { failed_update_receipt_id: original.id } });
+    if (linked.error) throw new Error(linked.error.message);
+    // A completed successor and an outstanding successor are also ambiguous.
+    // Failed attempts remain history, not alternative successful outcomes.
+    const candidates = (linked.data || []).filter(receipt => receipt.status !== 'failed');
+    if (candidates.length !== 1) return null;
+    const candidate = candidates[0];
+    const scope = { original, draft, tenantId, connectionId, draftId };
+    if (candidate.status === 'updated') return verifiedLinkedRecoveryResult(candidate, scope);
+    if (!['uncertain', 'applying'].includes(candidate.status)
+        || !verifiedLinkedRecoveryBinding(candidate, scope)
+        || candidate.result != null
+        || draft.active_update_id !== candidate.id
+        || Number(draft.revision) !== candidate.base_revision) return null;
+
+    // Resume the existing claim, not the original failed operation or a new
+    // recovery. The original review hash authorizes that receipt; it is not a
+    // requirement that the post-write draft still hash to its pre-write body.
+    const now = Date.now();
+    if (!draftUpdateLeaseExpired(candidate.lease_until, now)
+        || !draftUpdateLeaseExpired(draft.active_update_lease_until, now)) {
+        throw draftUpdateError('Another draft update is in progress; retry after its lease expires', 409, 'DRAFT_UPDATE_IN_PROGRESS');
+    }
+    if (typeof db.transaction !== 'function') {
+        throw draftUpdateError('Atomic draft claim verification is unavailable; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    try {
+        const credential = credentialOverride || await accessCredential(db, tenantId, connection);
+        return await reconcileDraftUpdate(db, {
+            tenantId, connectionId, draft, receipt: candidate, draftId, connection, credential, providerOps,
+            requireActiveClaim: true,
+        });
+    } catch (error) {
+        if (error.code === 'DRAFT_RECONCILIATION_REQUIRED' || error.code === 'DRAFT_UPDATE_IN_PROGRESS') throw error;
+        throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+}
+
+function editableReceiptRequest(request = {}) {
+    return Object.fromEntries(DRAFT_EDITABLE_FIELDS
+        .filter(key => request[key] !== undefined)
+        .map(key => [key, request[key]]));
+}
+
+function effectiveOutlookReceiptRequest(request = {}) {
+    const editable = editableReceiptRequest(request);
+    // Graph uses HTML when both alternatives are supplied to a draft PATCH.
+    if (editable.html !== undefined && editable.text !== undefined) delete editable.text;
+    return editable;
+}
+
+function assertVerifiableRecoveryResult(provider, draftId) {
+    if (provider?.id !== draftId || provider?.isDraft !== true
+        || !outlookDraftPreviewVerifiable(provider)
+        || typeof provider.changeKey !== 'string' || !provider.changeKey) {
+        const error = draftUpdateError(
+            'Outlook recovery result is incomplete or unverifiable; reconcile before retrying',
+            409,
+            'DRAFT_RECONCILIATION_REQUIRED',
+        );
+        error.providerAfterMutation = true;
+        throw error;
+    }
 }
 
 function providerDraftData(provider, providerName, mailboxAddress) {
@@ -731,9 +933,9 @@ function providerDraftData(provider, providerName, mailboxAddress) {
     };
 }
 
-async function currentEditableProviderDraft(connection, credential, draftId, providerOps = {}) {
+async function currentEditableProviderDraft(connection, credential, draftId, providerOps = {}, { textBody = false } = {}) {
     const provider = connection.provider === 'outlook'
-        ? await (providerOps.getOutlookDraft || getOutlookDraft)(credential.access_token, draftId)
+        ? await (providerOps.getOutlookDraft || getOutlookDraft)(credential.access_token, draftId, ...(textBody ? [{ textBody: true }] : []))
         : await (providerOps.getGmailDraft || getGmailDraft)(credential.access_token, draftId, { format: 'full' });
     if (!provider?.id || provider.id !== draftId) throw draftUpdateError('Provider draft was not found', 404, 'DRAFT_NOT_FOUND');
     if (connection.provider === 'outlook' && provider.isDraft !== true) {
@@ -751,7 +953,7 @@ async function currentEditableProviderDraft(connection, credential, draftId, pro
     return { provider, ...providerDraftData(provider, connection.provider, connection.provider_account_id) };
 }
 
-async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptId, draftId, providerData, expectedRevision }) {
+async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptId, draftId, providerData, expectedRevision, recoveryBinding = null, requireActiveClaim = false }) {
     const nextRevision = expectedRevision + 1;
     const result = updateResult({
         ...draft,
@@ -762,7 +964,12 @@ async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptI
         updated_at: null,
     });
     result.provider_change_key = providerData.provider_change_key;
-    const finalized = await db.rpc('finalize_mailbox_draft_update', {
+    if (recoveryBinding) {
+        result.update_receipt_id = receiptId;
+        result.recovered_from_receipt_id = recoveryBinding.failed_update_receipt_id;
+        result.reviewed_content_hash = recoveryBinding.reviewed_content_hash;
+    }
+    const args = {
         p_tenant_id: tenantId,
         p_provider_connection_id: connectionId,
         p_mailbox_draft_id: draft.id,
@@ -772,31 +979,69 @@ async function finalizeDraftUpdate(db, { tenantId, connectionId, draft, receiptI
         p_provider_thread_id: result.provider_thread_id,
         p_expected_revision: expectedRevision,
         p_result: result,
-    });
+    };
+    if (requireActiveClaim) {
+        if (typeof db.transaction !== 'function') {
+            throw draftUpdateError('Atomic draft claim verification is unavailable; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+        }
+        return db.transaction(async tx => {
+            if (typeof tx.lockMailboxDraftUpdateClaim !== 'function'
+                || !await tx.lockMailboxDraftUpdateClaim(args)) {
+                throw draftUpdateError('Draft update claim changed; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            }
+            const finalized = await tx.rpc('finalize_mailbox_draft_update', args);
+            // Throw within the transaction so failed finalization rolls back.
+            // A missing durable result is never replaced by fabricated success.
+            if (finalized.error || !finalized.data) {
+                throw draftUpdateError('Draft update finalization is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            }
+            return finalized.data;
+        });
+    }
+    const finalized = await db.rpc('finalize_mailbox_draft_update', args);
     if (finalized.error) {
         throw draftUpdateError('Draft update finalization is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
     }
     return finalized.data || result;
 }
 
-async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt, draftId, connection, credential, providerOps }) {
+async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt, draftId, connection, credential, providerOps, requireActiveClaim = false }) {
     const leaseActive = draft.active_update_id === receipt.id
-        && (!receipt.lease_until || new Date(receipt.lease_until).valueOf() > Date.now());
+        && !draftUpdateLeaseExpired(receipt.lease_until);
     if (leaseActive) {
         throw draftUpdateError('Another draft update is in progress; retry after its lease expires', 409, 'DRAFT_UPDATE_IN_PROGRESS');
     }
+    const recoveryBinding = recoveryBindingFromReceipt(receipt);
+    if (receipt?.update_request?.recovery_binding !== undefined && !recoveryBinding) {
+        throw draftUpdateError('Draft recovery receipt binding is unverifiable; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    const storedEditableRequest = editableReceiptRequest(receipt.update_request || {});
+    const plainTextRecovery = recoveryBinding && storedEditableRequest.text !== undefined && storedEditableRequest.html === undefined;
     let current;
     try {
-        current = await currentEditableProviderDraft(connection, credential, draftId, providerOps);
+        current = await currentEditableProviderDraft(connection, credential, draftId, providerOps, {
+            textBody: plainTextRecovery,
+        });
     } catch {
         throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
     }
-    if (!draftFieldsMatch(receipt.update_request || {}, current.fields)) {
+    if (recoveryBinding) {
+        try {
+            assertVerifiableRecoveryResult(current.provider, draftId);
+        } catch {
+            throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+        }
+    }
+    const receiptRequest = recoveryBinding && connection.provider === 'outlook'
+        ? effectiveOutlookReceiptRequest(receipt.update_request || {})
+        : editableReceiptRequest(receipt.update_request || {});
+    if (!draftFieldsMatch(receiptRequest, current.fields)) {
         throw draftUpdateError('Draft provider outcome is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
     }
     return finalizeDraftUpdate(db, {
         tenantId, connectionId, draft, receiptId: receipt.id, draftId,
         providerData: current, expectedRevision: Number(receipt.base_revision || draft.revision || 1),
+        recoveryBinding, requireActiveClaim,
     });
 }
 
@@ -807,14 +1052,16 @@ async function reconcileDraftUpdate(db, { tenantId, connectionId, draft, receipt
  */
 export async function updateMailboxDraft(db, {
     tenantId, connectionId, draftId, actorId = null, idempotencyKey, request,
-    providerOps = {}, credentialOverride = null,
+    providerOps = {}, credentialOverride = null, reviewedRecovery = null,
 }) {
     if (!idempotencyKey) throw draftUpdateError('Idempotency-Key header is required for mailbox draft updates', 400, 'IDEMPOTENCY_REQUIRED');
     const connection = await selectedConnection(db, tenantId, connectionId);
-    const hashRequest = Object.fromEntries(['to', 'cc', 'bcc', 'reply_to', 'subject', 'text', 'html', 'revision']
-        .filter(key => request?.[key] !== undefined)
-        .map(key => [key, request[key]]));
-    const hash = requestHash(hashRequest);
+    const recoveryBinding = reviewedRecovery ? {
+        failed_update_receipt_id: reviewedRecovery.failedUpdateReceiptId,
+        reviewed_content_hash: reviewedRecovery.reviewedContentHash,
+        expected_revision: reviewedRecovery.expectedRevision,
+    } : null;
+    const hash = updateRequestHash(request, recoveryBinding);
     const draft = await db.from('mailbox_drafts').select('*')
         .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
         .eq('provider_draft_id', draftId).maybeSingle();
@@ -834,6 +1081,15 @@ export async function updateMailboxDraft(db, {
         }
         if (existing.data.status === 'updated') return existing.data.result || updateResult(draft.data);
         if (existing.data.status === 'failed') {
+            if (connection.provider === 'outlook'
+                && existing.data.error_code === 'DRAFT_PROVIDER_CHANGED'
+                && Number(existing.data.error_status) === 409) {
+                const recovered = await resolveLinkedRecoveryResult(db, {
+                    tenantId, connectionId, draft: draft.data, draftId, original: existing.data,
+                    connection, credentialOverride, providerOps,
+                });
+                if (recovered) return recovered;
+            }
             throw draftUpdateError(existing.data.last_error || 'Draft update previously failed', existing.data.error_status || 502, existing.data.error_code || 'DRAFT_PROVIDER_FAILED');
         }
         if (['applying', 'uncertain'].includes(existing.data.status)) {
@@ -881,7 +1137,10 @@ export async function updateMailboxDraft(db, {
             mailbox_draft_id: draft.data.id,
             idempotency_key: idempotencyKey,
             request_hash: hash,
-            update_request: normalizedRequest,
+            update_request: {
+                ...normalizedRequest,
+                ...(recoveryBinding ? { recovery_binding: recoveryBinding } : {}),
+            },
             base_revision: Number(draft.data.revision || 1),
             status: 'reserved',
         }).select('*').single();
@@ -905,7 +1164,7 @@ export async function updateMailboxDraft(db, {
             }
         }
         return updateMailboxDraft(db, {
-            tenantId, connectionId, draftId, actorId, idempotencyKey, request, providerOps, credentialOverride,
+            tenantId, connectionId, draftId, actorId, idempotencyKey, request, providerOps, credentialOverride, reviewedRecovery,
         });
     }
 
@@ -947,20 +1206,81 @@ export async function updateMailboxDraft(db, {
         if (connection.provider === 'outlook' && !draft.data.provider_change_key) {
             throw draftUpdateError('Outlook draft has no saved change key; review and reconcile it before updating', 409, 'DRAFT_VERSION_UNAVAILABLE');
         }
+        let expectedChangeKey = draft.data.provider_change_key;
+        if (reviewedRecovery) {
+            if (connection.provider !== 'outlook') {
+                throw draftUpdateError('Reviewed update recovery is supported only for Outlook drafts', 409, 'DRAFT_RECOVERY_UNSUPPORTED');
+            }
+            const review = await readReviewableProviderDraft(db, { tenantId, connectionId, draftId }, {
+                accessCredential: async () => credential,
+                getOutlookDraft: providerOps.getOutlookDraft || getOutlookDraft,
+                getGmailDraft: providerOps.getGmailDraft || getGmailDraft,
+            });
+            if (!review || review.record.id !== draft.data.id) {
+                throw draftUpdateError('Mailbox draft not found', 404, 'DRAFT_NOT_FOUND');
+            }
+            if (review.preview.truncated || !outlookDraftPreviewVerifiable(review.provider)) {
+                throw draftUpdateError('The live draft preview is truncated or unverifiable and cannot be safely reviewed', 409, 'DRAFT_PREVIEW_UNVERIFIABLE');
+            }
+            if (review.preview.content_hash !== recoveryBinding.reviewed_content_hash) {
+                throw draftUpdateError('Draft changed in the mailbox since it was reviewed; review the current draft', 409, 'DRAFT_PROVIDER_CHANGED');
+            }
+            if (typeof review.provider.changeKey !== 'string' || !review.provider.changeKey) {
+                throw draftUpdateError('Provider did not return a draft version', 409, 'DRAFT_VERSION_UNAVAILABLE');
+            }
+            expectedChangeKey = review.provider.changeKey;
+            await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.recovery_authorized', 'succeeded', {
+                draft_id: draftId,
+                failed_update_receipt_id: recoveryBinding.failed_update_receipt_id,
+                update_receipt_id: reserved.data.id,
+                reviewed_content_hash: recoveryBinding.reviewed_content_hash,
+                revision: recoveryBinding.expected_revision,
+            });
+        }
         providerStarted = true;
         const providerDraft = connection.provider === 'outlook'
             ? await (providerOps.updateOutlookDraft || updateOutlookDraft)(credential.access_token, draftId, providerRequest,
-                { expectedChangeKey: draft.data.provider_change_key })
+                { expectedChangeKey })
             : await (providerOps.updateGmailDraft || updateGmailDraft)(credential.access_token, draftId, providerRequest, connection.provider_account_id,
                 { expectedMessageId: draft.data.provider_message_id });
+        if (recoveryBinding && (!providerDraft || providerDraft.id !== draftId)) {
+            assertVerifiableRecoveryResult(providerDraft, draftId);
+        }
         if (!providerDraft || providerDraft.id !== draftId) {
             throw draftUpdateError('Provider changed the draft identifier', 409, 'DRAFT_ID_CHANGED');
         }
+        if (recoveryBinding) {
+            assertVerifiableRecoveryResult(providerDraft, draftId);
+        }
+        let verifiedProviderDraft = providerDraft;
+        if (recoveryBinding && normalizedRequest.text !== undefined && normalizedRequest.html === undefined) {
+            try {
+                verifiedProviderDraft = await (providerOps.getOutlookDraft || getOutlookDraft)(
+                    credential.access_token, draftId, { textBody: true },
+                );
+            } catch {
+                const error = draftUpdateError('Outlook recovery verification is uncertain; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+                error.providerAfterMutation = true;
+                throw error;
+            }
+            assertVerifiableRecoveryResult(verifiedProviderDraft, draftId);
+            if (verifiedProviderDraft.changeKey !== providerDraft.changeKey) {
+                const error = draftUpdateError('Outlook draft changed during recovery verification; reconcile before retrying', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+                error.providerAfterMutation = true;
+                throw error;
+            }
+        }
+        if (recoveryBinding && !draftFieldsMatch(effectiveOutlookReceiptRequest(normalizedRequest), providerDraftData(verifiedProviderDraft, 'outlook', connection.provider_account_id).fields)) {
+            const error = draftUpdateError('Outlook recovery response does not verify the requested draft update', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+            error.providerAfterMutation = true;
+            throw error;
+        }
         const nextRevision = Number(draft.data.revision || 1) + 1;
-        const providerData = providerDraftData(providerDraft, connection.provider, connection.provider_account_id);
+        const providerData = providerDraftData(verifiedProviderDraft, connection.provider, connection.provider_account_id);
         const result = await finalizeDraftUpdate(db, {
             tenantId, connectionId, draft: draft.data, receiptId: reserved.data.id, draftId,
             providerData, expectedRevision: Number(draft.data.revision || 1),
+            recoveryBinding,
         });
         receiptCommitted = true;
         await audit(db, tenantId, connectionId, actorId, 'mailbox.draft.updated', 'succeeded', {
@@ -1017,4 +1337,75 @@ export async function updateMailboxDraft(db, {
         }
         throw error;
     }
+}
+
+/**
+ * Repair an Outlook draft update rejected by the provider-version guard after
+ * a fresh, explicit content review. The rejected receipt remains immutable;
+ * recovery always creates a separate idempotent update receipt.
+ */
+export async function recoverMailboxDraft(db, {
+    tenantId, connectionId, draftId, actorId = null, idempotencyKey,
+    failedUpdateReceiptId, reviewedContentHash, expectedRevision,
+}, { providerOps = {}, credentialOverride = null } = {}) {
+    if (!idempotencyKey) {
+        throw draftUpdateError('Idempotency-Key header is required for mailbox draft recovery', 400, 'IDEMPOTENCY_REQUIRED');
+    }
+    if (typeof reviewedContentHash !== 'string' || !/^[a-f0-9]{64}$/.test(reviewedContentHash)) {
+        throw draftUpdateError('reviewed_content_hash from the draft preview is required', 422, 'INVALID_RECOVERY_REVIEW');
+    }
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+        throw draftUpdateError('expected_revision must be a positive integer', 422, 'INVALID_REVISION');
+    }
+    if (typeof failedUpdateReceiptId !== 'string' || !failedUpdateReceiptId) {
+        throw draftUpdateError('failed_update_receipt_id is required', 422, 'INVALID_RECOVERY_RECEIPT');
+    }
+
+    const connection = await selectedConnection(db, tenantId, connectionId);
+    if (connection.provider !== 'outlook') {
+        throw draftUpdateError('Reviewed update recovery is supported only for Outlook drafts', 409, 'DRAFT_RECOVERY_UNSUPPORTED');
+    }
+    const draftResult = await db.from('mailbox_drafts').select('*')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+        .eq('provider_draft_id', draftId).maybeSingle();
+    if (draftResult.error) throw new Error(draftResult.error.message);
+    if (!draftResult.data) throw draftUpdateError('Mailbox draft not found', 404, 'DRAFT_NOT_FOUND');
+
+    const originalResult = await db.from('mailbox_draft_update_receipts').select('*')
+        .eq('tenant_id', tenantId).eq('provider_connection_id', connectionId)
+        .eq('mailbox_draft_id', draftResult.data.id).eq('id', failedUpdateReceiptId).maybeSingle();
+    if (originalResult.error) throw new Error(originalResult.error.message);
+    if (!originalResult.data) {
+        throw draftUpdateError('Failed update receipt not found for this draft', 404, 'DRAFT_RECOVERY_RECEIPT_NOT_FOUND');
+    }
+    const original = originalResult.data;
+    if (original.status !== 'failed' || original.error_code !== 'DRAFT_PROVIDER_CHANGED'
+        || Number(original.error_status) !== 409
+        || Number(original.base_revision) !== expectedRevision) {
+        throw draftUpdateError('Only a DRAFT_PROVIDER_CHANGED failure at the reviewed base revision can be recovered', 409, 'DRAFT_RECOVERY_NOT_ALLOWED');
+    }
+    if (idempotencyKey === original.idempotency_key) {
+        throw draftUpdateError('Recovery requires a new Idempotency-Key', 409, 'IDEMPOTENCY_CONFLICT');
+    }
+    if (draftResult.data.status !== 'created' || draftResult.data.provider_draft_id !== draftId) {
+        throw draftUpdateError('Mailbox draft is not editable until its provider state is reconciled', 409, 'DRAFT_RECONCILIATION_REQUIRED');
+    }
+    const storedRequest = original.update_request;
+    if (!storedRequest || typeof storedRequest !== 'object' || Array.isArray(storedRequest)
+        || Object.keys(storedRequest).length === 0
+        || Object.keys(storedRequest).some(key => !DRAFT_EDITABLE_FIELDS.includes(key))) {
+        throw draftUpdateError('Rejected update receipt contains unsupported fields and cannot be recovered', 409, 'DRAFT_RECOVERY_INVALID_RECEIPT');
+    }
+    for (const [key, value] of Object.entries(storedRequest)) {
+        const isRecipientList = ['to', 'cc', 'bcc', 'reply_to'].includes(key);
+        if (isRecipientList ? (!Array.isArray(value) || value.some(item => typeof item !== 'string')) : typeof value !== 'string') {
+            throw draftUpdateError('Rejected update receipt contains invalid editable fields', 409, 'DRAFT_RECOVERY_INVALID_RECEIPT');
+        }
+    }
+
+    const request = { ...normalizedUpdateRequest(storedRequest), revision: expectedRevision };
+    return updateMailboxDraft(db, {
+        tenantId, connectionId, draftId, actorId, idempotencyKey, request, providerOps, credentialOverride,
+        reviewedRecovery: { failedUpdateReceiptId, reviewedContentHash, expectedRevision },
+    });
 }

@@ -381,6 +381,25 @@ export function createPostgresClient(queryable, { transactionBound = false } = {
     if (!database || typeof database.query !== 'function') throw new Error('A PostgreSQL query function is required');
     return {
         provider: 'postgres',
+        ...(transactionBound ? {
+            async lockMailboxDraftUpdateClaim(args = {}) {
+                const result = await database.query(
+                    `select id from public.mailbox_drafts
+                      where tenant_id=$1 and provider_connection_id=$2 and id=$3
+                        and provider_draft_id=$4 and revision=$5 and active_update_id=$6
+                      for update`,
+                    [
+                        args.p_tenant_id,
+                        args.p_provider_connection_id,
+                        args.p_mailbox_draft_id,
+                        args.p_provider_draft_id,
+                        args.p_expected_revision,
+                        args.p_receipt_id,
+                    ],
+                );
+                return result.rows.length === 1;
+            },
+        } : {}),
         ...(!transactionBound && (typeof database.connect === 'function' || typeof database.transaction === 'function') ? {
             async transaction(work) {
                 if (typeof database.transaction === 'function') {
