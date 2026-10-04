@@ -64,7 +64,7 @@ export function probeRealtime(check, key, Socket = WebSocket) {
             try { event = JSON.parse(bytes.toString()); } catch { return; }
             if (event.type === 'session.created') {
                 socket.send(JSON.stringify({ type: 'response.create', response: {
-                    output_modalities: ['text'], instructions: 'Reply with OK.', max_output_tokens: 16,
+                    output_modalities: ['text'], instructions: 'Reply with OK.', max_output_tokens: 256,
                 } }));
             } else if (event.type === 'error') {
                 finish({ status: failureStatus(null, event.error), usable: false });
