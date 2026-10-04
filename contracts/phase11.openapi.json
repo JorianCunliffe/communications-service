@@ -765,6 +765,39 @@
           }
         }
       }
+    },
+    "/v1/reception/lines": {
+      "get": {
+        "summary": "Read tenant-owned reception line identities",
+        "responses": {
+          "200": {
+            "description": "Line directory without prompts or credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "identity": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
