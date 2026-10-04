@@ -174,6 +174,22 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 24. `migrations/023_calendar_observation_order.sql`
 25. `migrations/024_tenant_client_lifecycle.sql`
 26. `migrations/025_tenant_data_lifecycle.sql`
+27. `migrations/026_mailbox_draft_updates.sql`
+28. `migrations/027_mailbox_draft_publish_constraints.sql`
+29. `migrations/028_promise_ledger.sql`
+30. `migrations/029_promise_crud.sql`
+31. `migrations/030_operational_review.sql`
+32. `migrations/031_review_decisions.sql`
+33. `migrations/032_review_actions.sql`
+34. `migrations/033_review_session_recovery.sql`
+35. `migrations/034_review_reconciliation.sql`
+36. `migrations/035_review_condition_states.sql`
+37. `migrations/036_review_dispatch.sql`
+38. `migrations/037_review_owner_bindings.sql`
+39. `migrations/038_review_source_snapshots.sql`
+40. `migrations/039_promise_publish_constraint.sql`
+41. `migrations/040_contact_phone_identity.sql`
+42. `migrations/041_mailbox_outlook_change_key.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 

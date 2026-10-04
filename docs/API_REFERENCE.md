@@ -2,7 +2,7 @@
 
 Phase 01 adds account email authority and separate sms:send / voice:call capabilities. All unconfigured accounts default to draft-only. See [authority contract](architecture/BOUNDARIES.md).
 
-Updated: 8 September 2026. Contract release: `2.5.0`.
+Updated: 4 October 2026. Service release: `2.8.2`; canonical API: `/v1`.
 
 This reference documents the HTTP and WebSocket surface implemented by `index.js`, `v1.js`, and `api.js`.
 
@@ -1324,7 +1324,7 @@ Example:
 
 The full array includes default voice/live transcription, recording transcription (`TRANSCRIBE_MODEL`), summaries (`SUMMARY_MODEL`), memory (`MEMORY_MODEL`), call outcomes (`CALL_OUTCOME_MODEL`), promises and operational review (`PROMISE_MODEL`), with the same fallback order as the workers. Checks sharing a model and transport are deduplicated. Per-contact voice overrides and models hosted in HyperFlow are outside this inventory.
 
-At startup and every 15 minutes, bounded 15-second provider probes generate a short text response, complete a Realtime text response, or submit a synthetic one-second silent WAV to transcription. These incur small provider charges but create no communications or business records. Public health reads never trigger them. `working` requires provider completion; merely opening a WebSocket or configuring a key is insufficient. An accepted request demonstrates quota/credit access at that moment, not the remaining balance.
+At startup and every 15 minutes, bounded 15-second provider probes generate a short text response, complete a Realtime text response, or submit a synthetic one-second silent WAV to transcription. These incur small provider charges but create no communications or business records. Public health reads never trigger them. `working` requires provider completion; merely opening a WebSocket or configuring a key is insufficient. An accepted request demonstrates quota/credit access at that moment, not the remaining balance. See the [OpenAI Realtime client events](https://developers.openai.com/api/reference/resources/realtime/client-events/) for the response completion protocol.
 
 Failures use safe categories: `not_configured`, `authentication_failed`, `quota_or_credit_exhausted`, `rate_limited`, `model_unavailable`, `provider_unavailable`, `timeout`, `connection_failed`, or `probe_failed`. Provider messages and credentials are omitted. Overall status is `checking` before the first result, otherwise `working` or `degraded`; `allWorking` describes the last result and must be read alongside `stale` and `checking`. Results become stale after 30 minutes.
 
