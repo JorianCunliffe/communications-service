@@ -669,3 +669,6 @@ Production startup applies all numbered migrations through `041`. Migrations `02
 The check performs only read-only Twilio account and balance requests (ten-second timeout each); it never places calls, sends SMS or changes billing. `TWILIO_LOW_BALANCE_THRESHOLD` defaults to 10 **in the account balance currency**. Subaccounts report `parent_account_required` for balance rather than assuming their parent has funds. Account readiness is not a delivery or inbound-routing test.
 
 Public health excludes account identifiers, credentials and exact balance. Operator-only `GET /health/twilio` and `POST /health/twilio/refresh` require `X-API-Key`; they include amount, currency and threshold. Refresh is coalesced and limited to once a minute. A suspension reason cannot be inferred solely from account status; check Twilio billing/support for the cause.
+### Project reception
+
+Supports HyperFlow number-to-project receptionist directories, scoped context switching, caller verification and bounded enquiry/booking/Ask tools. See [the API reference](docs/API_REFERENCE.md#project-reception-opt-in-hyperflow-directory). Activation is controlled by HyperFlow; deploying Communications alone does not publish services.
