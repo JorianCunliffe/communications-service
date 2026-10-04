@@ -1062,9 +1062,9 @@ export default async function v1Routes(fastify, options = {}) {
 
     fastify.get('/reception/lines', async (request, reply) => {
         const db=database(reply);if(!db)return reply;
-        const {data,error}=await db.from('phone_configs').select('twilio_number').eq('tenant_id',request.tenantId).limit(200);
+        const {data,error}=await db.from('phone_configs').select('twilio_number,call_enabled').eq('tenant_id',request.tenantId).limit(200);
         if(error)return reply.code(503).send({error:'Line directory unavailable'});
-        return {data:(data||[]).map(l=>({identity:l.twilio_number,enabled:true}))};
+        return {data:(data||[]).map(l=>({identity:l.twilio_number,enabled:l.call_enabled !== false}))};
     });
 
     fastify.get('/contacts', async (request, reply) => {
