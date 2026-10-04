@@ -14,6 +14,7 @@ describe('documentation stays aligned with the implemented HTTP surface', () => 
     const reference = read('../docs/API_REFERENCE.md');
     const implementedRoutes = [
         ...fastifyRoutes(read('../index.js')),
+        ...fastifyRoutes(read('../twilioHealth.js')),
         ...fastifyRoutes(read('../v1.js'), '/v1'),
         ...fastifyRoutes(read('../api.js'), '/api'),
     ];

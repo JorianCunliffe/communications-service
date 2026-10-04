@@ -227,13 +227,15 @@
       // only thing that actually changes when a deploy lands.
       if (h.build) chip('build ' + h.build, null);
       chip('model ' + h.model, null);
+      chip('Twilio ' + (h.twilio?.stale ? 'stale' : h.twilio?.status || 'not checked'), h.twilio?.accountReady === true);
+      if (h.twilio?.balanceState) chip('Twilio balance ' + h.twilio.balanceState, h.twilio.balanceState === 'ok' && h.twilio.accountReady);
       chip('LLMs ' + (h.llm?.stale ? 'stale' : h.llm?.status || 'not checked'), h.llm?.allWorking && !h.llm?.stale && !h.llm?.checking);
       for (const model of h.llm?.models || []) {
         chip(model.model + ' (' + model.transport + '): ' + model.status, model.usable && !h.llm.stale);
       }
       if (h.llm?.checkedAt) chip('models checked ' + new Date(h.llm.checkedAt).toLocaleString(), null);
       chip(h.persistenceProvider ? `${h.persistenceProvider} persistence` : 'persistence off', Boolean(h.persistenceProvider));
-      chip(h.outboundCalls ? 'outbound ready' : 'outbound not configured', h.outboundCalls);
+      chip(h.outboundCalls ? 'outbound configured' : 'outbound not configured', h.outboundCalls);
     })
     .catch(() => {
       $('status').innerHTML = '<span class="chip off">server unreachable</span>';

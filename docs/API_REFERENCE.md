@@ -1573,6 +1573,17 @@ The tool is available when `COMMUNICATIONS_WEBHOOK_SECRET` and either existing H
 
 Contact creation is atomic. Migration `040_contact_phone_identity.sql` reuses the phone identity inserted by the contact trigger, preserving explicit metadata and rejecting identities owned by a different person. Deploy with `npm run start:production` so the migration runner applies it before serving requests.
 
+### Twilio account health
+
+- `GET /health`: public, cached `twilio` summary, no provider request on read; HTTP 200 remains process liveness.
+- `GET /health/twilio`: operator `X-API-Key` required; cached summary plus private `balance: { amount, currency, lowThreshold }` or null.
+- `POST /health/twilio/refresh`: same operator authentication; refresh and return private summary. Shared in-flight work and 60-second cooldown prevent repeated probes. Unauthorized requests return 401 without probing. Private responses use `Cache-Control: no-store`.
+
+Summary fields: `status`, `accountStatus` (`active`, `suspended`, `closed`, `unknown`), `balanceState` (`ok`, `low`, `depleted`, `unknown`), `balanceCheck`, `checkedAt`, `stale`, `checking`, `accountReady`, `intervalSeconds` and `scope`. No Account SID, friendly name, token or raw provider error is returned. Exact balance is excluded from public health.
+
+`status` is `checking`, `not_configured`, `invalid_configuration`, `active`, `suspended`, `closed`, `low_balance`, `depleted_balance`, `balance_unavailable`, `authentication_failed`, `rate_limited`, `provider_unavailable`, `timeout`, `invalid_response` or `check_failed`. Balance failures preserve the known account status, with their classification in `balanceCheck`; suspended/closed status takes precedence over balance. Subaccounts use `balanceCheck: parent_account_required`; parent billing is not verified. `accountReady` is true only for a fresh, non-checking, active account with balance above the threshold. It is not proof of call/SMS delivery or working phone routing.
+
+Checks run at startup and every five minutes, are stale after ten minutes and use fixed read-only Twilio endpoints with ten-second request timeouts. `TWILIO_LOW_BALANCE_THRESHOLD` defaults to 10 in the reported balance currency (inclusive low threshold; zero or negative is depleted). Invalid thresholds fail configuration validation. This balance warning is conservative; account billing arrangements and the cause of suspension require operator review in Twilio.
 ## Project reception (opt-in HyperFlow directory)
 
 `GET /v1/reception/lines` requires authenticated tenant `communications:read`. Returns only `{data:[{identity,enabled}]}` from the tenant's configured `twilio_number` rows. No prompts, credentials or contact overrides are returned. HyperFlow uses this read-only endpoint for line ownership readiness.
