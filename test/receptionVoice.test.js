@@ -119,7 +119,7 @@ test("whole reception calls and verification SMS are not eligible cross-project 
     new URL("../configResolver.js", import.meta.url),
     "utf8",
   );
-  assert(resolver.includes("combined_history:null"));
+  assert(resolver.includes("scopedHistory: direction === 'inbound'"));
 });
 
 test("staff answers remain private even when the model prepares a known Ask directly", () => {

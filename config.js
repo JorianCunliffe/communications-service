@@ -146,6 +146,7 @@ const PLACEHOLDER = /\{\{\s*(name|assistant|combined_history|history)\s*(?:\|([^
 // absence of a record is given an explicit meaning here, and an explicit empty
 // record is sent as well (see NO_HISTORY_BLOCK).
 export const HISTORY_NOTICE = 'Any previous conversations with this person are provided separately in this session as a labelled record. Use them for reference only. If that record says there is no previous contact, then you have never spoken to this person before — say so plainly and never invent a past conversation.';
+export const SCOPED_HISTORY_NOTICE = 'Project-scoped conversation history has not been loaded here. Use only history returned by the authorized project context. This is not evidence of no previous contact; do not tell the caller they are unknown or have no conversation history.';
 
 const IMPLICIT_FALLBACK = {
     name: 'there',
@@ -189,7 +190,7 @@ export function renderTemplate(text, values = {}) {
 // `contact` is the row from public.contacts, or null for an unknown caller;
 // every placeholder degrades to a readable fallback rather than leaking braces.
 //
-export function personaliseConfig(config, contact) {
+export function personaliseConfig(config, contact, { scopedHistory = false } = {}) {
     const needsRender = TEMPLATED_FIELDS.some((field) => {
         PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
         return PLACEHOLDER.test(config[field] ?? '');
@@ -199,11 +200,11 @@ export function personaliseConfig(config, contact) {
     const values = {
         name: contact?.name ?? null,
         assistant: config.assistantName ?? DEFAULT_CONFIG.assistantName,
-        combined_history: contact?.combined_history ?? null,
+        combined_history: scopedHistory ? SCOPED_HISTORY_NOTICE : contact?.combined_history ?? null,
         // Deliberately never a value: {{history}} always renders to the notice
         // (or to whatever fallback the prompt supplies), because the record
         // itself does not travel in the prompt.
-        history: null,
+        history: scopedHistory ? SCOPED_HISTORY_NOTICE : null,
     };
 
     const personalised = { ...config };
@@ -215,7 +216,7 @@ export function personaliseConfig(config, contact) {
     // rendering replaces {{history}} with the notice, so anything downstream
     // asking "did this prompt want history?" would find no trace of it and
     // silently never start the lookup.
-    personalised.wantsHistory = needsHistory(config);
+    personalised.wantsHistory = !scopedHistory && needsHistory(config);
     return personalised;
 }
 
