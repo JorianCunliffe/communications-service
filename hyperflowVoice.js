@@ -79,6 +79,15 @@ export async function requestHyperFlowVoiceContext({
 }
 
 export function applyHyperFlowVoiceContext(config, context) {
+    // This name comes from the server's phone/contact lookup, never a caller's
+    // utterance or model tool arguments. Keep stored text out of instructions.
+    const firstName = config.personId && typeof config.callerName === 'string'
+        ? config.callerName.trim().split(/\s+/)[0] : '';
+    const safeName = /^[\p{L}\p{M}][\p{L}\p{M}'’\-]{0,39}$/u.test(firstName || '')
+        && !['unknown', 'anonymous', 'caller', 'there'].includes(firstName.toLowerCase()) ? firstName : '';
+    const greeting = safeName && /^Hello\b/.test(context.greeting || '')
+        ? context.greeting.replace(/^Hello(?:\. I recognize your number\.)?/, `Hi ${safeName}${context.greeting.startsWith('Hello. I recognize your number.') ? '.' : ''}`)
+        : context.greeting;
     // Keep explicit line/contact instructions, but not the generic demo persona.
     // Retain the original base so a project switch replaces stale context.
     const base = context.reception ? 'You are the receptionist identified by the trusted reception context.' : config.hyperflowBaseInstructions ??
@@ -94,7 +103,7 @@ export function applyHyperFlowVoiceContext(config, context) {
         ...config,
         hyperflowBaseInstructions: base,
         systemMessage: `${base}\n\n${scopedInstructions}`,
-        greetingText: context.greeting,
+        greetingText: greeting,
         ...(context.reception ? {playIntro:false,introMessage:null,introMessage2:null,assistantName:context.reception.name} : {}),
         aiSpeaksFirst: true,
         liveTranscript: true,

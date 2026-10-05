@@ -284,7 +284,7 @@ export async function resolveConfig({ from, to, direction, createContact = true,
         }
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
-        return { ...personaliseConfig(DEFAULT_CONFIG, contact, {scopedHistory: direction === 'inbound'}), tenantId, personId: contact?.id || null };
+        return { ...personaliseConfig(DEFAULT_CONFIG, contact, {scopedHistory: direction === 'inbound'}), tenantId, personId: contact?.id || null, callerName: contact?.name || null };
     }
 
     // Note what this deliberately does not do: fetch conversation history.
@@ -292,7 +292,7 @@ export async function resolveConfig({ from, to, direction, createContact = true,
     // started separately by startHistory() in realtimeSessions.js, runs while
     // the call is still being set up, and reaches the model after it has
     // already begun speaking.
-    return { ...personaliseConfig(config, contact, {scopedHistory: direction === 'inbound'}), tenantId, personId: contact?.id || null };
+    return { ...personaliseConfig(config, contact, {scopedHistory: direction === 'inbound'}), tenantId, personId: contact?.id || null, callerName: contact?.name || null };
 }
 
 // Twilio authenticates the webhook, but it does not supply a tenant. Resolve
