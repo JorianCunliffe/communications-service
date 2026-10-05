@@ -48,3 +48,9 @@ test('timeouts, network errors and server errors remain uncertain; never mark re
 test('lost rejection receipt remains uncertain rather than releasing the original key', async()=>{
  await assert.rejects(dispatchTwilio({}, {id:'op'}, async()=>{throw {status:400,code:10001};},async()=>{throw new Error('DB unavailable');}),e=>e.code==='IDEMPOTENCY_RECONCILIATION_REQUIRED');
 });
+
+test('preflight uses effective configured voice model without changing the frozen provider request',async()=>{
+ let selected;
+ await reserveOutbound(dbFixture(),{...input,readinessModel:'contact-model'},async ({request})=>{selected=request.overrides.model;});
+ assert.equal(selected,'contact-model'); assert.equal(input.request.overrides,undefined);
+});

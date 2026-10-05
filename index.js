@@ -433,7 +433,7 @@ fastify.post('/outbound-call', async (request, reply) => {
         await assertContactable(to, 'outbound call', { allowed: overrideDnc === true, reason: overrideReason });
         await ensureContact(to);
         const operation = await reserveOutbound(operationDb, {
-            key: idempotencyKey(request), type: 'voice', communicationId,
+            key: idempotencyKey(request), type: 'voice', communicationId, readinessModel: config.model,
             request: { to, from, overrides: overrides || {}, override_do_not_contact: overrideDnc, override_reason: overrideReason },
         });
         communicationId = operation.communication_id;

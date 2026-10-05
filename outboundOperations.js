@@ -10,7 +10,7 @@ export function idempotencyKey(request) {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-export async function reserveOutbound(db, { tenantId, key, type, request, communicationId }, readiness = assertOutboundReady) {
+export async function reserveOutbound(db, { tenantId, key, type, request, communicationId, readinessModel }, readiness = assertOutboundReady) {
     if (!key) {
         const error = new Error('Idempotency-Key header is required for outbound operations');
         error.code = 'IDEMPOTENCY_REQUIRED';
@@ -23,7 +23,7 @@ export async function reserveOutbound(db, { tenantId, key, type, request, commun
             .eq('operation_type', type).eq('idempotency_key', key).maybeSingle();
         if (existing.error) throw new Error('Could not inspect outbound operation');
         // Replays reconcile receipts even while a provider is unavailable.
-        if (!existing.data) await readiness({ type, request });
+        if (!existing.data) await readiness({ type, request: readinessModel ? { ...request, overrides: { ...request.overrides, model: readinessModel } } : request });
     }
     const result = await db.rpc('reserve_outbound_operation', {
         p_tenant_id: scopedTenant,

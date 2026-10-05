@@ -1004,7 +1004,7 @@ export default async function v1Routes(fastify, options = {}) {
         try {
             const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
             const operation = await reserveOutbound(db, {
-                key: idempotencyKey(request), type: 'voice', communicationId,
+                key: idempotencyKey(request), type: 'voice', communicationId, readinessModel: overrides.model || resolved.model,
                 request: { to, from, overrides, purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
                     override_do_not_contact: request.body?.override_do_not_contact, override_reason: request.body?.override_reason },
             });
