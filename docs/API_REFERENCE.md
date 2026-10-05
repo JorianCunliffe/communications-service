@@ -1595,3 +1595,11 @@ Project selection removes prior model messages and tools from the working contex
 `record_segments` is an internal signed service command, never a model tool. The bounded tool set is enquiry capture/selection, caller verification, pending Ask selection, availability, action preparation/confirmation and reconciliation. No arbitrary URL, project authority, code or credential tool is exposed. Verification tool arguments are redacted. Inbound call completion does not resolve a Human Ask; verified answers go through its owning HyperFlow mechanism.
 
 Deploy with the matching HyperFlow release and keep `PROJECT_RECEPTION_ENABLED=false` there until fixture and controlled Jorian tests pass. Existing unconfigured lines retain legacy routing. Provider acceptance still requires fresh controlled handset tests.
+
+### Outbound readiness and recovery
+
+Before a new voice/SMS reservation, the service reads fresh Twilio account and balance status. Suspended/closed accounts, depleted or unavailable balance and failed checks return `503 OUTBOUND_NOT_READY` with `dispatched: false`, without reserving or contacting the recipient. Low positive balance remains a warning. Voice additionally checks cached voice/transcription model readiness (refreshing stale results); selected model overrides are probed. Replays of existing provider receipts remain available during an outage.
+
+A structured Twilio 4xx rejection is persisted as a failed operation and returns `422 OUTBOUND_PROVIDER_REJECTED`; the same key will not dispatch again. A network timeout, provider 5xx or uncertain result returns `409 IDEMPOTENCY_RECONCILIATION_REQUIRED`. A young reservation returns `409 IDEMPOTENCY_IN_PROGRESS`; reservations older than two minutes require reconciliation. No timeout releases a reservation or substitutes a new key.
+
+`GET /v1/calls/operations/:key` retrieves the exact original voice receipt using its URL-encoded idempotency key. It requires authenticated tenant scope and `voice:call` capability. Returns 404 if absent, 503 for unavailable persistence, and a private no-store response with operation state, provider/communication IDs, response and timestamps. It never places or retries a call.

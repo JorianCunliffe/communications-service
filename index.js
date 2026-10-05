@@ -1,6 +1,7 @@
 import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
+import { dispatchTwilio, outboundModelHealth } from './outboundReadiness.js';
 import Fastify from 'fastify';
 import { serverOptions } from './serverOptions.js';
 import WebSocket from 'ws';
@@ -35,7 +36,6 @@ import { idempotencyKey, markOutbound, reserveOutbound } from './outboundOperati
 import emailWebhookRoutes, { emailEnabled, installRawJsonParser, startCommunicationJobSweeper } from './emailWebhook.js';
 import mailboxPublicRoutes from './mailboxRoutes.js';
 import { startHyperFlowScheduler } from './hyperflowScheduler.js';
-import { createModelHealth } from './modelHealth.js';
 import { createTwilioHealth, registerTwilioHealthRoutes } from './twilioHealth.js';
 
 // Retrieve the OpenAI API key from environment variables.
@@ -85,12 +85,12 @@ const VERSION = (() => {
 // does. Files are hashed by name as well as content so a rename still moves it.
 const BUILD = (() => {
     const SOURCES = [
-        'index.js', 'modelHealth.js', 'twilioHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
+        'index.js', 'outboundReadiness.js', 'outboundOperations.js', 'modelHealth.js', 'twilioHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
-        'plaud.js', 'safeFetch.js', 'outboundOperations.js',
+        'plaud.js', 'safeFetch.js',
         'tenantContext.js', 'tenantOperations.js', 'tenantLifecycle.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
         'emailDelivery.js', 'emailTriage.js', 'emailReplyRoutes.js',
         'mailboxService.js', 'draftRecipientComparison.js', 'mailboxRoutes.js', 'gmailMailbox.js', 'outlookMailbox.js',
@@ -170,7 +170,7 @@ const stopTwilioHealth = twilioHealth.start();
 fastify.addHook('onClose', async () => stopTwilioHealth());
 registerTwilioHealthRoutes(fastify, twilioHealth);
 
-const modelHealth = createModelHealth();
+const modelHealth = outboundModelHealth;
 const stopModelHealth = modelHealth.start();
 fastify.addHook('onClose', async () => stopModelHealth());
 
@@ -447,7 +447,7 @@ fastify.post('/outbound-call', async (request, reply) => {
                 machineDetectionTimeout: Math.min(59, Math.max(3, Number(process.env.TWILIO_MACHINE_DETECTION_TIMEOUT) || 30)),
             }
             : {};
-        const call = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await client.calls.create({
+        const call = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await dispatchTwilio(operationDb, operation, () => client.calls.create({
             to,
             from,
             url: `${base}/outbound-answer`,
@@ -457,7 +457,7 @@ fastify.post('/outbound-call', async (request, reply) => {
             statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
             statusCallbackMethod: 'POST',
             ...amd,
-        });
+        }), markOutbound);
         if (operation.status !== 'provider_sent') {
             await markOutbound(operationDb, operation.id, { status: 'provider_sent', provider_id: call.sid, provider_status: call.status });
         }
@@ -473,6 +473,7 @@ fastify.post('/outbound-call', async (request, reply) => {
         await markOutbound(operationDb, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
         return reply.code(201).send(response);
     } catch (error) {
+        if (error.statusCode) return reply.code(error.statusCode).send({ error: error.message, code: error.code, dispatched: error.dispatched, operation_id: error.operation_id });
         if (error.code === 'DO_NOT_CONTACT') return reply.code(409).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_REQUIRED') return reply.code(400).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_CONFLICT') return reply.code(409).send({ error: error.message });
@@ -514,7 +515,7 @@ fastify.post('/sms', async (request, reply) => {
         communicationId = operation.communication_id;
         if (operation.status === 'completed') return reply.code(200).send(operation.response);
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-        const message = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await client.messages.create({ to, from, body });
+        const message = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await dispatchTwilio(operationDb, operation, () => client.messages.create({ to, from, body }), markOutbound);
         if (operation.status !== 'provider_sent') {
             await markOutbound(operationDb, operation.id, { status: 'provider_sent', provider_id: message.sid, provider_status: message.status });
         }
@@ -537,6 +538,7 @@ fastify.post('/sms', async (request, reply) => {
         await markOutbound(operationDb, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
         return reply.code(201).send(response);
     } catch (error) {
+        if (error.statusCode) return reply.code(error.statusCode).send({ error: error.message, code: error.code, dispatched: error.dispatched, operation_id: error.operation_id });
         if (error.code === 'DO_NOT_CONTACT') return reply.code(409).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_REQUIRED') return reply.code(400).send({ error: error.message });
         if (error.code === 'IDEMPOTENCY_CONFLICT') return reply.code(409).send({ error: error.message });
