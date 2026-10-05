@@ -672,3 +672,5 @@ Public health excludes account identifiers, credentials and exact balance. Opera
 ### Project reception
 
 Supports HyperFlow number-to-project receptionist directories, scoped context switching, caller verification and bounded enquiry/booking/Ask tools. See [the API reference](docs/API_REFERENCE.md#project-reception-opt-in-hyperflow-directory). Activation is controlled by HyperFlow; deploying Communications alone does not publish services.
+
+Outbound calls now perform fresh Twilio account/balance preflight and check voice model readiness before creating an operation. Unavailable providers fail with explicit non-dispatch errors. Known provider rejections persist a failure receipt; ambiguous results stay held for reconciliation, never automatically released. See the API reference for recovery codes and the read-only voice-operation receipt lookup.

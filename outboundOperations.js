@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assertOutboundReady } from './outboundReadiness.js';
 
 export function requestFingerprint(value) {
     return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -9,7 +10,7 @@ export function idempotencyKey(request) {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-export async function reserveOutbound(db, { tenantId, key, type, request, communicationId }) {
+export async function reserveOutbound(db, { tenantId, key, type, request, communicationId }, readiness = assertOutboundReady) {
     if (!key) {
         const error = new Error('Idempotency-Key header is required for outbound operations');
         error.code = 'IDEMPOTENCY_REQUIRED';
@@ -17,6 +18,13 @@ export async function reserveOutbound(db, { tenantId, key, type, request, commun
     }
     const scopedTenant = tenantId || db?.tenantId || process.env.LEGACY_TENANT_ID;
     if (!scopedTenant) throw new Error('tenant_id is required for outbound operations');
+    if (['voice', 'sms'].includes(type)) {
+        const existing = await db.from('outbound_operations').select('*').eq('tenant_id', scopedTenant)
+            .eq('operation_type', type).eq('idempotency_key', key).maybeSingle();
+        if (existing.error) throw new Error('Could not inspect outbound operation');
+        // Replays reconcile receipts even while a provider is unavailable.
+        if (!existing.data) await readiness({ type, request });
+    }
     const result = await db.rpc('reserve_outbound_operation', {
         p_tenant_id: scopedTenant,
         p_idempotency_key: key,
@@ -39,8 +47,16 @@ export async function reserveOutbound(db, { tenantId, key, type, request, commun
     }
     if (operation?.claimed === false && operation.status === 'reserved') {
         const error = new Error('An outbound operation with this Idempotency-Key is already in progress; reconcile it before retrying');
-        error.code = 'IDEMPOTENCY_IN_PROGRESS';
+        error.code = Date.now() - new Date(operation.created_at).getTime() < 120000
+            ? 'IDEMPOTENCY_IN_PROGRESS' : 'IDEMPOTENCY_RECONCILIATION_REQUIRED';
+        error.statusCode = 409;
+        error.operation_id = operation.id;
         throw error;
+    }
+    if (['voice', 'sms'].includes(type) && operation.status === 'failed') {
+        throw Object.assign(new Error('Outbound operation was rejected; review before starting another attempt'), {
+            code: 'OUTBOUND_PROVIDER_REJECTED', statusCode: 422, dispatched: false, operation_id: operation.id,
+        });
     }
     return operation;
 }

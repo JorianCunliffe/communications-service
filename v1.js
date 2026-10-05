@@ -1,3 +1,4 @@
+import { dispatchTwilio } from './outboundReadiness.js';
 import { withAmbientCapture } from './ambientCapture.js';
 import { registerOperationalRoutes } from './operationalRoutes.js';
 import twilio from 'twilio';
@@ -49,6 +50,7 @@ export function providerCallbackUrl(baseUrl, path, tenantId) {
 }
 
 function errorReply(reply, error, status = 400) {
+    if (error.statusCode) return reply.code(error.statusCode).send({ error: error.message, code: error.code, dispatched: error.dispatched, operation_id: error.operation_id });
     const payload = { error: error.message };
     if (error.code) payload.code = error.code;
     if (error.providerError) payload.provider_error = error.providerError;
@@ -737,6 +739,7 @@ export default async function v1Routes(fastify, options = {}) {
             await assertContactable(to, 'SMS', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason });
             await ensureContact(to);
         } catch (error) {
+            if (error.statusCode) return errorReply(reply, error);
             if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
             return errorReply(reply, error, 500);
         }
@@ -751,10 +754,10 @@ export default async function v1Routes(fastify, options = {}) {
             let message = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
                 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-                message = await client.messages.create({
+                message = await dispatchTwilio(db, operation, () => client.messages.create({
                     to, from, body,
                     ...(PUBLIC_URL ? { statusCallback: providerCallbackUrl(PUBLIC_URL, '/message-status', request.tenantId) } : {}),
-                });
+                }), markOutbound);
                 await markOutbound(db, operation.id, { status: 'provider_sent', provider_id: message.sid, provider_status: message.status });
             }
             const stored = await recordMessage({
@@ -781,6 +784,7 @@ export default async function v1Routes(fastify, options = {}) {
             await markOutbound(db, operation.id, { status: 'completed', response: communication, completed_at: new Date().toISOString() });
             return reply.code(201).send(communication);
         } catch (error) {
+            if (error.statusCode) return errorReply(reply, error);
             if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
             if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
             if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
@@ -993,10 +997,12 @@ export default async function v1Routes(fastify, options = {}) {
             await assertContactable(to, 'outbound call', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason }, request.tenantId);
             await ensureContact(to, request.tenantId);
         } catch (error) {
+            if (error.statusCode) return errorReply(reply, error);
             if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
             return errorReply(reply, error, 500);
         }
         try {
+            const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
             const operation = await reserveOutbound(db, {
                 key: idempotencyKey(request), type: 'voice', communicationId,
                 request: { to, from, overrides, purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
@@ -1004,18 +1010,17 @@ export default async function v1Routes(fastify, options = {}) {
             });
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
-            const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
             const config = withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from });
             const base = PUBLIC_URL.replace(/\/$/, '');
             let call = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
                 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-                call = await client.calls.create({
+                call = await dispatchTwilio(db, operation, () => client.calls.create({
                     to, from,
                     url: providerCallbackUrl(base, '/outbound-answer', request.tenantId),
                     statusCallback: providerCallbackUrl(base, '/call-status', request.tenantId),
                     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'], statusCallbackMethod: 'POST',
-                });
+                }), markOutbound);
                 await markOutbound(db, operation.id, { status: 'provider_sent', provider_id: call.sid, provider_status: call.status });
             }
             storeCallConfig(call.sid, config);
@@ -1043,12 +1048,26 @@ export default async function v1Routes(fastify, options = {}) {
             await markOutbound(db, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
             return reply.code(201).send(response);
         } catch (error) {
+            if (error.statusCode) return errorReply(reply, error);
             if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
             if (error.code === 'IDEMPOTENCY_REQUIRED') return errorReply(reply, error, 400);
             if (error.code === 'IDEMPOTENCY_CONFLICT') return errorReply(reply, error, 409);
             if (error.code === 'IDEMPOTENCY_IN_PROGRESS') return errorReply(reply, error, 409);
             return errorReply(reply, outboundError('Failed to place call', error), 502);
         }
+    });
+
+    fastify.get('/calls/operations/:key', async (request, reply) => {
+        const denied = rejectMissingCapability(request, reply, 'voice:call');
+        if (denied) return denied;
+        const db = database(reply); if (!db) return reply;
+        const result = await db.from('outbound_operations')
+            .select('id,status,communication_id,provider_id,provider_status,response,created_at,updated_at')
+            .eq('operation_type', 'voice').eq('idempotency_key', request.params.key).maybeSingle();
+        if (result.error) return reply.code(503).send({ error: 'Operation status unavailable' });
+        if (!result.data) return reply.code(404).send({ error: 'Operation not found' });
+        reply.header('Cache-Control', 'no-store');
+        return result.data;
     });
 
     fastify.get('/calls/:communicationId', async (request, reply) => {
