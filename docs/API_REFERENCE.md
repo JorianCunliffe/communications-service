@@ -1392,10 +1392,12 @@ At least one of `from` or `to` is required. `direction` defaults to `inbound`. T
 
 | Method | Route | Query | Result |
 |---|---|---|---|
-| `GET` | `/api/recordings` | `limit`, `offset`, `source`, `status`, `phone` | Paged recording summaries without full transcript JSON |
+| `GET` | `/api/recordings` | `limit`, `offset`, `source`, `externalId`, `status`, `phone` | Paged recording summaries without full transcript JSON; source + externalId reconciles a stable intake |
 | `GET` | `/api/recordings/:id` | — | Full recording row |
 | `POST` | `/api/recordings` | — | Queue external media or ingest an existing transcript |
 | `POST` | `/api/recordings/:id/transcribe` | — | Reset attempts and requeue transcription |
+
+Duplicate recording submissions return the existing `id` and `status` when the source identity is already known. Recording lists advertise `capabilities.privateIntakeReview: true` so callers can require staging privacy support before dispatch. HyperFlow meeting audio uses source `hyperflow_audio_intake`, a stable file-derived `externalId`, and private 24-hour media URLs. `metadata.audio_filename` retains a validated original extension for opaque storage URLs. `metadata.intake_pending: true` excludes staging transcripts from memory, enrichment and promise extraction, including private-history reads. A separate reviewed `/v1/meetings` import publishes selected topics; transcription is not meeting approval. Private intake failures use a redacted diagnostic so signed media URLs do not appear in queue logs.
 
 Recording ingest example:
 

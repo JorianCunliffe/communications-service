@@ -410,6 +410,7 @@ export default async function apiRoutes(fastify) {
             .range(from, to);
 
         if (request.query.source) query = query.eq('source', request.query.source);
+        if (request.query.externalId) query = query.eq('external_id', request.query.externalId);
         if (request.query.status) query = query.eq('status', request.query.status);
         if (request.query.phone) {
             const phone = normalisePhone(request.query.phone);
@@ -419,7 +420,7 @@ export default async function apiRoutes(fastify) {
 
         const { data, error, count } = await query;
         if (error) return dbError(reply, error, 'list recordings');
-        return reply.send({ data, limit, offset, count });
+        return reply.send({ data, limit, offset, count, capabilities: { privateIntakeReview: true } });
     });
 
     fastify.get('/recordings/:id', async (request, reply) => {
@@ -450,7 +451,7 @@ export default async function apiRoutes(fastify) {
             const known = await db.from('recordings').select('id,status').eq('source', body.source)
                 .eq('external_id', body.externalId).maybeSingle();
             if (known.error) return dbError(reply, known.error, 'check the recording identity');
-            if (known.data) return reply.code(200).send({ duplicate: true, source: body.source, externalId: body.externalId });
+            if (known.data) return reply.code(200).send({ duplicate: true, id: known.data.id, status: known.data.status, source: body.source, externalId: body.externalId });
         }
 
         const hasAudio = typeof body.mediaUrl === 'string' || typeof body.mediaBase64 === 'string';

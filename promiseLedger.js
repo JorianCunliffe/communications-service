@@ -19,6 +19,7 @@ export function authoredText(text) {
 }
 
 export function promiseEligibility(source) {
+    if (source.metadata?.intake_pending === true) return 'intake_pending_review';
     if (source.memory_eligible !== true) return 'memory_ineligible';
     if (source.metadata?.retracted) return 'retracted';
     if (['spam','bounce','automatic_reply','mailing_list','system_generated','voicemail','no_answer','failed'].includes(source.disposition)) return source.disposition;

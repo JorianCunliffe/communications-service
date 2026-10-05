@@ -6,6 +6,21 @@ import { describeDeliveryError } from '../eventOutbox.js';
 import { normaliseCorrelation } from '../communicationModel.js';
 import { applyHyperFlowVoiceContext } from '../hyperflowVoice.js';
 import { hyperflowProtectionHeaders } from '../vercelProtection.js';
+import { sourceAllowed } from '../memorySafety.js';
+import { promiseEligibility } from '../promiseLedger.js';
+import { recordingFilename } from '../recordingSources.js';
+
+test('unreviewed audio cannot become memory or promise evidence even with a private grant',()=>{
+    const source={memory_eligible:true,body:'I will do this',metadata:{private:true,intake_pending:true}};
+    assert.equal(sourceAllowed(source,{include_private:true}),false);
+    assert.equal(promiseEligibility(source),'intake_pending_review');
+});
+test('private object URLs preserve the audio filename without allowing paths',()=>{
+    const row={media_url:'https://storage.example/managed/id?signature=secret',metadata:{audio_filename:'meeting.m4a'}};
+    assert.equal(recordingFilename(row,'audio/mp4'),'meeting.m4a');
+    row.metadata.audio_filename='../../secret.mp3';assert.equal(recordingFilename(row,'audio/wav'),'audio.wav');
+    assert.equal(recordingFilename({media_url:row.media_url},'audio/mp4'),'audio.m4a');
+});
 
 test('Twilio signatures default to enforce when credentials exist', () => {
     const previousToken = process.env.TWILIO_AUTH_TOKEN;

@@ -286,7 +286,7 @@ async function processJob(db, job) {
     const communication = await db.from('communications').select('*').eq('communication_id', job.communication_id).maybeSingle();
     if (communication.error) throw new Error(communication.error.message);
     if (!communication.data) throw new Error(`Communication ${job.communication_id} no longer exists`);
-    if (communication.data.memory_eligible !== true) {
+    if (communication.data.memory_eligible !== true || communication.data.metadata?.intake_pending === true) {
         const skipped = await db.from('communication_enrichment_jobs').update({
             status: 'done', completed_at: new Date().toISOString(), updated_at: new Date().toISOString(),
             skip_reason: 'memory_ineligible', last_error: null, lease_token: null, lease_expires_at: null,

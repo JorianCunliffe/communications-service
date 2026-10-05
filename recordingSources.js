@@ -86,7 +86,7 @@ export async function assertFetchable(rawUrl, source) {
 }
 
 async function readBody(response, url) {
-    if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${url}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status} fetching recording from ${new URL(url).hostname}`);
     const buffer = Buffer.from(await response.arrayBuffer());
     if (buffer.length === 0) throw new Error('The recording was empty');
     return { buffer, contentType: response.headers.get('content-type') || 'application/octet-stream' };
@@ -161,7 +161,14 @@ async function fetchUrl(recording) {
         allowedHosts: allowedHosts(recording.source),
     });
     const { buffer, contentType } = await readBody(response, url);
-    return { buffer, contentType, filename: new URL(url).pathname.split('/').pop() || 'audio' };
+    return { buffer, contentType, filename: recordingFilename(recording, contentType) };
+}
+
+export function recordingFilename(recording, contentType) {
+    const candidate = recording.metadata?.audio_filename || new URL(recording.media_url).pathname.split('/').pop();
+    if (typeof candidate === 'string' && candidate.length <= 180 && !/[\x00-\x1f\x7f/\\]/.test(candidate) && /\.(mp3|mp4|mpeg|mpga|m4a|wav|webm)$/i.test(candidate)) return candidate;
+    const extension = { 'audio/mpeg':'mp3', 'audio/mp4':'m4a', 'video/mp4':'mp4', 'audio/wav':'wav', 'audio/x-wav':'wav', 'audio/webm':'webm', 'video/webm':'webm' }[String(contentType).split(';')[0]] || 'mp3';
+    return `audio.${extension}`;
 }
 
 // --- Registry ---------------------------------------------------------------

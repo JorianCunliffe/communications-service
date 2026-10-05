@@ -218,7 +218,8 @@ export function sweepOnce() {
                 try {
                     await process(scoped, recording);
                 } catch (error) {
-                    await fail(scoped, recording, error.message);
+                    await fail(scoped, recording, recording.metadata?.intake_pending === true
+                        ? 'Private recording transcription failed; check provider readiness and media access.' : error.message);
                 }
             }
         } catch (error) {

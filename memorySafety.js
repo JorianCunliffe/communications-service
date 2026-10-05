@@ -1,7 +1,7 @@
 // Read-time evidence checks belong to Communications, not its consumers.
 const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
 export function sourceAllowed(row, scope = {}) {
-  if (!row || row.memory_eligible !== true || row.metadata?.retracted === true) return false;
+  if (!row || row.memory_eligible !== true || row.metadata?.retracted === true || row.metadata?.intake_pending === true) return false;
   if (['spam','bounce','automatic_reply','mailing_list','system_generated','voicemail','no_answer','failed'].includes(row.disposition)) return false;
   if (row.channel === 'voice' && (row.metadata?.successful === false || row.metadata?.memory_eligible === false)) return false;
   if (scope.include_private !== true && (row.metadata?.private === true || ['private','restricted'].includes(row.metadata?.visibility))) return false;
