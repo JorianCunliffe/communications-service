@@ -249,11 +249,14 @@ export function buildTwiml(config, host, { includeIntro = true } = {}) {
     const intro = spokenLines
         .map((line) => `<Say voice="${escapeXml(config.introVoice)}">${escapeXml(line)}</Say>`)
         .join(`\n${INDENT}<Pause length="1"/>\n${INDENT}`);
+    const stream = config.outboundOperationId && config.mediaCapability
+        ? `<Stream url="wss://${escapeXml(host)}/media-stream"><Parameter name="tenantId" value="${escapeXml(config.tenantId)}"/><Parameter name="operationId" value="${escapeXml(config.outboundOperationId)}"/><Parameter name="mediaCapability" value="${escapeXml(config.mediaCapability)}"/></Stream>`
+        : `<Stream url="wss://${escapeXml(host)}/media-stream" />`;
 
     return `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
                               ${intro ? `${intro}\n${INDENT}` : ''}<Connect>
-                                  <Stream url="wss://${escapeXml(host)}/media-stream" />
+                                  ${stream}
                               </Connect>
                           </Response>`;
 }

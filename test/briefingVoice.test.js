@@ -60,10 +60,14 @@ test("briefing is offered for enrolled coaching identities, with signed trusted 
   process.env.HYPERFLOW_EVENT_URL = "https://hyperflow.example/api/events";
   process.env.COMMUNICATIONS_WEBHOOK_SECRET = "test-secret";
   try {
-    const config = { personId: "person", tools: [], systemMessage: "Coaching" };
+    const config = { personId: "person", tools: [], systemMessage: "Coaching", greetingText:"Let's start with what we agreed last time." };
     const enabled = withBriefing(config, { type: "coaching_session" },true);
     assert.equal(withBriefing(config,{type:'coaching_session'}),config);
     assert.equal(enabled.tools.includes("hyperflow_briefing"), true);
+    assert.equal(enabled.briefingPromptVersion,'briefing-first.v2');
+    assert.match(enabled.greetingText,/daily briefing.*tasks, approvals and reports.*verification code/);
+    assert.doesNotMatch(enabled.greetingText,/what we agreed last time/);
+    assert.match(enabled.systemMessage,/briefing is the first activity/);
     assert.equal(
       buildToolDefinitions(enabled.tools).some(
         (t) => t.name === "hyperflow_briefing",

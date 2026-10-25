@@ -1,6 +1,7 @@
 import { dispatchTwilio } from './outboundReadiness.js';
 import { withAmbientCapture } from './ambientCapture.js';
 import { withBriefing } from './briefingVoice.js';
+import { freezeOutboundCallConfig } from './outboundCallConfig.js';
 import { registerOperationalRoutes } from './operationalRoutes.js';
 import twilio from 'twilio';
 import { mutatePromise, listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
@@ -10,7 +11,7 @@ import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.
 import { assertContactable, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
 import { getDatabase } from './database.js';
 import { recordMessage } from './smsLog.js';
-import { recordCall } from './callLog.js';
+import { recordCall, persistBriefingPrivacy } from './callLog.js';
 import { enqueueEvent } from './eventOutbox.js';
 import { randomUUID } from 'node:crypto';
 import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, rankThreadCandidates, resolveCommunicationThread, resolveParticipantPerson } from './communicationModel.js';
@@ -1012,14 +1013,26 @@ export default async function v1Routes(fastify, options = {}) {
             });
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
-            const config = withBriefing(withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from }), semantic.purpose,request.body?.briefing_enabled===true);
+            let config = withBriefing(withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from }), semantic.purpose,request.body?.briefing_enabled===true);
+            if (operation.audit_context?.callConfig) config = operation.audit_context.callConfig;
+            if (request.body?.briefing_enabled === true && !config.briefingPrivate) throw new Error('Verified briefing configuration is unavailable; no call was placed');
+            if (config.briefingPrivate && !operation.audit_context?.callConfig) {
+                const context = await resolveCommunicationThread({db, tenantId:request.tenantId,
+                    participantIdentity:to, serviceIdentity:from, direction:'outbound',channel:'voice',
+                    communicationId, threadId:semantic.threadId, purpose:semantic.purpose,
+                    correlation:semantic.correlation, callbackUrl:semantic.callbackUrl});
+                await persistBriefingPrivacy(db, request.tenantId, communicationId);
+                config = await freezeOutboundCallConfig(db,operation,{...config,threadId:context.threadId,outboundTo:to});
+            }
             const base = PUBLIC_URL.replace(/\/$/, '');
             let call = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
                 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+                const answerUrl = new URL(providerCallbackUrl(base, '/outbound-answer', request.tenantId));
+                if (config.outboundOperationId) answerUrl.searchParams.set('outbound_operation_id',config.outboundOperationId);
                 call = await dispatchTwilio(db, operation, () => client.calls.create({
                     to, from,
-                    url: providerCallbackUrl(base, '/outbound-answer', request.tenantId),
+                    url: answerUrl.toString(),
                     statusCallback: providerCallbackUrl(base, '/call-status', request.tenantId),
                     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'], statusCallbackMethod: 'POST',
                 }), markOutbound);
@@ -1028,7 +1041,7 @@ export default async function v1Routes(fastify, options = {}) {
             storeCallConfig(call.sid, config);
             const stored = await recordCall({
                 callSid: call.sid, otherParty: to, serviceIdentity: from, direction: 'outbound', config,
-                metadata: { from }, communicationId, tenantId: request.tenantId, ...semantic, strict: true,
+                metadata: { from }, communicationId, tenantId: request.tenantId, ...semantic, threadId:config.threadId || semantic.threadId, strict: true,
             });
             config.threadId = stored.threadId;
             storeCallConfig(call.sid, config);

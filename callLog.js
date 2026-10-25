@@ -111,6 +111,7 @@ export async function recordCall({
             // then the call's config is long gone.
             metadata: {
                 ...(config?.briefingPrivate ? {briefingPrivate:true} : {}),
+                ...(config?.briefingPromptVersion ? {briefingPromptVersion:config.briefingPromptVersion} : {}),
                 model: config?.model, voice: config?.voice, effort: config?.effort,
                 aiSpeaksFirst: config?.aiSpeaksFirst ?? null,
                 summarise: config?.summarise ?? null,

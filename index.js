@@ -1,4 +1,6 @@
 import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
+import { restoreOutboundCallConfig } from './outboundCallConfig.js';
+import { briefingPromptVersion } from './briefingVoice.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import { dispatchTwilio, outboundModelHealth } from './outboundReadiness.js';
@@ -88,7 +90,7 @@ const BUILD = (() => {
     const SOURCES = [
         'index.js', 'outboundReadiness.js', 'outboundOperations.js', 'modelHealth.js', 'twilioHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
-        'briefingVoice.js', 'toolAudit.js',
+        'briefingVoice.js', 'toolAudit.js', 'outboundCallConfig.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
@@ -204,6 +206,7 @@ fastify.get('/health', async (request, reply) => {
         ),
         liveBriefing: Boolean(persistenceProvider && (process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL) && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
         briefingProtocol: 'briefing-tool.v1',
+        briefingPromptVersion,
         email: {
             enabled: emailEnabled(),
             providerPipeline: Boolean(persistenceProvider),
@@ -673,7 +676,20 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
     // Peek, don't consume: the media stream still needs this config when its
     // 'start' event arrives for the same CallSid.
     let config = peekCallConfig(params.CallSid);
+    if (params.outbound_operation_id) {
+        try {
+            config = await restoreOutboundCallConfig(getDatabase(), {
+                tenantId:params.tenant_id,operationId:params.outbound_operation_id,
+                callSid:params.CallSid,from:params.From,to:params.To,
+            });
+            storeCallConfig(params.CallSid,config);
+        } catch (error) {
+            console.warn('Approved outbound configuration unavailable:', error.message);
+            return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>The configured call could not be securely loaded. Please try again later.</Say><Hangup/></Response>');
+        }
+    }
     if (!config) {
+        if (params.tenant_id) return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>The configured call is unavailable. Please try again later.</Say><Hangup/></Response>');
         // Only if /outbound-call somehow didn't store one — re-resolve and
         // store so the media stream gets the same config (minus overrides).
         config = await resolveConfig({ from: params.From, to: params.To, direction: 'outbound' });
@@ -855,6 +871,7 @@ fastify.register(async (fastify) => {
         let config = DEFAULT_CONFIG; // replaced by the per-call config on 'start'
         let openAiWs = null; // created on 'start', once the CallSid identifies the call
         let callSid = null; // recorded on 'start', so tool calls can be attributed
+        let startClaimInFlight = false;
         const startTimer = setTimeout(() => connection.close(1008, 'Call start required'), 10000);
         startTimer.unref();
 
@@ -1434,7 +1451,7 @@ fastify.register(async (fastify) => {
         };
 
         // Handle incoming messages from Twilio
-        connection.on('message', (message) => {
+        connection.on('message', async (message) => {
             if (connection.readyState !== WebSocket.OPEN) return;
             try {
                 const data = JSON.parse(message);
@@ -1453,16 +1470,31 @@ fastify.register(async (fastify) => {
                         }
                         break;
                     case 'start':
-                        if (callSid || !/^CA[0-9a-f]{32}$/i.test(data.start?.callSid || '')
+                        if (callSid || startClaimInFlight || !/^CA[0-9a-f]{32}$/i.test(data.start?.callSid || '')
                             || !/^MZ[0-9a-f]{32}$/i.test(data.start?.streamSid || '')) {
                             connection.close(1008, 'Invalid call start');
                             return;
                         }
-                        const approvedConfig = takeCallConfig(data.start.callSid);
+                        startClaimInFlight = true;
+                        let approvedConfig = takeCallConfig(data.start.callSid);
+                        const parameters = data.start.customParameters || {};
+                        if (parameters.operationId || approvedConfig?.outboundOperationId) {
+                            try {
+                                approvedConfig = await restoreOutboundCallConfig(getDatabase(), {
+                                    tenantId:parameters.tenantId,operationId:parameters.operationId,
+                                    callSid:data.start.callSid,mediaCapability:parameters.mediaCapability,claimMedia:true,
+                                });
+                            } catch (error) {
+                                console.warn('Media configuration refused:',error.message);
+                                connection.close(1008,'Unapproved call');
+                                return;
+                            }
+                        }
                         if (!approvedConfig) {
                             connection.close(1008, 'Unapproved call');
                             return;
                         }
+                        if (connection.readyState !== WebSocket.OPEN) return;
                         clearTimeout(startTimer);
                         at('streamStart');
                         streamSid = data.start.streamSid;
