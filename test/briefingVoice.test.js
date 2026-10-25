@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { callBriefing, withBriefing } from "../briefingVoice.js";
+import { callBriefing, withBriefing, publishBriefingVerification } from "../briefingVoice.js";
+import {createVoiceTurns} from '../voiceTurns.js';
 import { applyHyperFlowVoiceContext } from "../hyperflowVoice.js";
 import { buildToolDefinitions } from "../tools.js";
 import { toolAuditArgs } from "../toolAudit.js";
@@ -9,6 +10,23 @@ import {persistCallOutcome} from '../callOutcome.js';
 import {persistBriefingPrivacy} from '../callLog.js';
 import {createPostgresClient} from '../database.js';
 import {PGlite} from '@electric-sql/pglite';
+
+test('verification completed after caller interruption remains trusted context without stale speech or repeated tools',async()=>{
+  let finish,epoch=0;const sent=[],speech=[],executed=[];
+  const turns=createVoiceTurns({generation:()=>epoch,sendResponse:x=>speech.push(x),endAfterPlayback:()=>{},runTool:async(call)=>{
+    executed.push(call.name);const output=await new Promise(resolve=>{finish=resolve;});
+    publishBriefingVerification({name:call.name,args:{operation:'verify_code',code:'SECRET'},output,privateCall:true,send:x=>sent.push(x)});
+    return {name:call.name,output};
+  }});
+  const pending=turns.done({id:'verify-response',status:'completed',output:[{type:'function_call',name:'hyperflow_briefing',call_id:'verify'}]});
+  epoch++;turns.interrupt();
+  finish({status:'verified',sections:['tasks','approvals','reports','UNTRUSTED']});await pending;
+  assert.equal(sent.length,1);assert.equal(speech.length,0);assert.deepEqual(executed,['hyperflow_briefing']);
+  const message=JSON.stringify(sent[0]);assert.match(message,/SMS verification SUCCEEDED/);assert.match(message,/list_tasks/);assert.doesNotMatch(message,/SECRET|UNTRUSTED/);
+  for(const input of [{error:'expired'},{output:{status:'code_sent'}},{privateCall:false},{name:'other'},{args:{operation:'list_tasks'}}]){
+    assert.equal(publishBriefingVerification({name:'hyperflow_briefing',args:{operation:'verify_code'},output:{status:'verified'},privateCall:true,send:()=>assert.fail('must not assert verification'),...input}),false);
+  }
+});
 
 test('briefing privacy saves by canonical communication ID, verifies the saved row and isolates tenants', async()=>{
   const sql=new PGlite();

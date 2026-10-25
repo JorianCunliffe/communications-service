@@ -1,6 +1,6 @@
 import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
 import { restoreOutboundCallConfig } from './outboundCallConfig.js';
-import { briefingPromptVersion } from './briefingVoice.js';
+import { briefingPromptVersion, publishBriefingVerification } from './briefingVoice.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import { dispatchTwilio, outboundModelHealth } from './outboundReadiness.js';
@@ -1263,7 +1263,11 @@ fastify.register(async (fastify) => {
                 tenantId: config.tenantId || null,
             });
 
-            if (generation !== toolGeneration) {
+            const verifiedStatePublished = !ending && !mediaClosed && openAiWs?.readyState === WebSocket.OPEN && publishBriefingVerification({
+                name,args,output,error,privateCall:config.briefingPrivate===true,
+                send:event=>openAiWs.send(JSON.stringify(event)),
+            });
+            if (generation !== toolGeneration && !verifiedStatePublished) {
                 console.log(`Discarding ${name} result — the caller interrupted while it ran`);
                 return;
             }
