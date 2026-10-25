@@ -6,6 +6,26 @@ import { applyHyperFlowVoiceContext } from "../hyperflowVoice.js";
 import { buildToolDefinitions } from "../tools.js";
 import { toolAuditArgs } from "../toolAudit.js";
 import {persistCallOutcome} from '../callOutcome.js';
+import {persistBriefingPrivacy} from '../callLog.js';
+import {createPostgresClient} from '../database.js';
+import {PGlite} from '@electric-sql/pglite';
+
+test('briefing privacy saves by canonical communication ID, verifies the saved row and isolates tenants', async()=>{
+  const sql=new PGlite();
+  try {
+    await sql.exec(`create table communications (
+      id uuid primary key default gen_random_uuid(), tenant_id text not null,
+      communication_id text not null, memory_eligible boolean not null default true,
+      unique(tenant_id,communication_id));
+      insert into communications(tenant_id,communication_id) values ('a','comm_private'),('b','comm_private');`);
+    const db=createPostgresClient(sql);
+    await persistBriefingPrivacy(db,'a','comm_private');
+    const {rows}=await sql.query('select tenant_id,memory_eligible from communications order by tenant_id');
+    assert.deepEqual(rows,[{tenant_id:'a',memory_eligible:false},{tenant_id:'b',memory_eligible:true}]);
+    await assert.rejects(persistBriefingPrivacy(db,'a','comm_missing'),/could not be persisted/);
+    await persistBriefingPrivacy(db,'a','comm_private');
+  } finally {await sql.close();}
+});
 
 test('successful private briefing calls stay out of general memory after outcome persistence',async()=>{
   const outcome={successful:true,disposition:'human_conversation',memoryEligible:true,failureCode:null,reason:null,source:'test',confidence:1,evidence:{}};

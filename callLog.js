@@ -44,6 +44,18 @@ async function withTimeout(query, label) {
     }
 }
 
+export async function persistBriefingPrivacy(db, tenantId, communicationId) {
+    const saved = await withTimeout(
+        db.from('communications').update({ memory_eligible: false })
+            .eq('tenant_id', tenantId).eq('communication_id', communicationId)
+            .select('communication_id,memory_eligible').maybeSingle(),
+        'Briefing privacy'
+    );
+    if (saved?.communication_id !== communicationId || saved.memory_eligible !== false) {
+        throw new Error('Briefing privacy could not be persisted');
+    }
+}
+
 // Called once a call has been created or answered. `otherParty` is whoever we
 // are talking to: the callee outbound, the caller inbound. `status` is the
 // call's state at the moment we record it — we create an outbound call
@@ -114,8 +126,7 @@ export async function recordCall({
 
         if (semantic.personId) row.contact_id = semantic.personId;
         if(config?.briefingPrivate){
-            const privacy=await withTimeout(db.from('communications').update({memory_eligible:false}).eq('tenant_id',scopedTenant).eq('id',communicationId),'Briefing privacy');
-            if(privacy.error)throw new Error('Briefing privacy could not be persisted');
+            await persistBriefingPrivacy(db, scopedTenant, communicationId);
         }
 
         // Link the call to the contact, the way SMS threads are linked, so a
