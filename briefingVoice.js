@@ -165,19 +165,19 @@ export const briefingTool = {
       startDate: { type: "string" },
       endDate: { type: "string" },
       projectId: { type: "string" },
-      status: { type: "string" },
+      status: { type: "string", description: "For set_status, use an exact value from the returned statusOptions (case sensitive, for example Completed). Do not invent or normalize status names." },
       includeClosed: { type: "boolean" },
       limit: { type: "integer" },
       after: { type: "string" },
-      itemId: { type: "string" },
-      version: { type: "string" },
+      itemId: { type: "string", description: "Exact item.id from list_tasks/list_approvals/read_item. This identifies the work item, not a prepared change." },
+      version: { type: "string", description: "Exact current item.version returned by read_item; preserve it unchanged." },
       action: {
         type: "string",
         enum: ["set_status", "progress", "submit", "approve", "reject"],
       },
       note: { type: "string" },
       requestId: { type: "string" },
-      id: { type: "string" },
+      id: { type: "string", description: "For confirm_change and change_result, copy the exact id returned by prepare_change. Do not use the itemId, source ID or a newly invented ID." },
       visualChecked: {
         type: "boolean",
         description:

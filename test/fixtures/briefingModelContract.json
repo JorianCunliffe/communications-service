@@ -1,0 +1,317 @@
+{
+  "verification": {
+    "status": "verified",
+    "sections": [
+      "tasks",
+      "approvals",
+      "reports"
+    ],
+    "reportSubject": "me",
+    "reportType": "workload",
+    "reportDays": 7
+  },
+  "tasks": {
+    "asOf": "2026-10-25T08:31:02.853Z",
+    "subject": "alice",
+    "items": [
+      {
+        "id": "subtask:p:n:t",
+        "source": "subtask",
+        "sourceId": "t",
+        "kind": "task",
+        "title": "Disposable fixture task",
+        "projectId": "p",
+        "status": "Started",
+        "version": "0f4e6c78cf40a0abe147c788f740bf5e19c3e672b50931aa917f4085a4bc76e6",
+        "actions": [
+          "set_status"
+        ],
+        "assigneeUid": "alice",
+        "assigneeLabel": "Alice",
+        "updatedAt": 1792917060983,
+        "details": "No external work",
+        "projectName": "Acceptance"
+      }
+    ],
+    "total": 1,
+    "next": null,
+    "incomplete": false,
+    "notices": [],
+    "statusOptions": [
+      "Completed",
+      "Not Complete",
+      "Not started",
+      "Needs preparation",
+      "Ready",
+      "Started",
+      "Submitted",
+      "Held",
+      "Abandoned"
+    ]
+  },
+  "taskDetail": {
+    "asOf": "2026-10-25T08:31:02.956Z",
+    "item": {
+      "id": "subtask:p:n:t",
+      "source": "subtask",
+      "sourceId": "t",
+      "kind": "task",
+      "title": "Disposable fixture task",
+      "projectId": "p",
+      "status": "Started",
+      "version": "0f4e6c78cf40a0abe147c788f740bf5e19c3e672b50931aa917f4085a4bc76e6",
+      "actions": [
+        "set_status"
+      ],
+      "assigneeUid": "alice",
+      "assigneeLabel": "Alice",
+      "updatedAt": 1792917060983,
+      "details": "No external work",
+      "projectName": "Acceptance"
+    },
+    "incomplete": false,
+    "notices": []
+  },
+  "taskPreparation": {
+    "id": "fixture_task_change",
+    "status": "prepared",
+    "readback": "Acceptance: Disposable fixture task. Change status from Started to Completed. Confirm this change?",
+    "createdAt": 1792917063157,
+    "expiresAt": 1792917663157,
+    "itemId": "subtask:p:n:t",
+    "action": "set_status"
+  },
+  "approvals": {
+    "asOf": "2026-10-25T08:31:03.933Z",
+    "subject": "alice",
+    "items": [
+      {
+        "id": "commitment_approval:ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "source": "commitment_approval",
+        "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "kind": "approval",
+        "title": "Accept this obligation: Fixture review",
+        "projectId": "p",
+        "status": "open",
+        "version": "1",
+        "actions": [
+          "approve",
+          "reject"
+        ],
+        "reviewerUid": "alice",
+        "projectName": "Acceptance"
+      },
+      {
+        "id": "triage_approval:triage_old_pending",
+        "source": "triage_approval",
+        "sourceId": "triage_old_pending",
+        "kind": "approval",
+        "title": "coaching_commitment: Older pending fixture",
+        "projectId": "p",
+        "status": "open",
+        "version": "bba257bc6004a73da82ad55f847c583fb0175260a671936b5d39973ecdc60a69",
+        "actions": [
+          "approve",
+          "reject"
+        ],
+        "reviewerUid": "alice",
+        "details": "Review this fixture only",
+        "projectName": "Acceptance"
+      }
+    ],
+    "total": 2,
+    "next": null,
+    "incomplete": false,
+    "notices": [],
+    "statusOptions": [
+      "Completed",
+      "Not Complete",
+      "Not started",
+      "Needs preparation",
+      "Ready",
+      "Started",
+      "Submitted",
+      "Held",
+      "Abandoned"
+    ]
+  },
+  "approvalDetail": {
+    "asOf": "2026-10-25T08:31:04.029Z",
+    "item": {
+      "id": "commitment_approval:ob_34b85c4c501e4a08bdcfeaad1832902f",
+      "source": "commitment_approval",
+      "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+      "kind": "approval",
+      "title": "Accept this obligation: Fixture review",
+      "projectId": "p",
+      "status": "open",
+      "version": "1",
+      "actions": [
+        "approve",
+        "reject"
+      ],
+      "reviewerUid": "alice",
+      "projectName": "Acceptance"
+    },
+    "incomplete": false,
+    "notices": []
+  },
+  "approvalPreparation": {
+    "id": "fixture_approval_change",
+    "status": "prepared",
+    "readback": "Acceptance: Accept this obligation: Fixture review. Approve this exact version. Note: Accept the isolated fixture obligation Confirm this change?",
+    "createdAt": 1792917064144,
+    "expiresAt": 1792917664144,
+    "itemId": "commitment_approval:ob_34b85c4c501e4a08bdcfeaad1832902f",
+    "action": "approve"
+  },
+  "reportAll": {
+    "asOf": "2026-10-25T08:31:04.535Z",
+    "timezone": "Australia/Brisbane",
+    "subject": "all",
+    "reportType": "workload",
+    "startDate": null,
+    "endDate": null,
+    "byUser": [
+      {
+        "userId": "alice",
+        "name": "Alice",
+        "total": 2,
+        "open": 1,
+        "closed": 1,
+        "completed": 1,
+        "overdue": 0
+      },
+      {
+        "userId": "bob",
+        "name": "bob@example.test",
+        "total": 0,
+        "open": 0,
+        "closed": 0,
+        "completed": 0,
+        "overdue": 0
+      }
+    ],
+    "items": [
+      {
+        "id": "subtask:p:n:t",
+        "source": "subtask",
+        "sourceId": "t",
+        "kind": "task",
+        "title": "Disposable fixture task",
+        "projectId": "p",
+        "status": "Completed",
+        "version": "6716b345c2f4f422dfb580f854b9f72113b258e3653b71ad9cd38d59ccd407c7",
+        "actions": [
+          "set_status"
+        ],
+        "assigneeUid": "alice",
+        "assigneeLabel": "Alice",
+        "updatedAt": 1792917063447,
+        "details": "No external work",
+        "projectName": "Acceptance"
+      },
+      {
+        "id": "commitment:ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "source": "commitment",
+        "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "kind": "task",
+        "title": "Fixture review",
+        "projectId": "p",
+        "status": "accepted",
+        "version": "2",
+        "actions": [
+          "progress",
+          "submit"
+        ],
+        "assigneeUid": "alice",
+        "dueAt": "2026-10-26T08:31:03.851Z",
+        "updatedAt": 1792917064397,
+        "projectName": "Acceptance"
+      }
+    ],
+    "total": 2,
+    "truncated": false,
+    "incomplete": false,
+    "notices": [],
+    "text": "Alice: 1 open, 1 completed, 0 otherwise closed, 0 overdue. bob@example.test: 0 open, 0 completed, 0 otherwise closed, 0 overdue."
+  },
+  "reportMe": {
+    "asOf": "2026-10-25T08:31:04.639Z",
+    "timezone": "Australia/Brisbane",
+    "subject": "alice",
+    "reportType": "workload",
+    "startDate": null,
+    "endDate": null,
+    "byUser": [
+      {
+        "userId": "alice",
+        "name": "Alice",
+        "total": 2,
+        "open": 1,
+        "closed": 1,
+        "completed": 1,
+        "overdue": 0
+      }
+    ],
+    "items": [
+      {
+        "id": "subtask:p:n:t",
+        "source": "subtask",
+        "sourceId": "t",
+        "kind": "task",
+        "title": "Disposable fixture task",
+        "projectId": "p",
+        "status": "Completed",
+        "version": "6716b345c2f4f422dfb580f854b9f72113b258e3653b71ad9cd38d59ccd407c7",
+        "actions": [
+          "set_status"
+        ],
+        "assigneeUid": "alice",
+        "assigneeLabel": "Alice",
+        "updatedAt": 1792917063447,
+        "details": "No external work",
+        "projectName": "Acceptance"
+      },
+      {
+        "id": "commitment:ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "source": "commitment",
+        "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "kind": "task",
+        "title": "Fixture review",
+        "projectId": "p",
+        "status": "accepted",
+        "version": "2",
+        "actions": [
+          "progress",
+          "submit"
+        ],
+        "assigneeUid": "alice",
+        "dueAt": "2026-10-26T08:31:03.851Z",
+        "updatedAt": 1792917064397,
+        "projectName": "Acceptance"
+      }
+    ],
+    "total": 2,
+    "truncated": false,
+    "incomplete": false,
+    "notices": [],
+    "text": "Alice: 1 open, 1 completed, 0 otherwise closed, 0 overdue."
+  },
+  "subjects": {
+    "subjects": [
+      {
+        "id": "alice",
+        "name": "Alice",
+        "email": "alice@example.test",
+        "kind": "member"
+      },
+      {
+        "id": "bob",
+        "name": "bob@example.test",
+        "email": "bob@example.test",
+        "kind": "member"
+      }
+    ]
+  }
+}
