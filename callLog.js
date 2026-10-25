@@ -75,8 +75,9 @@ export async function recordCall({
     callbackUrl = null,
     tenantId = null,
     strict = false,
+    database = getClient(),
 }) {
-    const db = getClient();
+    const db = database;
     if (!db || !callSid) {
         if (strict) throw new Error('Communications persistence is not configured');
         return null;
@@ -126,9 +127,9 @@ export async function recordCall({
         };
 
         if (semantic.personId) row.contact_id = semantic.personId;
-        if(config?.briefingPrivate){
-            await persistBriefingPrivacy(db, scopedTenant, communicationId);
-        }
+        // The calls insert projects its canonical communication in the same transaction.
+        // Carry privacy on that source row; the canonical row does not exist beforehand.
+        if(config?.briefingPrivate) row.memory_eligible = false;
 
         // Link the call to the contact, the way SMS threads are linked, so a
         // person's calls can be found without matching on phone number. Set
@@ -146,6 +147,7 @@ export async function recordCall({
             db.from('calls').upsert(row, { onConflict: 'tenant_id,twilio_call_sid' }),
             'Call record insert'
         );
+        if(config?.briefingPrivate) await persistBriefingPrivacy(db, scopedTenant, communicationId);
         await withTimeout(
             db.from('communications').update({ resolution: semantic.resolution })
                 .eq('tenant_id', scopedTenant).eq('communication_id', communicationId),

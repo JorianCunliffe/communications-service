@@ -10,7 +10,7 @@ import v1Routes from '../v1.js';
 import { canonicalEmail } from '../email.js';
 import { ingestCanonicalInboundEmail } from '../emailWebhook.js';
 import { createEmailReplyRoute } from '../emailReplyRoutes.js';
-import { updateCallProjectContext } from '../callLog.js';
+import { updateCallProjectContext, recordCall } from '../callLog.js';
 
 const tenantId = 'thread_integration_test';
 const key = 'local-thread-integration-only';
@@ -60,6 +60,25 @@ before(async () => {
     ] });
     assert.equal(createdBlair.status, 201, JSON.stringify(createdBlair.body));
     blair = createdBlair.body.person_id;
+});
+
+test('private briefing call creation projects its canonical row before verifying privacy',async()=>{
+    const callSid='CA'+'c'.repeat(32),communicationId='comm_private_call_creation';
+    const input={callSid,communicationId,tenantId,database,direction:'outbound',
+        otherParty:'+61400000111',serviceIdentity:'+61400000999',strict:true,
+        purpose:{type:'coaching_session'},correlation:{external_project_id:'private_briefing_fixture'},
+        config:{briefingPrivate:true,briefingPromptVersion:'briefing-first.v2',systemMessage:'Approved daily briefing'}};
+    assert.equal((await sql.query('select count(*)::int as n from communications where communication_id=$1',[communicationId])).rows[0].n,0);
+    const stored=await recordCall(input);
+    assert.equal(stored.communicationId,communicationId);
+    const call=(await sql.query('select * from calls where tenant_id=$1 and twilio_call_sid=$2',[tenantId,callSid])).rows[0];
+    const communication=(await sql.query('select * from communications where tenant_id=$1 and communication_id=$2',[tenantId,communicationId])).rows[0];
+    assert.equal(call.memory_eligible,false);
+    assert.equal(call.metadata.briefingPromptVersion,'briefing-first.v2');
+    assert.equal(communication.memory_eligible,false);
+    assert.equal(communication.source_id,call.id);
+    await recordCall({...input,threadId:stored.threadId});
+    assert.equal((await sql.query('select count(*)::int as n from calls where tenant_id=$1 and twilio_call_sid=$2',[tenantId,callSid])).rows[0].n,1);
 });
 
 after(async () => {

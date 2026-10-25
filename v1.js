@@ -11,7 +11,7 @@ import { E164, rejectMissingCapability, rejectUnauthorizedTenant } from './auth.
 import { assertContactable, resolveConfig, ensureContact, storeCallConfig } from './configResolver.js';
 import { getDatabase } from './database.js';
 import { recordMessage } from './smsLog.js';
-import { recordCall, persistBriefingPrivacy } from './callLog.js';
+import { recordCall } from './callLog.js';
 import { enqueueEvent } from './eventOutbox.js';
 import { randomUUID } from 'node:crypto';
 import { canonicalCommunication, normaliseCorrelation, normalisePurpose, prefixedId, rankThreadCandidates, resolveCommunicationThread, resolveParticipantPerson } from './communicationModel.js';
@@ -1021,7 +1021,6 @@ export default async function v1Routes(fastify, options = {}) {
                     participantIdentity:to, serviceIdentity:from, direction:'outbound',channel:'voice',
                     communicationId, threadId:semantic.threadId, purpose:semantic.purpose,
                     correlation:semantic.correlation, callbackUrl:semantic.callbackUrl});
-                await persistBriefingPrivacy(db, request.tenantId, communicationId);
                 config = await freezeOutboundCallConfig(db,operation,{...config,threadId:context.threadId,outboundTo:to});
             }
             const base = PUBLIC_URL.replace(/\/$/, '');
