@@ -105,14 +105,14 @@ test("model tools expose no arbitrary project, URL, code or permission channel",
   }
 });
 test("whole reception calls and verification SMS are not eligible cross-project memories", () => {
-  for (const type of ["project_reception", "reception_verification"])
+  for (const type of ["project_reception", "reception_verification", "briefing_verification"])
     assert.equal(
       canonicalCommunication({ purpose: { type }, memoryEligible: true })
         .outcome.memory_eligible,
       false,
     );
   const source = readFileSync(new URL("../index.js", import.meta.url), "utf8");
-  assert(source.includes("name==='reception_verify'?{redacted:true}:args"));
+  assert(source.includes('args: toolAuditArgs(name,args)'));
   assert(source.includes("privateReceptionSegments.has(s.id)"));
   assert(source.includes("!output?.reception"));
   const resolver = readFileSync(

@@ -165,7 +165,7 @@ export async function persistCallOutcome(db, call, outcome) {
         business_status: outcome.successful ? 'success' : 'failed',
         disposition: outcome.disposition,
         successful: outcome.successful,
-        memory_eligible: call.purpose?.type === 'project_reception' ? false : outcome.memoryEligible,
+        memory_eligible: call.purpose?.type === 'project_reception' || call.metadata?.briefingPrivate === true ? false : outcome.memoryEligible,
         failure_code: outcome.failureCode,
         failure_reason: outcome.successful ? null : outcome.reason,
         outcome_source: outcome.source,
@@ -186,7 +186,7 @@ export async function persistCallOutcome(db, call, outcome) {
         duration_seconds: stored.duration_seconds ?? null,
         disposition: outcome.disposition,
         successful: outcome.successful,
-        memory_eligible: call.purpose?.type === 'project_reception' ? false : outcome.memoryEligible,
+        memory_eligible: call.purpose?.type === 'project_reception' || call.metadata?.briefingPrivate === true ? false : outcome.memoryEligible,
         failure_code: outcome.failureCode,
         failure_reason: outcome.successful ? null : outcome.reason,
         error: outcome.successful ? null : outcome.reason,
@@ -214,7 +214,7 @@ export async function persistCallOutcome(db, call, outcome) {
             destination,
             payload: {
                 ask_id: stored.purpose.ask_id, channel: 'voice', transcript: stored.transcript,
-                disposition: outcome.disposition, successful: true, memory_eligible: true,
+                disposition: outcome.disposition, successful: true, memory_eligible: stored.metadata?.briefingPrivate !== true,
             },
             dedupeKey: `ask-response:${stored.communication_id}`,
         });

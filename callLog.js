@@ -98,6 +98,7 @@ export async function recordCall({
             // later: it decides which diarised speaker is the assistant, and by
             // then the call's config is long gone.
             metadata: {
+                ...(config?.briefingPrivate ? {briefingPrivate:true} : {}),
                 model: config?.model, voice: config?.voice, effort: config?.effort,
                 aiSpeaksFirst: config?.aiSpeaksFirst ?? null,
                 summarise: config?.summarise ?? null,
@@ -112,6 +113,10 @@ export async function recordCall({
         };
 
         if (semantic.personId) row.contact_id = semantic.personId;
+        if(config?.briefingPrivate){
+            const privacy=await withTimeout(db.from('communications').update({memory_eligible:false}).eq('tenant_id',scopedTenant).eq('id',communicationId),'Briefing privacy');
+            if(privacy.error)throw new Error('Briefing privacy could not be persisted');
+        }
 
         // Link the call to the contact, the way SMS threads are linked, so a
         // person's calls can be found without matching on phone number. Set

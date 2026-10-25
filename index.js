@@ -20,6 +20,7 @@ import { createTranscriptDrain } from './transcriptDrain.js';
 import { createVoiceTurns } from './voiceTurns.js';
 import { recordMessage, tenantForMessage } from './smsLog.js';
 import { executeTool } from './tools.js';
+import {toolAuditArgs} from './toolAudit.js';
 import { E164, isAuthorized, rejectUnsignedTwilio, rejectUnsignedMediaStream, signatureMode } from './auth.js';
 import apiRoutes from './api.js';
 import { preconnect, claim as claimSession, startSessionSweeper, preconnectEnabled, pendingCount, startHistory, claimHistory, noteParty, partyFor } from './realtimeSessions.js';
@@ -87,6 +88,7 @@ const BUILD = (() => {
     const SOURCES = [
         'index.js', 'outboundReadiness.js', 'outboundOperations.js', 'modelHealth.js', 'twilioHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
+        'briefingVoice.js', 'toolAudit.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
@@ -200,6 +202,8 @@ fastify.get('/health', async (request, reply) => {
             && (process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL)
             && process.env.COMMUNICATIONS_WEBHOOK_SECRET
         ),
+        liveBriefing: Boolean(persistenceProvider && (process.env.HYPERFLOW_AGENT_CONTEXT_URL || process.env.HYPERFLOW_EVENT_URL) && process.env.COMMUNICATIONS_WEBHOOK_SECRET),
+        briefingProtocol: 'briefing-tool.v1',
         email: {
             enabled: emailEnabled(),
             providerPipeline: Boolean(persistenceProvider),
@@ -1214,6 +1218,9 @@ fastify.register(async (fastify) => {
                 threadId: config.threadId || null,
                 communicationId: config.communicationId || null,
                 serviceIdentity: config.serviceIdentity || null,
+                briefingHumanTurn: config.briefingHumanTurn || null,
+                briefingAssistantTurn: config.briefingAssistantTurn || null,
+                briefingPrivate: config.briefingPrivate === true,
                 toolCallId, reception:config.reception,
             });
             console.log(`Tool ${name} ${error ? `failed: ${error}` : 'ok'} (${durationMs}ms)`);
@@ -1234,7 +1241,7 @@ fastify.register(async (fastify) => {
 
             // Not awaited: the model is waiting on the result, not the audit row.
             recordToolCall({
-                callSid, openAiCallId: toolCallId, name, args: name==='reception_verify'?{redacted:true}:args,
+                callSid, openAiCallId: toolCallId, name, args: toolAuditArgs(name,args),
                 result: output ?? null, error: error ?? null, durationMs,
                 tenantId: config.tenantId || null,
             });
@@ -1361,6 +1368,9 @@ fastify.register(async (fastify) => {
                 }
 
                 if (response.type === 'input_audio_buffer.speech_started') {
+                    config.briefingHumanStartedAt=Date.now();
+                    if(markQueue.length)config.briefingInterruptedItem=lastAssistantItem;
+                    if(config.briefingAssistantTurn && markQueue.length)config.briefingAssistantTurn.interrupted=true;
                     // Stamped before the interruption handling below, because
                     // that resets the timing state this is reading.
                     pendingSpeechStartMs = streamMs();
@@ -1377,6 +1387,7 @@ fastify.register(async (fastify) => {
 
                 // The caller's words.
                 if (response.type === 'conversation.item.input_audio_transcription.completed') {
+                    config.briefingHumanTurn={text:response.transcript,at:config.briefingHumanStartedAt||Date.now(),observedAt:Date.now(),itemId:response.item_id};
                     noteSegment({
                         role: 'user',
                         speaker: 'caller',
@@ -1401,6 +1412,7 @@ fastify.register(async (fastify) => {
                 // playback mid-sentence while the transcript still carries the
                 // whole thing.
                 if (response.type === 'response.output_audio_transcript.done') {
+                    config.briefingAssistantTurn={text:response.transcript,at:Date.now(),itemId:response.item_id,interrupted:config.briefingInterruptedItem===response.item_id,playedAt:markQueue.length?null:Date.now()};
                     noteSegment({
                         role: 'assistant',
                         speaker: 'assistant',
@@ -1473,6 +1485,7 @@ fastify.register(async (fastify) => {
                         // A clear flushes old marks too; their late echoes must
                         // not acknowledge audio belonging to the next reply.
                         markQueue = markQueue.filter(name => name !== data.mark?.name);
+                        if(!markQueue.length&&config.briefingAssistantTurn?.itemId===lastAssistantItem&&!config.briefingAssistantTurn.interrupted)config.briefingAssistantTurn.playedAt=Date.now();
 
                         // An empty queue means everything we sent has finished
                         // playing, so the next response needs its own baseline.

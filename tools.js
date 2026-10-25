@@ -62,7 +62,9 @@ export function filterTurns(turns, query) {
     });
 }
 
+import {briefingTool} from './briefingVoice.js';
 const TOOLS = {
+    hyperflow_briefing: briefingTool,
     ...receptionTools,
     captureWorkItem: ambientCaptureTool,
     operational_review: reviewVoiceTool,

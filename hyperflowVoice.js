@@ -1,4 +1,5 @@
 import { receptionToolNames } from './receptionVoice.js';
+import {briefingConfigured,briefingInstructions} from './briefingVoice.js';
 import { ambientCaptureInstructions } from './ambientCapture.js';
 import { createHmac, randomUUID } from 'node:crypto';
 import { safeFetch } from './safeFetch.js';
@@ -96,6 +97,7 @@ export function applyHyperFlowVoiceContext(config, context) {
     const scopedInstructions = [
         context.instructions,
         context.captureEnabled === true ? ambientCaptureInstructions : null,
+        context.briefingEnabled === true && briefingConfigured() ? briefingInstructions : null,
         evidence ? `--- HYPERFLOW PROJECT CONTEXT DATA ---\n${evidence}\n--- END HYPERFLOW PROJECT CONTEXT DATA ---` : null,
         'Use select_hyperflow_project as soon as the caller names a project, including in their first question. Their question already counts as selecting it: do not ask them to repeat the name or ask which project it is under. Ask for clarification only when the tool reports ambiguity. Never expose context from a project until returned as authorized for this call. After selection, answer the pending question once without repeating the greeting. The configured HyperFlow style takes precedence over a generic demo persona. Do not add unsolicited jokes. Explain limitations in plain language; do not describe internal authorization or read-only architecture to the caller.',
     ].filter(Boolean).join('\n\n');
@@ -107,10 +109,12 @@ export function applyHyperFlowVoiceContext(config, context) {
         ...(context.reception ? {playIntro:false,introMessage:null,introMessage2:null,assistantName:context.reception.name} : {}),
         aiSpeaksFirst: true,
         liveTranscript: true,
+        ...(context.briefingEnabled === true && !context.reception && briefingConfigured() ? {briefingPrivate:true} : {}),
         wantsHistory: false,
         tools: [...new Set([
             ...(config.tools || []).filter((name) => ['end_call', 'get_current_time'].includes(name)),
             'select_hyperflow_project',
+            ...(context.briefingEnabled === true && !context.reception && briefingConfigured() ? ['hyperflow_briefing'] : []),
             ...(context.reception ? receptionToolNames(context.reception) : context.captureEnabled === true ? ['captureWorkItem'] : []),
         ])],
         hyperflowRouting: context.routing || null,

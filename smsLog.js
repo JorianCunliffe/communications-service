@@ -104,6 +104,7 @@ export async function recordMessage({
         if (!scopedTenant) throw new Error('tenant_id is required for SMS persistence');
         const canonicalPurpose = normalisePurpose(purpose);
         if(canonicalPurpose?.type==='reception_verification')body='Reception verification challenge sent. Code redacted.';
+        if(canonicalPurpose?.type==='briefing_verification')body='Briefing verification challenge sent. Code redacted.';
         const canonicalCorrelation = normaliseCorrelation({ ...correlation, tenant_id: scopedTenant });
         const semantic = await resolveCommunicationThread({
             db,
@@ -143,7 +144,7 @@ export async function recordMessage({
 
         if (error) throw new Error(error.message);
         const resolution = await withTimeout(
-            db.from('communications').update({ resolution: semantic.resolution, ...(canonicalPurpose?.type==='reception_verification'?{memory_eligible:false}:{}) })
+            db.from('communications').update({ resolution: semantic.resolution, ...(['reception_verification','briefing_verification'].includes(canonicalPurpose?.type)?{memory_eligible:false}:{}) })
                 .eq('tenant_id', scopedTenant).eq('communication_id', communicationId),
             'SMS thread resolution update'
         );

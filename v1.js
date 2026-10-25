@@ -1,5 +1,6 @@
 import { dispatchTwilio } from './outboundReadiness.js';
 import { withAmbientCapture } from './ambientCapture.js';
+import { withBriefing } from './briefingVoice.js';
 import { registerOperationalRoutes } from './operationalRoutes.js';
 import twilio from 'twilio';
 import { mutatePromise, listPromises, readPromise, promiseCoverage, promiseScope, reviewPromise, PromiseError } from './promiseLedger.js';
@@ -979,6 +980,7 @@ export default async function v1Routes(fastify, options = {}) {
         if (denied) return denied;
         const db = database(reply); if (!db) return reply;
         const { to, from, overrides = {} } = request.body || {};
+        if(request.body?.briefing_enabled!==undefined&&typeof request.body.briefing_enabled!=='boolean')return reply.code(400).send({error:'briefing_enabled must be a boolean'});
         if (!E164.test(to || '')) return reply.code(400).send({ error: '"to" must be an E.164 phone number' });
         if (!E164.test(from || '')) return reply.code(400).send({ error: '"from" must be an E.164 phone number' });
         if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return reply.code(400).send({ error: '"overrides" must be an object' });
@@ -1005,12 +1007,12 @@ export default async function v1Routes(fastify, options = {}) {
             const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
             const operation = await reserveOutbound(db, {
                 key: idempotencyKey(request), type: 'voice', communicationId, readinessModel: overrides.model || resolved.model,
-                request: { to, from, overrides, purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
+                request: { to, from, overrides, ...(request.body?.briefing_enabled===true?{briefing_enabled:true}:{}), purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
                     override_do_not_contact: request.body?.override_do_not_contact, override_reason: request.body?.override_reason },
             });
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
-            const config = withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from });
+            const config = withBriefing(withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from }), semantic.purpose,request.body?.briefing_enabled===true);
             const base = PUBLIC_URL.replace(/\/$/, '');
             let call = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
