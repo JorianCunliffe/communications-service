@@ -60,6 +60,28 @@ test('caller interruption during tool lookup prevents a stale continuation', asy
     await pending;
     assert.equal(h.sent.length, 0);
 });
+test('verified call state resumes once after an intervening caller response completes',async()=>{
+    for(const completeToolFirst of [true,false]){
+        let resolve; const h=harness(()=>new Promise(r=>{resolve=r;}));
+        h.turns.responseCreated({id:'verify'});
+        const pending=h.turns.done(done('verify',[call('hyperflow_briefing','verification')]));
+        h.interrupt();h.turns.speechStopped();h.turns.responseCreated({id:'waiting'});
+        if(completeToolFirst){resolve({name:'hyperflow_briefing',output:{status:'verified'},continueAfterInterruption:true});await pending;assert.equal(h.sent.length,0);}
+        await h.turns.done(done('waiting',[speech('Still processing')]));
+        if(!completeToolFirst){resolve({name:'hyperflow_briefing',output:{status:'verified'},continueAfterInterruption:true});await pending;}
+        assert.equal(h.sent.length,1);
+        await h.turns.done(done('waiting',[speech('duplicate')]));assert.equal(h.sent.length,1);
+        assert.deepEqual(h.executed,['verification']);
+    }
+});
+test('a caller request to end the call suppresses deferred verification continuation',async()=>{
+    let resolve; const h=harness(tool=>tool.name==='hyperflow_briefing'?new Promise(r=>{resolve=r;}):{name:'end_call',output:{}});
+    const pending=h.turns.done(done('verify',[call('hyperflow_briefing')]));
+    h.interrupt();h.turns.speechStopped();h.turns.responseCreated({id:'end'});
+    await h.turns.done(done('end',[speech('Goodbye'),call('end_call','end')]));
+    resolve({name:'hyperflow_briefing',continueAfterInterruption:true});await pending;
+    assert.equal(h.sent.length,0);assert.equal(h.ended.length,1);
+});
 test('interrupted farewell cannot hang up a resumed conversation', async () => {
     const h = harness();
     await h.turns.done(done('r1', [call()]));

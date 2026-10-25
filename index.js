@@ -1206,6 +1206,7 @@ fastify.register(async (fastify) => {
         // a broken tool produces something the model can say out loud instead
         // of an exception that leaves the caller in silence.
         const receptionContextItems = new Set();
+        const pendingToolAcknowledgements = new Map();
         const handleToolCall = async (event) => {
             const toolCallId = event.call_id;
             const name = event.name;
@@ -1290,7 +1291,9 @@ fastify.register(async (fastify) => {
                     output: JSON.stringify(error ? { error } : output),
                 },
             }));
-            return { name, output, error };
+            pendingToolAcknowledgements.set(toolCallId,{name,sentAt:Date.now()});
+            console.log('Voice tool result sent',{callSid,toolCallId,name,verified:verifiedStatePublished,interrupted:generation!==toolGeneration});
+            return { name, output, error, continueAfterInterruption:verifiedStatePublished };
         };
 
         const voiceTurns = createVoiceTurns({
@@ -1350,6 +1353,12 @@ fastify.register(async (fastify) => {
                 }
 
                 if (response.type === 'session.updated') at('sessionUpdated');
+                if (response.type === 'response.created') voiceTurns.responseCreated(response.response);
+                if (response.type === 'input_audio_buffer.speech_stopped') voiceTurns.speechStopped();
+                if (response.type === 'conversation.item.created' && response.item?.type === 'function_call_output') {
+                    const pending=pendingToolAcknowledgements.get(response.item.call_id);
+                    if(pending){pendingToolAcknowledgements.delete(response.item.call_id);console.log('Voice tool result acknowledged',{callSid,toolCallId:response.item.call_id,name:pending.name,latencyMs:Date.now()-pending.sentAt});}
+                }
 
                 if (response.type === 'response.output_audio.delta' && response.delta) {
                     if (mediaClosed || connection.readyState !== WebSocket.OPEN) return;
