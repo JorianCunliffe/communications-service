@@ -60,6 +60,22 @@ test('caller interruption during tool lookup prevents a stale continuation', asy
     await pending;
     assert.equal(h.sent.length, 0);
 });
+
+test('an interrupted briefing approval result resumes once without replaying the mutation', async () => {
+    let resolve;
+    const h = harness(() => new Promise(r => { resolve = r; }));
+    h.turns.responseCreated({id:'approve'});
+    const pending = h.turns.done(done('approve', [call('hyperflow_briefing', 'confirm-change')]));
+    h.interrupt();
+    resolve({name:'hyperflow_briefing',output:{status:'completed',id:'saved'},continueAfterInterruption:true});
+    await pending;
+    assert.equal(h.sent.length,0);
+    h.turns.speechStopped();
+    h.turns.responseCreated({id:'caller-question'});
+    await h.turns.done(done('caller-question',[speech('Checking the saved receipt.')]));
+    assert.equal(h.sent.length,1);
+    assert.deepEqual(h.executed,['confirm-change']);
+});
 test('verified call state resumes once after an intervening caller response completes',async()=>{
     for(const completeToolFirst of [true,false]){
         let resolve; const h=harness(()=>new Promise(r=>{resolve=r;}));

@@ -1268,7 +1268,10 @@ fastify.register(async (fastify) => {
                 name,args,output,error,privateCall:config.briefingPrivate===true,
                 send:event=>openAiWs.send(JSON.stringify(event)),
             });
-            if (generation !== toolGeneration && !verifiedStatePublished) {
+            // A caller asking whether a slow operation finished must not erase
+            // its result. Retain the output, then resume after their current turn.
+            const retainBriefingResult = config.briefingPrivate === true && name === 'hyperflow_briefing';
+            if (generation !== toolGeneration && !verifiedStatePublished && !retainBriefingResult) {
                 console.log(`Discarding ${name} result — the caller interrupted while it ran`);
                 return;
             }
@@ -1293,7 +1296,7 @@ fastify.register(async (fastify) => {
             }));
             pendingToolAcknowledgements.set(toolCallId,{name,sentAt:Date.now()});
             console.log('Voice tool result sent',{callSid,toolCallId,name,verified:verifiedStatePublished,interrupted:generation!==toolGeneration});
-            return { name, output, error, continueAfterInterruption:verifiedStatePublished };
+            return { name, output, error, continueAfterInterruption:verifiedStatePublished || retainBriefingResult };
         };
 
         const voiceTurns = createVoiceTurns({
