@@ -3,6 +3,43 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { callBriefing, withBriefing, publishBriefingVerification } from "../briefingVoice.js";
 import {createVoiceTurns} from '../voiceTurns.js';
+import {createBriefingTurnEvidence} from '../briefingTurnEvidence.js';
+
+const spokenReadback=(evidence,{text='Exact proposal. Confirm this change?',played=true}={})=>{
+  evidence.audio('readback',100);evidence.markSent('readback-mark','readback');evidence.audioDone('readback');evidence.transcript('readback',text);
+  if(played)evidence.markPlayed('readback-mark',110);
+};
+test('readback validation rejection is explicit while transport failures remain uncertain',async()=>{
+  const oldUrl=process.env.HYPERFLOW_EVENT_URL,oldSecret=process.env.COMMUNICATIONS_WEBHOOK_SECRET;
+  process.env.HYPERFLOW_EVENT_URL='https://fixture.invalid/api/events';process.env.COMMUNICATIONS_WEBHOOK_SECRET='fixture-secret';
+  const context={briefingPrivate:true,tenantId:'fixture',personId:'person',threadId:'thread',communicationId:'call',serviceIdentity:'line'};
+  try{
+    const result=await callBriefing({operation:'confirm_change',id:'proposal'},context,{fetchBriefing:async()=>({ok:false,status:422,json:async()=>({error:'Read the exact proposal aloud in full before requesting confirmation'})})});
+    assert.equal(result.status,'confirmation_rejected');assert.equal(result.confirmationAccepted,false);assert.match(result.nextStep,/change_result/);assert.match(result.nextStep,/Do not describe it as processing or saved/);
+    await assert.rejects(callBriefing({operation:'confirm_change',id:'proposal'},context,{fetchBriefing:async()=>{throw new Error('Network timeout');}}),/Network timeout/);
+  }finally{if(oldUrl===undefined)delete process.env.HYPERFLOW_EVENT_URL;else process.env.HYPERFLOW_EVENT_URL=oldUrl;if(oldSecret===undefined)delete process.env.COMMUNICATIONS_WEBHOOK_SECRET;else process.env.COMMUNICATIONS_WEBHOOK_SECRET=oldSecret;}
+});
+test('confirmation keeps the fully played readback when an assistant acknowledgement follows the caller yes',()=>{
+  const e=createBriefingTurnEvidence();spokenReadback(e);e.humanStarted(120);e.humanCommitted('yes');e.humanTranscript('yes','Yes',130);
+  e.audio('ack',140);e.transcript('ack','I am saving that now');e.audioDone('ack');e.markSent('ack-mark','ack');e.markPlayed('ack-mark',150);
+  assert.equal(e.evidence().assistant.text,'Exact proposal. Confirm this change?');
+  assert.equal(e.evidence().assistant.playedAt,110);assert.equal(e.evidence().human.at,120);
+});
+test('late readback transcription uses actual playback times, not the transcript arrival time',()=>{
+  const e=createBriefingTurnEvidence();e.audio('readback',100);e.markSent('m','readback');e.audioDone('readback');e.markPlayed('m',110);e.humanStarted(120);e.humanCommitted('yes');e.humanTranscript('yes','Yes',130);e.transcript('readback','The exact readback');
+  assert.deepEqual(e.evidence().assistant,{text:'The exact readback',at:100,itemId:'readback',playedAt:110,interrupted:false});
+});
+test('interrupted or unplayed readbacks and their late playback echoes never authorise confirmation',()=>{
+  const e=createBriefingTurnEvidence();spokenReadback(e,{played:false});e.humanStarted(105);e.humanCommitted('yes');e.markPlayed('readback-mark',110);e.humanTranscript('yes','Yes',120);assert.equal(e.evidence().assistant,null);
+  const unspoken=createBriefingTurnEvidence();unspoken.transcript('readback','Exact proposal');unspoken.humanStarted(100);unspoken.humanCommitted('yes');unspoken.humanTranscript('yes','Yes',120);assert.equal(unspoken.evidence().assistant,null);
+});
+test('an unrelated assistant question and a later caller turn cannot reuse an older confirmation',()=>{
+  const e=createBriefingTurnEvidence();spokenReadback(e);e.audio('question',115);e.transcript('question','Do you want a report?');e.audioDone('question');e.markSent('q','question');e.markPlayed('q',116);e.humanStarted(120);e.humanCommitted('old');e.humanStarted(130);e.humanCommitted('new');e.humanTranscript('old','Yes',140);
+  assert.equal(e.evidence().human,null);e.humanTranscript('new','Wait',150);assert.equal(e.evidence().human.text,'Wait');assert.equal(e.evidence().assistant.text,'Do you want a report?');
+});
+test('confirmation waits for the matching caller transcript rather than reusing an older yes',async()=>{
+  const e=createBriefingTurnEvidence();spokenReadback(e);e.humanStarted(120);e.humanCommitted('yes');const pending=e.waitForHuman(200);e.humanTranscript('yes','Yes',130);assert.equal((await pending).human.itemId,'yes');
+});
 import { applyHyperFlowVoiceContext } from "../hyperflowVoice.js";
 import { buildToolDefinitions } from "../tools.js";
 import { toolAuditArgs } from "../toolAudit.js";

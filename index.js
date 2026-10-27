@@ -1,6 +1,7 @@
 import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
 import { restoreOutboundCallConfig } from './outboundCallConfig.js';
 import { briefingPromptVersion, publishBriefingVerification } from './briefingVoice.js';
+import {createBriefingTurnEvidence} from './briefingTurnEvidence.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
 import 'dotenv/config';
 import { dispatchTwilio, outboundModelHealth } from './outboundReadiness.js';
@@ -90,7 +91,7 @@ const BUILD = (() => {
     const SOURCES = [
         'index.js', 'outboundReadiness.js', 'outboundOperations.js', 'modelHealth.js', 'twilioHealth.js', 'config.js', 'configResolver.js', 'database.js', 'callLog.js', 'smsLog.js',
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
-        'briefingVoice.js', 'toolAudit.js', 'outboundCallConfig.js',
+        'briefingVoice.js', 'briefingTurnEvidence.js', 'toolAudit.js', 'outboundCallConfig.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
         'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
@@ -1206,6 +1207,7 @@ fastify.register(async (fastify) => {
         // a broken tool produces something the model can say out loud instead
         // of an exception that leaves the caller in silence.
         const receptionContextItems = new Set();
+        const briefingTurns = createBriefingTurnEvidence();
         const pendingToolAcknowledgements = new Map();
         const handleToolCall = async (event) => {
             const toolCallId = event.call_id;
@@ -1225,6 +1227,9 @@ fastify.register(async (fastify) => {
 
             if(config.reception&&privateReceptionTool(name,args))privateReceptionSegments.add(config.reception.segmentId);
             const generation = toolGeneration;
+            const briefingEvidence = name === 'hyperflow_briefing' && args.operation === 'confirm_change'
+                ? await briefingTurns.waitForHuman() : briefingTurns.evidence();
+            if(ending || mediaClosed) return;
             // The caller's number, so a tool can answer "what did we say last
             // time" about the right person. The media stream only ever sees a
             // CallSid; the webhook recorded who that is.
@@ -1236,8 +1241,8 @@ fastify.register(async (fastify) => {
                 threadId: config.threadId || null,
                 communicationId: config.communicationId || null,
                 serviceIdentity: config.serviceIdentity || null,
-                briefingHumanTurn: config.briefingHumanTurn || null,
-                briefingAssistantTurn: config.briefingAssistantTurn || null,
+                briefingHumanTurn: briefingEvidence.human,
+                briefingAssistantTurn: briefingEvidence.assistant,
                 briefingPrivate: config.briefingPrivate === true,
                 toolCallId, reception:config.reception,
             });
@@ -1258,9 +1263,14 @@ fastify.register(async (fastify) => {
             }
 
             // Not awaited: the model is waiting on the result, not the audit row.
+            const confirmationEvidence=name==='hyperflow_briefing'&&args.operation==='confirm_change'?{
+                assistantItemId:briefingEvidence.assistant?.itemId||null,humanItemId:briefingEvidence.human?.itemId||null,
+                readbackAt:briefingEvidence.assistant?.at||null,playedAt:briefingEvidence.assistant?.playedAt||null,
+                humanAt:briefingEvidence.human?.at||null,interrupted:briefingEvidence.assistant?.interrupted??null,
+            }:null;
             recordToolCall({
                 callSid, openAiCallId: toolCallId, name, args: toolAuditArgs(name,args),
-                result: output ?? null, error: error ?? null, durationMs,
+                result: confirmationEvidence?{...output,confirmationEvidence}:output??null, error: error ?? null, durationMs,
                 tenantId: config.tenantId || null,
             });
 
@@ -1326,6 +1336,7 @@ fastify.register(async (fastify) => {
                 };
                 connection.send(JSON.stringify(markEvent));
                 markQueue.push(name);
+                briefingTurns.markSent(name,lastAssistantItem);
             }
         };
 
@@ -1356,6 +1367,7 @@ fastify.register(async (fastify) => {
                 }
 
                 if (response.type === 'session.updated') at('sessionUpdated');
+                if (response.type === 'response.output_audio.done') briefingTurns.audioDone(response.item_id);
                 if (response.type === 'response.created') voiceTurns.responseCreated(response.response);
                 if (response.type === 'input_audio_buffer.speech_stopped') voiceTurns.speechStopped();
                 if (response.type === 'conversation.item.created' && response.item?.type === 'function_call_output') {
@@ -1386,6 +1398,7 @@ fastify.register(async (fastify) => {
 
                     if (response.item_id) {
                         lastAssistantItem = response.item_id;
+                        briefingTurns.audio(response.item_id);
 
                         // The first audio of a response is when Iris starts
                         // speaking, which is the timestamp its transcript
@@ -1401,6 +1414,7 @@ fastify.register(async (fastify) => {
                 }
 
                 if (response.type === 'input_audio_buffer.speech_started') {
+                    briefingTurns.humanStarted();
                     config.briefingHumanStartedAt=Date.now();
                     if(markQueue.length)config.briefingInterruptedItem=lastAssistantItem;
                     if(config.briefingAssistantTurn && markQueue.length)config.briefingAssistantTurn.interrupted=true;
@@ -1413,6 +1427,7 @@ fastify.register(async (fastify) => {
                 // Ties the caller turn that just ended to the item id its
                 // transcript will arrive under.
                 if (response.type === 'input_audio_buffer.committed' && response.item_id) {
+                    briefingTurns.humanCommitted(response.item_id);
                     turnStartMs.set(response.item_id, pendingSpeechStartMs ?? streamMs());
                     pendingInputTranscriptions.add(response.item_id);
                     pendingSpeechStartMs = null;
@@ -1420,6 +1435,7 @@ fastify.register(async (fastify) => {
 
                 // The caller's words.
                 if (response.type === 'conversation.item.input_audio_transcription.completed') {
+                    briefingTurns.humanTranscript(response.item_id,response.transcript);
                     config.briefingHumanTurn={text:response.transcript,at:config.briefingHumanStartedAt||Date.now(),observedAt:Date.now(),itemId:response.item_id};
                     noteSegment({
                         role: 'user',
@@ -1434,6 +1450,7 @@ fastify.register(async (fastify) => {
                 }
 
                 if (response.type === 'conversation.item.input_audio_transcription.failed') {
+                    briefingTurns.humanFailed(response.item_id);
                     console.warn(`Input transcription failed for ${callSid || '(no callSid)'}`);
                     turnStartMs.delete(response.item_id);
                     pendingInputTranscriptions.delete(response.item_id);
@@ -1445,6 +1462,7 @@ fastify.register(async (fastify) => {
                 // playback mid-sentence while the transcript still carries the
                 // whole thing.
                 if (response.type === 'response.output_audio_transcript.done') {
+                    briefingTurns.transcript(response.item_id,response.transcript);
                     config.briefingAssistantTurn={text:response.transcript,at:Date.now(),itemId:response.item_id,interrupted:config.briefingInterruptedItem===response.item_id,playedAt:markQueue.length?null:Date.now()};
                     noteSegment({
                         role: 'assistant',
@@ -1530,6 +1548,7 @@ fastify.register(async (fastify) => {
                         if (!openAiWs) startOrAdoptSession();
                         break;
                     case 'mark':
+                        briefingTurns.markPlayed(data.mark?.name);
                         // A clear flushes old marks too; their late echoes must
                         // not acknowledge audio belonging to the next reply.
                         markQueue = markQueue.filter(name => name !== data.mark?.name);
@@ -1559,6 +1578,7 @@ fastify.register(async (fastify) => {
 
         // Handle connection close
         connection.on('close', () => {
+            briefingTurns.close();
             clearTimeout(startTimer);
             // However the call ended — hangup, time limit, or the caller simply
             // going away — the timers must not outlive it. A stray one would

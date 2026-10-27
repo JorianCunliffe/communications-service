@@ -12,4 +12,6 @@ Input transcription and assistant output events supply trusted turn evidence. Tw
 
 Health advertises `liveBriefing` and `briefingProtocol: briefing-tool.v1`. The runtime fingerprint includes the briefing and audit modules. HyperFlow enrolment defaults off and must be configured before a live acceptance call. No new database migration or provider credential is introduced.
 
+Confirmation evidence is bound to the caller turn that answered a fully played assistant item. A later acknowledgement such as "I am saving that now" cannot replace that readback. Audio completion, per-item playback marks and committed input item IDs remain authoritative when transcripts arrive late or out of order. Interrupted readbacks require a new full readback and fresh confirmation. Readback validation failures return `confirmation_rejected` with result-reconciliation instructions; transport failures remain uncertain. Tool audits retain timing and item identifiers without copying verification codes.
+
 Verification covers trusted request signing, argument stripping, purpose-specific tool exposure, inbound retention and secret redaction. Full live acceptance also requires matching deployed HyperFlow routes/rules, enrolment, a verified caller, real tool results, confirmed source changes and post-call processing. Repository tests alone do not prove that acceptance.
