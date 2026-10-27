@@ -14,8 +14,10 @@ test('readback validation rejection is explicit while transport failures remain 
   process.env.HYPERFLOW_EVENT_URL='https://fixture.invalid/api/events';process.env.COMMUNICATIONS_WEBHOOK_SECRET='fixture-secret';
   const context={briefingPrivate:true,tenantId:'fixture',personId:'person',threadId:'thread',communicationId:'call',serviceIdentity:'line'};
   try{
-    const result=await callBriefing({operation:'confirm_change',id:'proposal'},context,{fetchBriefing:async()=>({ok:false,status:422,json:async()=>({error:'Read the exact proposal aloud in full before requesting confirmation'})})});
+    for(const error of ['Read the exact proposal aloud in full before requesting confirmation','Read the exact proposal and obtain a clear new confirmation from the caller','Wait for the caller to confirm after the complete readback']){
+    const result=await callBriefing({operation:'confirm_change',id:'proposal'},context,{fetchBriefing:async()=>({ok:false,status:422,json:async()=>({error})})});
     assert.equal(result.status,'confirmation_rejected');assert.equal(result.confirmationAccepted,false);assert.match(result.nextStep,/change_result/);assert.match(result.nextStep,/Do not describe it as processing or saved/);
+    }
     await assert.rejects(callBriefing({operation:'confirm_change',id:'proposal'},context,{fetchBriefing:async()=>{throw new Error('Network timeout');}}),/Network timeout/);
   }finally{if(oldUrl===undefined)delete process.env.HYPERFLOW_EVENT_URL;else process.env.HYPERFLOW_EVENT_URL=oldUrl;if(oldSecret===undefined)delete process.env.COMMUNICATIONS_WEBHOOK_SECRET;else process.env.COMMUNICATIONS_WEBHOOK_SECRET=oldSecret;}
 });

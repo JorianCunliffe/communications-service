@@ -123,7 +123,7 @@ export async function callBriefing(
   );
   const result = await response.json();
   if (!response.ok && response.status === 422 && input.operation === 'confirm_change' &&
-      /^(Read the exact proposal aloud in full|Wait for the caller to confirm after the complete readback)/.test(result?.error || '')) {
+      /^(Read the exact proposal aloud in full|Read the exact proposal and obtain a clear new confirmation from the caller|Wait for the caller to confirm after the complete readback)/.test(result?.error || '')) {
     return {status:'confirmation_rejected',confirmationAccepted:false,id:input.id,error:result.error,
       nextStep:'This confirmation was rejected. Do not describe it as processing or saved. Call change_result for this exact id. If it remains prepared, read its original readback verbatim, wait for playback to finish and ask for a fresh caller confirmation. Do not prepare another proposal or replay an uncertain change.'};
   }
