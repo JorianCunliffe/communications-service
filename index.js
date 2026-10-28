@@ -1227,8 +1227,8 @@ fastify.register(async (fastify) => {
 
             if(config.reception&&privateReceptionTool(name,args))privateReceptionSegments.add(config.reception.segmentId);
             const generation = toolGeneration;
-            const briefingEvidence = name === 'hyperflow_briefing' && ['confirm_change','decide_item'].includes(args.operation)
-                ? await briefingTurns.waitForHuman(args.operation==='decide_item'?10000:3000) : briefingTurns.evidence();
+            const briefingEvidence = name === 'hyperflow_briefing' && args.operation === 'confirm_change'
+                ? await briefingTurns.waitForHuman() : briefingTurns.evidence();
             if(ending || mediaClosed) return;
             // The caller's number, so a tool can answer "what did we say last
             // time" about the right person. The media stream only ever sees a

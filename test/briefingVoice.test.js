@@ -72,6 +72,13 @@ test('verification completed after caller interruption remains trusted context w
     assert.equal(publishBriefingVerification({name:'hyperflow_briefing',args:{operation:'verify_code'},output:{status:'verified'},privateCall:true,send:()=>assert.fail('must not assert verification'),...input}),false);
   }
 });
+test('outbound-number access starts briefing without claiming an SMS was verified',()=>{
+  const sent=[];
+  assert.equal(publishBriefingVerification({name:'hyperflow_briefing',args:{operation:'start_briefing'},
+    output:{status:'ready',verification:'outbound_number',sections:['tasks']},privateCall:true,send:event=>sent.push(event)}),true);
+  assert.match(JSON.stringify(sent),/enrolled outbound number/);
+  assert.doesNotMatch(JSON.stringify(sent),/SMS verification SUCCEEDED/);
+});
 
 test('briefing privacy saves by canonical communication ID, verifies the saved row and isolates tenants', async()=>{
   const sql=new PGlite();
@@ -127,11 +134,12 @@ test("briefing is offered for enrolled coaching identities, with signed trusted 
     const enabled = withBriefing(config, { type: "coaching_session" },true);
     assert.equal(withBriefing(config,{type:'coaching_session'}),config);
     assert.equal(enabled.tools.includes("hyperflow_briefing"), true);
-    assert.equal(enabled.briefingPromptVersion,'briefing-first.v3');
-    assert.match(enabled.systemMessage,/caller.s yes, approve that, or explicit instruction IS the decision/);
-    assert.match(enabled.systemMessage,/without a formal readback, magic phrase or second confirmation/);
+    assert.equal(enabled.briefingPromptVersion,'briefing-first.v4');
+    assert.match(enabled.systemMessage,/apply the instruction immediately/);
+    assert.match(enabled.systemMessage,/Do not demand exact words/);
     assert.ok(briefingTool.parameters.properties.operation.enum.includes('decide_item'));
-    assert.match(enabled.greetingText,/daily briefing.*tasks, approvals and reports.*verification code/);
+    assert.match(enabled.greetingText,/daily briefing.*tasks, approvals and reports/);
+    assert.doesNotMatch(enabled.greetingText,/verification code|ready/i);
     assert.doesNotMatch(enabled.greetingText,/what we agreed last time/);
     assert.match(enabled.systemMessage,/briefing is the first activity/);
     assert.equal(
