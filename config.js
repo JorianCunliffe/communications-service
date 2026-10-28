@@ -95,6 +95,8 @@ export const DEFAULT_CONFIG = {
     // the line open and bills for it until Twilio's own hour-long cap. This is
     // the only thing between that and a real invoice.
     maxCallSeconds: 300,
+    // Briefings include task/approval/report work and need a longer session.
+    briefingMaxCallSeconds: 900,
 
     // How long before the ceiling the model is told to wrap up. It is asked to
     // close the conversation itself, because a call that ends mid-sentence
