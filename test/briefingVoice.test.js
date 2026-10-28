@@ -134,7 +134,7 @@ test("briefing is offered for enrolled coaching identities, with signed trusted 
     const enabled = withBriefing(config, { type: "coaching_session" },true);
     assert.equal(withBriefing(config,{type:'coaching_session'}),config);
     assert.equal(enabled.tools.includes("hyperflow_briefing"), true);
-    assert.equal(enabled.briefingPromptVersion,'briefing-first.v4');
+    assert.equal(enabled.briefingPromptVersion,'briefing-first.v5');
     assert.match(enabled.systemMessage,/apply the instruction immediately/);
     assert.match(enabled.systemMessage,/Do not demand exact words/);
     assert.ok(briefingTool.parameters.properties.operation.enum.includes('decide_item'));

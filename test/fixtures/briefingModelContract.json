@@ -11,7 +11,7 @@
     "reportDays": 7
   },
   "tasks": {
-    "asOf": "2026-10-25T08:31:02.853Z",
+    "asOf": "2026-10-28T02:16:58.517Z",
     "subject": "alice",
     "items": [
       {
@@ -28,7 +28,7 @@
         ],
         "assigneeUid": "alice",
         "assigneeLabel": "Alice",
-        "updatedAt": 1792917060983,
+        "updatedAt": 1793153816851,
         "details": "No external work",
         "projectName": "Acceptance"
       }
@@ -50,7 +50,7 @@
     ]
   },
   "taskDetail": {
-    "asOf": "2026-10-25T08:31:02.956Z",
+    "asOf": "2026-10-28T02:16:58.582Z",
     "item": {
       "id": "subtask:p:n:t",
       "source": "subtask",
@@ -65,30 +65,42 @@
       ],
       "assigneeUid": "alice",
       "assigneeLabel": "Alice",
-      "updatedAt": 1792917060983,
+      "updatedAt": 1793153816851,
       "details": "No external work",
       "projectName": "Acceptance"
     },
     "incomplete": false,
-    "notices": []
+    "notices": [],
+    "changeOptions": [
+      {
+        "operation": "decide_item",
+        "itemId": "subtask:p:n:t",
+        "version": "0f4e6c78cf40a0abe147c788f740bf5e19c3e672b50931aa917f4085a4bc76e6",
+        "action": "set_status",
+        "requestId": "voice-48a3e73294c55dcadb492a4fdbb88b093361f1dea3b68c0f"
+      }
+    ],
+    "progressInstruction": "Apply the requested progress update immediately. Include any details the caller gave; a note is optional. Do not require a separate explanation, phrase, transcript or confirmation. Partial completion stays progress rather than overall completion.",
+    "nextStep": "Describe this item briefly and ask for its decision once. A clear yes, approve that, or other explicit instruction is the final decision: call the returned decide_item option immediately, acknowledge the saved result and move on. Do not prepare a second proposal, read a formal readback or ask for confirmation again. Supply the requested status/note. For requiredChecks, explain the checks in the initial question and set them only if the caller attests them; do not invent checks or attestations. If actions is empty explain notice; nothing has been saved."
   },
   "taskPreparation": {
     "id": "fixture_task_change",
     "status": "prepared",
     "readback": "Acceptance: Disposable fixture task. Change status from Started to Completed. Confirm this change?",
-    "createdAt": 1792917063157,
-    "expiresAt": 1792917663157,
+    "createdAt": 1793153818738,
+    "expiresAt": 1793154418738,
     "itemId": "subtask:p:n:t",
-    "action": "set_status"
+    "action": "set_status",
+    "nextStep": "This change is NOT saved. Read readback VERBATIM in one uninterrupted turn. Then wait for a separate clear caller confirmation and call confirm_change with this exact id."
   },
   "approvals": {
-    "asOf": "2026-10-25T08:31:03.933Z",
+    "asOf": "2026-10-28T02:17:03.031Z",
     "subject": "alice",
     "items": [
       {
-        "id": "commitment_approval:ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "id": "commitment_approval:ob_27b11adc91a34fa084cc7887160a48d4",
         "source": "commitment_approval",
-        "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "sourceId": "ob_27b11adc91a34fa084cc7887160a48d4",
         "kind": "approval",
         "title": "Accept this obligation: Fixture review",
         "projectId": "p",
@@ -133,14 +145,15 @@
       "Submitted",
       "Held",
       "Abandoned"
-    ]
+    ],
+    "nextStep": "Discuss one item at a time. Call read_item before presenting an item for a decision. When the caller says yes or approve that, use decide_item to save that decision immediately, then move on. Do not ask them to approve it again. An item without approve in actions needs its specified answer or checks. Reading this list does not approve anything."
   },
   "approvalDetail": {
-    "asOf": "2026-10-25T08:31:04.029Z",
+    "asOf": "2026-10-28T02:17:03.170Z",
     "item": {
-      "id": "commitment_approval:ob_34b85c4c501e4a08bdcfeaad1832902f",
+      "id": "commitment_approval:ob_27b11adc91a34fa084cc7887160a48d4",
       "source": "commitment_approval",
-      "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+      "sourceId": "ob_27b11adc91a34fa084cc7887160a48d4",
       "kind": "approval",
       "title": "Accept this obligation: Fixture review",
       "projectId": "p",
@@ -154,19 +167,137 @@
       "projectName": "Acceptance"
     },
     "incomplete": false,
-    "notices": []
+    "notices": [],
+    "changeOptions": [
+      {
+        "operation": "decide_item",
+        "itemId": "commitment_approval:ob_27b11adc91a34fa084cc7887160a48d4",
+        "version": "1",
+        "action": "approve",
+        "requestId": "voice-2ab256463023cb269da5dc4edb5178cde99644226bb3937b"
+      },
+      {
+        "operation": "decide_item",
+        "itemId": "commitment_approval:ob_27b11adc91a34fa084cc7887160a48d4",
+        "version": "1",
+        "action": "reject",
+        "requestId": "voice-5017e6dc51e1f1618b838d87ded6d9f055000b42f802f9be"
+      }
+    ],
+    "progressInstruction": "Apply the requested progress update immediately. Include any details the caller gave; a note is optional. Do not require a separate explanation, phrase, transcript or confirmation. Partial completion stays progress rather than overall completion.",
+    "nextStep": "Describe this item briefly and ask for its decision once. A clear yes, approve that, or other explicit instruction is the final decision: call the returned decide_item option immediately, acknowledge the saved result and move on. Do not prepare a second proposal, read a formal readback or ask for confirmation again. Supply the requested status/note. For requiredChecks, explain the checks in the initial question and set them only if the caller attests them; do not invent checks or attestations. If actions is empty explain notice; nothing has been saved."
   },
-  "approvalPreparation": {
+  "approvalDecision": {
     "id": "fixture_approval_change",
-    "status": "prepared",
+    "status": "completed",
     "readback": "Acceptance: Accept this obligation: Fixture review. Approve this exact version. Note: Accept the isolated fixture obligation Confirm this change?",
-    "createdAt": 1792917064144,
-    "expiresAt": 1792917664144,
-    "itemId": "commitment_approval:ob_34b85c4c501e4a08bdcfeaad1832902f",
-    "action": "approve"
+    "createdAt": 1793153823409,
+    "expiresAt": 1793154423409,
+    "result": {
+      "item": {
+        "acceptedEvidence": "[briefing:fixture_approval_change] Accept the isolated fixture obligation",
+        "asks": [
+          {
+            "answeredAt": 1793153823472,
+            "assignees": [
+              "alice"
+            ],
+            "channels": [
+              "web"
+            ],
+            "createdAt": 1793153822921,
+            "id": "ask_e5a6d1cc0c75495d8a6d8102f39c1875",
+            "kind": "approval",
+            "nodeId": "ob_27b11adc91a34fa084cc7887160a48d4",
+            "projectId": "p",
+            "prompt": "Accept this obligation: Fixture review",
+            "responseContract": {
+              "automaticProgress": "never",
+              "reviewRequired": true
+            },
+            "responsePolicy": "any",
+            "responseType": "approval",
+            "responses": [
+              {
+                "actor": "alice",
+                "at": 1793153823472,
+                "decision": "approved",
+                "id": "briefing_fixture_approval_change",
+                "text": "[briefing:fixture_approval_change] Accept the isolated fixture obligation",
+                "via": "voice"
+              }
+            ],
+            "revision": 1,
+            "status": "answered"
+          }
+        ],
+        "createdAt": 1793153822921,
+        "createdBy": "alice",
+        "followUp": {
+          "channel": "web",
+          "enabled": false,
+          "leadHours": 24
+        },
+        "history": [
+          {
+            "action": "candidate_created",
+            "actor": "alice",
+            "at": 1793153822921,
+            "note": "Requires explicit review; source status is not acceptance.",
+            "terms": {
+              "beneficiary": "user:alice",
+              "criteria": "Explicit acceptance only",
+              "deliverable": "Fixture review",
+              "dueAt": "2026-10-29T02:17:02.917Z",
+              "owner": "user:alice",
+              "timezone": "Australia/Brisbane"
+            },
+            "version": 1
+          },
+          {
+            "action": "respond",
+            "actor": "alice",
+            "at": 1793153823472,
+            "note": "[briefing:fixture_approval_change] Accept the isolated fixture obligation",
+            "terms": {
+              "beneficiary": "user:alice",
+              "criteria": "Explicit acceptance only",
+              "deliverable": "Fixture review",
+              "dueAt": "2026-10-29T02:17:02.917Z",
+              "owner": "user:alice",
+              "timezone": "Australia/Brisbane"
+            },
+            "version": 2
+          }
+        ],
+        "id": "ob_27b11adc91a34fa084cc7887160a48d4",
+        "orgId": "briefing_fixture",
+        "projectId": "p",
+        "reviewerUid": "alice",
+        "state": "accepted",
+        "terms": {
+          "beneficiary": "user:alice",
+          "criteria": "Explicit acceptance only",
+          "deliverable": "Fixture review",
+          "dueAt": "2026-10-29T02:17:02.917Z",
+          "owner": "user:alice",
+          "timezone": "Australia/Brisbane"
+        },
+        "timing": {
+          "atRisk": true,
+          "overdue": false
+        },
+        "updatedAt": 1793153823472,
+        "version": 2
+      },
+      "viewerUid": "alice"
+    },
+    "itemId": "commitment_approval:ob_27b11adc91a34fa084cc7887160a48d4",
+    "action": "approve",
+    "nextStep": "The decision is saved. Acknowledge it briefly and move to the next item. Do not request another confirmation."
   },
   "reportAll": {
-    "asOf": "2026-10-25T08:31:04.535Z",
+    "asOf": "2026-10-28T02:17:04.713Z",
     "timezone": "Australia/Brisbane",
     "subject": "all",
     "reportType": "workload",
@@ -177,9 +308,9 @@
         "userId": "alice",
         "name": "Alice",
         "total": 2,
-        "open": 1,
-        "closed": 1,
-        "completed": 1,
+        "open": 0,
+        "closed": 2,
+        "completed": 2,
         "overdue": 0
       },
       {
@@ -201,32 +332,39 @@
         "title": "Disposable fixture task",
         "projectId": "p",
         "status": "Completed",
-        "version": "6716b345c2f4f422dfb580f854b9f72113b258e3653b71ad9cd38d59ccd407c7",
+        "version": "4dabb24d1629a730049eb56f9223bccab7a950a75ac359611045c287006db096",
         "actions": [
           "set_status"
         ],
         "assigneeUid": "alice",
         "assigneeLabel": "Alice",
-        "updatedAt": 1792917063447,
+        "updatedAt": 1793153822422,
         "details": "No external work",
         "projectName": "Acceptance"
       },
       {
-        "id": "commitment:ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "id": "commitment:ob_27b11adc91a34fa084cc7887160a48d4",
         "source": "commitment",
-        "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "sourceId": "ob_27b11adc91a34fa084cc7887160a48d4",
         "kind": "task",
         "title": "Fixture review",
         "projectId": "p",
-        "status": "accepted",
-        "version": "2",
+        "status": "fulfilled",
+        "version": "5",
         "actions": [
+          "set_status",
           "progress",
           "submit"
         ],
         "assigneeUid": "alice",
-        "dueAt": "2026-10-26T08:31:03.851Z",
-        "updatedAt": 1792917064397,
+        "dueAt": "2026-10-29T02:17:02.917Z",
+        "updatedAt": 1793153824490,
+        "statusOptions": [
+          "Started",
+          "Submitted",
+          "Completed"
+        ],
+        "notice": "Started records progress. Completed records the work as done and submits it for acceptance; it does not bypass the beneficiary's acceptance.",
         "projectName": "Acceptance"
       }
     ],
@@ -234,10 +372,10 @@
     "truncated": false,
     "incomplete": false,
     "notices": [],
-    "text": "Alice: 1 open, 1 completed, 0 otherwise closed, 0 overdue. bob@example.test: 0 open, 0 completed, 0 otherwise closed, 0 overdue."
+    "text": "Alice: 0 open, 2 completed, 0 otherwise closed, 0 overdue. bob@example.test: 0 open, 0 completed, 0 otherwise closed, 0 overdue."
   },
   "reportMe": {
-    "asOf": "2026-10-25T08:31:04.639Z",
+    "asOf": "2026-10-28T02:17:04.759Z",
     "timezone": "Australia/Brisbane",
     "subject": "alice",
     "reportType": "workload",
@@ -248,9 +386,9 @@
         "userId": "alice",
         "name": "Alice",
         "total": 2,
-        "open": 1,
-        "closed": 1,
-        "completed": 1,
+        "open": 0,
+        "closed": 2,
+        "completed": 2,
         "overdue": 0
       }
     ],
@@ -263,32 +401,39 @@
         "title": "Disposable fixture task",
         "projectId": "p",
         "status": "Completed",
-        "version": "6716b345c2f4f422dfb580f854b9f72113b258e3653b71ad9cd38d59ccd407c7",
+        "version": "4dabb24d1629a730049eb56f9223bccab7a950a75ac359611045c287006db096",
         "actions": [
           "set_status"
         ],
         "assigneeUid": "alice",
         "assigneeLabel": "Alice",
-        "updatedAt": 1792917063447,
+        "updatedAt": 1793153822422,
         "details": "No external work",
         "projectName": "Acceptance"
       },
       {
-        "id": "commitment:ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "id": "commitment:ob_27b11adc91a34fa084cc7887160a48d4",
         "source": "commitment",
-        "sourceId": "ob_34b85c4c501e4a08bdcfeaad1832902f",
+        "sourceId": "ob_27b11adc91a34fa084cc7887160a48d4",
         "kind": "task",
         "title": "Fixture review",
         "projectId": "p",
-        "status": "accepted",
-        "version": "2",
+        "status": "fulfilled",
+        "version": "5",
         "actions": [
+          "set_status",
           "progress",
           "submit"
         ],
         "assigneeUid": "alice",
-        "dueAt": "2026-10-26T08:31:03.851Z",
-        "updatedAt": 1792917064397,
+        "dueAt": "2026-10-29T02:17:02.917Z",
+        "updatedAt": 1793153824490,
+        "statusOptions": [
+          "Started",
+          "Submitted",
+          "Completed"
+        ],
+        "notice": "Started records progress. Completed records the work as done and submits it for acceptance; it does not bypass the beneficiary's acceptance.",
         "projectName": "Acceptance"
       }
     ],
@@ -296,7 +441,7 @@
     "truncated": false,
     "incomplete": false,
     "notices": [],
-    "text": "Alice: 1 open, 1 completed, 0 otherwise closed, 0 overdue."
+    "text": "Alice: 0 open, 2 completed, 0 otherwise closed, 0 overdue."
   },
   "subjects": {
     "subjects": [
