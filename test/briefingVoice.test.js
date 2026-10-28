@@ -42,6 +42,12 @@ test('an unrelated assistant question and a later caller turn cannot reuse an ol
 test('confirmation waits for the matching caller transcript rather than reusing an older yes',async()=>{
   const e=createBriefingTurnEvidence();spokenReadback(e);e.humanStarted(120);e.humanCommitted('yes');const pending=e.waitForHuman(200);e.humanTranscript('yes','Yes',130);assert.equal((await pending).human.itemId,'yes');
 });
+test('a delayed transcript stays bound to the tool request when another caller turn starts',async()=>{
+  const e=createBriefingTurnEvidence();e.humanStarted(100);e.humanCommitted('progress');
+  const pending=e.waitForHuman(200);e.humanStarted(110);e.humanCommitted('question');
+  e.humanTranscript('question','Is it saved?',120);e.humanTranscript('progress','The piece is done, overall tests continue.',130);
+  assert.equal((await pending).human.itemId,'progress');assert.equal(e.evidence().human.itemId,'question');
+});
 import { applyHyperFlowVoiceContext } from "../hyperflowVoice.js";
 import { buildToolDefinitions } from "../tools.js";
 import { toolAuditArgs } from "../toolAudit.js";

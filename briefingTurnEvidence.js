@@ -10,8 +10,7 @@ export function createBriefingTurnEvidence() {
         return items.get(id);
     };
     const fullyPlayed=value=>Boolean(value?.done&&!value.interrupted&&!value.pending.size&&value.playedAt!==null);
-    const evidence=()=>{
-        const turn=currentHuman;
+    const evidence=(turn=currentHuman)=>{
         const readback=turn?.candidate;
         return {
             human:turn?.complete&&turn.text?{text:turn.text,at:turn.at,observedAt:turn.observedAt,itemId:turn.itemId}:null,
@@ -21,7 +20,7 @@ export function createBriefingTurnEvidence() {
             }:null,
         };
     };
-    const notify=()=>{if(currentHuman?.complete)for(const done of [...waiters])done();};
+    const notify=()=>{for(const done of [...waiters])done();};
     return {
         audio(id,at=Date.now()) {const value=item(id);if(!value)return;if(value.done)value.interrupted=true;value.startedAt??=at;latest=value;},
         transcript(id,text) {const value=item(id);if(value)value.text=text;},
@@ -42,13 +41,14 @@ export function createBriefingTurnEvidence() {
         humanFailed(id) {const turn=humans.get(id);if(turn){turn.complete=true;turn.text=null;notify();}},
         evidence,
         async waitForHuman(timeoutMs=3000) {
-            if(!currentHuman||currentHuman.complete)return evidence();
+            const turn=currentHuman;
+            if(!turn||turn.complete)return evidence(turn);
             await new Promise(resolve=>{
-                const done=()=>{clearTimeout(timer);waiters.delete(done);resolve();};
-                const timer=setTimeout(done,timeoutMs);waiters.add(done);
+                const done=(forced=false)=>{if(!forced&&!turn.complete)return;clearTimeout(timer);waiters.delete(done);resolve();};
+                const timer=setTimeout(()=>done(true),timeoutMs);waiters.add(done);
             });
-            return evidence();
+            return evidence(turn);
         },
-        close() {for(const done of [...waiters])done();},
+        close() {for(const done of [...waiters])done(true);},
     };
 }
