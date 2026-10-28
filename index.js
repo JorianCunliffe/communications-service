@@ -1227,7 +1227,7 @@ fastify.register(async (fastify) => {
 
             if(config.reception&&privateReceptionTool(name,args))privateReceptionSegments.add(config.reception.segmentId);
             const generation = toolGeneration;
-            const briefingEvidence = name === 'hyperflow_briefing' && args.operation === 'confirm_change'
+            const briefingEvidence = name === 'hyperflow_briefing' && ['confirm_change','decide_item'].includes(args.operation)
                 ? await briefingTurns.waitForHuman() : briefingTurns.evidence();
             if(ending || mediaClosed) return;
             // The caller's number, so a tool can answer "what did we say last
@@ -1263,7 +1263,7 @@ fastify.register(async (fastify) => {
             }
 
             // Not awaited: the model is waiting on the result, not the audit row.
-            const confirmationEvidence=name==='hyperflow_briefing'&&args.operation==='confirm_change'?{
+            const confirmationEvidence=name==='hyperflow_briefing'&&['confirm_change','decide_item'].includes(args.operation)?{
                 assistantItemId:briefingEvidence.assistant?.itemId||null,humanItemId:briefingEvidence.human?.itemId||null,
                 readbackAt:briefingEvidence.assistant?.at||null,playedAt:briefingEvidence.assistant?.playedAt||null,
                 humanAt:briefingEvidence.human?.at||null,interrupted:briefingEvidence.assistant?.interrupted??null,

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { callBriefing, withBriefing, publishBriefingVerification } from "../briefingVoice.js";
+import { callBriefing, withBriefing, publishBriefingVerification, briefingTool } from "../briefingVoice.js";
 import {createVoiceTurns} from '../voiceTurns.js';
 import {createBriefingTurnEvidence} from '../briefingTurnEvidence.js';
 
@@ -121,7 +121,10 @@ test("briefing is offered for enrolled coaching identities, with signed trusted 
     const enabled = withBriefing(config, { type: "coaching_session" },true);
     assert.equal(withBriefing(config,{type:'coaching_session'}),config);
     assert.equal(enabled.tools.includes("hyperflow_briefing"), true);
-    assert.equal(enabled.briefingPromptVersion,'briefing-first.v2');
+    assert.equal(enabled.briefingPromptVersion,'briefing-first.v3');
+    assert.match(enabled.systemMessage,/caller.s yes, approve that, or explicit instruction IS the decision/);
+    assert.match(enabled.systemMessage,/without a formal readback, magic phrase or second confirmation/);
+    assert.ok(briefingTool.parameters.properties.operation.enum.includes('decide_item'));
     assert.match(enabled.greetingText,/daily briefing.*tasks, approvals and reports.*verification code/);
     assert.doesNotMatch(enabled.greetingText,/what we agreed last time/);
     assert.match(enabled.systemMessage,/briefing is the first activity/);
