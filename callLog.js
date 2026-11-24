@@ -117,6 +117,7 @@ export async function recordCall({
                 aiSpeaksFirst: config?.aiSpeaksFirst ?? null,
                 summarise: config?.summarise ?? null,
                 ...metadata,
+                ...(serviceIdentity ? { [direction === 'inbound' ? 'to' : 'from']: serviceIdentity } : {}),
             },
             started_at: new Date().toISOString(),
             communication_id: communicationId,

@@ -1,3 +1,4 @@
+import { resolvePhoneLine, readLineHistory, registerPhoneLineRoutes, prepareClientVoice } from './phoneLines.js';
 import { dispatchTwilio } from './outboundReadiness.js';
 import { withAmbientCapture } from './ambientCapture.js';
 import { withBriefing } from './briefingVoice.js';
@@ -738,8 +739,8 @@ export default async function v1Routes(fastify, options = {}) {
 
         let communicationId = prefixedId('comm');
         try {
-            await assertContactable(to, 'SMS', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason });
-            await ensureContact(to);
+            await assertContactable(to, 'SMS', { allowed: request.body?.override_do_not_contact === true, reason: request.body?.override_reason },request.tenantId);
+            await ensureContact(to,request.tenantId);
         } catch (error) {
             if (error.statusCode) return errorReply(reply, error);
             if (error.code === 'DO_NOT_CONTACT') return errorReply(reply, error, 409);
@@ -748,11 +749,13 @@ export default async function v1Routes(fastify, options = {}) {
         try {
             const operation = await reserveOutbound(db, {
                 key: idempotencyKey(request), type: 'sms', communicationId,
+                validateSender: () => resolvePhoneLine(rawDatabase(),from,{tenantId:request.tenantId,channel:'sms'}),
                 request: { to, from, body, purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
                     override_do_not_contact: request.body?.override_do_not_contact, override_reason: request.body?.override_reason },
             });
             communicationId = operation.communication_id;
             if (operation.status === 'completed') return reply.code(200).send(operation.response);
+            const history = await readLineHistory(db,{tenantId:request.tenantId,line:from,client:to,limit:1});
             let message = { sid: operation.provider_id, status: operation.provider_status };
             if (operation.status !== 'provider_sent') {
                 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -765,7 +768,7 @@ export default async function v1Routes(fastify, options = {}) {
             const stored = await recordMessage({
                 otherParty: to, twilioNumber: from, direction: 'outbound', body,
                 messageSid: message.sid, status: message.status, communicationId,
-                ...semantic, strict: true,
+                ...semantic, tenantId:request.tenantId, database:db, strict: true,
             });
             const communication = canonicalCommunication({
                 tenantId: request.tenantId, communicationId, threadId: stored.threadId,
@@ -783,6 +786,7 @@ export default async function v1Routes(fastify, options = {}) {
                 correlation: stored.correlation, destination: stored.callbackUrl,
                 payload: { status: message.status, channel: 'sms', direction: 'outbound' },
             });
+            communication.history_status = history.status;
             await markOutbound(db, operation.id, { status: 'completed', response: communication, completed_at: new Date().toISOString() });
             return reply.code(201).send(communication);
         } catch (error) {
@@ -1005,9 +1009,16 @@ export default async function v1Routes(fastify, options = {}) {
             return errorReply(reply, error, 500);
         }
         try {
+            let line;
             const resolved = await resolveConfig({ from, to, direction: 'outbound', tenantId: request.tenantId });
             const operation = await reserveOutbound(db, {
                 key: idempotencyKey(request), type: 'voice', communicationId, readinessModel: overrides.model || resolved.model,
+                validateSender: async () => {
+                    line = await resolvePhoneLine(rawDatabase(),from,{tenantId:request.tenantId,channel:'voice'});
+                    if (line.line_role === 'client' && request.body?.briefing_enabled === true) {
+                        throw Object.assign(new Error('Private briefings require a HyperFlow line'), {statusCode:409,dispatched:false});
+                    }
+                },
                 request: { to, from, overrides, ...(request.body?.briefing_enabled===true?{briefing_enabled:true}:{}), purpose: semantic.purpose, correlation: semantic.correlation, thread_id: semantic.threadId,
                     override_do_not_contact: request.body?.override_do_not_contact, override_reason: request.body?.override_reason },
             });
@@ -1016,6 +1027,11 @@ export default async function v1Routes(fastify, options = {}) {
             let config = withBriefing(withAmbientCapture({ ...resolved, ...overrides, tenantId: request.tenantId, communicationId, serviceIdentity: from }), semantic.purpose,request.body?.briefing_enabled===true);
             if (operation.audit_context?.callConfig) config = operation.audit_context.callConfig;
             if (request.body?.briefing_enabled === true && !config.briefingPrivate) throw new Error('Verified briefing configuration is unavailable; no call was placed');
+            if (line?.line_role === 'client' && !config.briefingPrivate && !operation.audit_context?.callConfig) {
+                const scoped = await resolveConfig({from,to,direction:'outbound',tenantId:request.tenantId,clientLine:true});
+                config = await prepareClientVoice(db,{...scoped,...overrides,communicationId},line,to);
+                config = await freezeOutboundCallConfig(db,operation,{...config,outboundTo:to});
+            }
             if (config.briefingPrivate && !operation.audit_context?.callConfig) {
                 const context = await resolveCommunicationThread({db, tenantId:request.tenantId,
                     participantIdentity:to, serviceIdentity:from, direction:'outbound',channel:'voice',
@@ -1059,6 +1075,7 @@ export default async function v1Routes(fastify, options = {}) {
                 channel: 'voice', direction: 'outbound', provider: 'twilio',
                 providerId: call.sid, correlation: stored.correlation, purpose: stored.purpose,
             });
+            if (config.lineHistoryStatus) response.history_status = config.lineHistoryStatus;
             await markOutbound(db, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
             return reply.code(201).send(response);
         } catch (error) {
@@ -1228,6 +1245,7 @@ export default async function v1Routes(fastify, options = {}) {
         } catch (error) { request.log.warn({err:error}, 'Memory context unavailable'); return reply.code(503).send({error:'Memory context unavailable'}); }
     });
 
+    registerPhoneLineRoutes(fastify,rawDatabase);
     registerOperationalRoutes(fastify,database);
 
     fastify.post('/context/search', async (request, reply) => {

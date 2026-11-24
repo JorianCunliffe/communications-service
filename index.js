@@ -1,5 +1,6 @@
 import { clearReceptionContext, receptionCommand, privateReceptionTool } from './receptionVoice.js';
-import { restoreOutboundCallConfig } from './outboundCallConfig.js';
+import { resolvePhoneLine, readLineHistory, prepareClientVoice } from './phoneLines.js';
+import { freezeOutboundCallConfig, restoreOutboundCallConfig } from './outboundCallConfig.js';
 import { briefingPromptVersion, publishBriefingVerification } from './briefingVoice.js';
 import {createBriefingTurnEvidence} from './briefingTurnEvidence.js';
 import { resolveInboundVoiceThread } from './inboundConversation.js';
@@ -14,8 +15,9 @@ import twilio from 'twilio';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { DEFAULT_CONFIG, buildRealtimeUrl, buildSessionUpdate, buildTwiml, buildGreetingResponse, greetingMode, wrapUpNotice } from './config.js';
-import { assertContactable, resolveConfig, resolveInboundCall, resolveTenantForPhoneLine, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
+import { assertContactable, resolveConfig, resolveInboundCall, storeCallConfig, takeCallConfig, peekCallConfig, warmUp, ensureContact } from './configResolver.js';
 import { databaseProvider, getDatabase } from './database.js';
 import { recordAnswerDetection, recordCall, tenantForCall, updateCallStatus, recordToolCall, updateCallProjectContext, saveTranscript } from './callLog.js';
 import { buildTranscript } from './transcripts.js';
@@ -51,7 +53,7 @@ if (!OPENAI_API_KEY) {
 }
 
 // Initialize Fastify
-const fastify = Fastify(serverOptions);
+export const fastify = Fastify(serverOptions);
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 installRawJsonParser(fastify);
@@ -93,7 +95,7 @@ const BUILD = (() => {
         'tools.js', 'auth.js', 'api.js', 'transcripts.js', 'transcriptDrain.js', 'realtimeSessions.js', 'voiceTurns.js', 'voiceContextDeadline.js',
         'briefingVoice.js', 'briefingTurnEvidence.js', 'toolAudit.js', 'outboundCallConfig.js',
         'recordings.js', 'recordingSources.js', 'meetings.js', 'transcribe.js', 'summarise.js',
-        'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
+        'phoneLines.js', 'context.js', 'communicationModel.js', 'inboundConversation.js', 'hyperflowVoice.js', 'eventOutbox.js', 'v1.js',
         'calendar.js', 'calendarProviders.js', 'memory.js', 'memorySafety.js', 'enrichment.js',
         'plaud.js', 'safeFetch.js',
         'tenantContext.js', 'tenantOperations.js', 'tenantLifecycle.js', 'email.js', 'emailProviders.js', 'emailWebhook.js',
@@ -171,13 +173,15 @@ fastify.get('/console', async (request, reply) => {
 });
 
 const twilioHealth = createTwilioHealth();
-const stopTwilioHealth = twilioHealth.start();
-fastify.addHook('onClose', async () => stopTwilioHealth());
+let stopTwilioHealth;
+fastify.addHook('onListen', async () => { stopTwilioHealth = twilioHealth.start(); });
+fastify.addHook('onClose', async () => stopTwilioHealth?.());
 registerTwilioHealthRoutes(fastify, twilioHealth);
 
 const modelHealth = outboundModelHealth;
-const stopModelHealth = modelHealth.start();
-fastify.addHook('onClose', async () => stopModelHealth());
+let stopModelHealth;
+fastify.addHook('onListen', async () => { stopModelHealth = modelHealth.start(); });
+fastify.addHook('onClose', async () => stopModelHealth?.());
 
 // Liveness stays cheap; model readiness is a cached, independently timed probe.
 fastify.get('/health', async (request, reply) => {
@@ -282,11 +286,14 @@ fastify.all('/incoming-call', twilioWebhook, async (request, reply) => {
             personId:config.personId,from:params.From,to:params.To,communicationId});
     } catch (error) {
         console.warn(`Inbound conversation resolution unavailable: ${error.message}`);
-        return reply.code(503).type('text/xml').send('<Response><Say>Conversation context is temporarily unavailable. Please try again later.</Say><Hangup/></Response>');
+        if (config.lineRole !== 'client') return reply.code(503).type('text/xml').send('<Response><Say>Conversation context is temporarily unavailable. Please try again later.</Say><Hangup/></Response>');
+        semantic = {};
     }
     let semanticThreadId = semantic.threadId;
     let routingContext = null;
-    if (config.personId) {
+    if (config.lineRole === 'client') {
+        config = await prepareClientVoice(getDatabase(),config,{tenant_id:config.tenantId,twilio_number:params.To},params.From);
+    } else if (config.personId) {
         try {
             routingContext = await requestHyperFlowVoiceContext({
                 tenantId: config.tenantId,
@@ -432,7 +439,8 @@ fastify.post('/outbound-call', async (request, reply) => {
     // Line settings come from the number we call from; the person's own
     // settings and name come from the number we are calling.
     const resolved = await resolveConfig({ from, to, direction: 'outbound' });
-    const config = { ...resolved, ...(overrides || {}) };
+    let config = { ...resolved, ...(overrides || {}) };
+    let line;
     const operationDb = getDatabase();
     if (!operationDb) return reply.code(503).send({ error: 'Outbound persistence is not configured' });
     let communicationId = prefixedId('comm');
@@ -442,12 +450,24 @@ fastify.post('/outbound-call', async (request, reply) => {
         await ensureContact(to);
         const operation = await reserveOutbound(operationDb, {
             key: idempotencyKey(request), type: 'voice', communicationId, readinessModel: config.model,
+            validateSender: async () => { line = await resolvePhoneLine(operationDb,from,{tenantId:process.env.LEGACY_TENANT_ID,channel:'voice'}); },
             request: { to, from, overrides: overrides || {}, override_do_not_contact: overrideDnc, override_reason: overrideReason },
         });
         communicationId = operation.communication_id;
         if (operation.status === 'completed') return reply.code(200).send(operation.response);
         const base = PUBLIC_URL.replace(/\/$/, '');
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+        const answerUrl = new URL('/outbound-answer',base);
+        if (operation.audit_context?.callConfig) config = operation.audit_context.callConfig;
+        else if (line?.line_role === 'client') {
+            const scoped = await resolveConfig({from,to,direction:'outbound',clientLine:true,tenantId:line.tenant_id});
+            config = await prepareClientVoice(operationDb,{...scoped,...overrides,communicationId},line,to);
+            config = await freezeOutboundCallConfig(operationDb,operation,{...config,outboundTo:to});
+        }
+        if (config.outboundOperationId) {
+            answerUrl.searchParams.set('tenant_id',config.tenantId);
+            answerUrl.searchParams.set('outbound_operation_id',config.outboundOperationId);
+        }
         const amdMode = String(process.env.TWILIO_MACHINE_DETECTION || '').trim();
         const amd = ['Enable', 'DetectMessageEnd'].includes(amdMode)
             ? {
@@ -458,7 +478,7 @@ fastify.post('/outbound-call', async (request, reply) => {
         const call = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await dispatchTwilio(operationDb, operation, () => client.calls.create({
             to,
             from,
-            url: `${base}/outbound-answer`,
+            url: answerUrl.toString(),
             // Without this we never learn whether the callee answered, was busy,
             // or let it ring out — the call is otherwise fire-and-forget.
             statusCallback: `${base}/call-status`,
@@ -475,9 +495,10 @@ fastify.post('/outbound-call', async (request, reply) => {
         console.log(`Outbound call ${call.sid} to ${to} from ${from}`);
 
         // Strict persistence completes before the idempotent operation does.
-        await recordCall({ callSid: call.sid, otherParty: to, direction: 'outbound', config, metadata: { from }, communicationId, strict: true });
+        await recordCall({ callSid: call.sid, otherParty: to, serviceIdentity: from, direction: 'outbound', config, metadata: { from }, communicationId, strict: true });
 
-        const response = { callSid: call.sid, communication_id: communicationId, to, from, status: call.status };
+        const response = { callSid: call.sid, communication_id: communicationId, to, from, status: call.status,
+            ...(config.lineHistoryStatus ? {history_status:config.lineHistoryStatus} : {}) };
         await markOutbound(operationDb, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
         return reply.code(201).send(response);
     } catch (error) {
@@ -519,11 +540,14 @@ fastify.post('/sms', async (request, reply) => {
         await assertContactable(to, 'SMS', { allowed: overrideDnc === true, reason: overrideReason });
         await ensureContact(to);
         const operation = await reserveOutbound(operationDb, { key: idempotencyKey(request), type: 'sms', communicationId,
+            validateSender: () => resolvePhoneLine(operationDb,from,{tenantId:process.env.LEGACY_TENANT_ID,channel:'sms'}),
             request: { to, from, body, override_do_not_contact: overrideDnc, override_reason: overrideReason } });
         communicationId = operation.communication_id;
         if (operation.status === 'completed') return reply.code(200).send(operation.response);
         const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-        const message = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await dispatchTwilio(operationDb, operation, () => client.messages.create({ to, from, body }), markOutbound);
+        const history = await readLineHistory(operationDb,{tenantId:process.env.LEGACY_TENANT_ID,line:from,client:to,limit:1});
+        const message = operation.status === 'provider_sent' ? { sid: operation.provider_id, status: operation.provider_status } : await dispatchTwilio(operationDb, operation, () => client.messages.create({ to, from, body,
+            ...(process.env.PUBLIC_URL ? {statusCallback:new URL('/message-status',process.env.PUBLIC_URL).href} : {}) }), markOutbound);
         if (operation.status !== 'provider_sent') {
             await markOutbound(operationDb, operation.id, { status: 'provider_sent', provider_id: message.sid, provider_status: message.status });
         }
@@ -542,7 +566,7 @@ fastify.post('/sms', async (request, reply) => {
             strict: true,
         });
 
-        const response = { messageSid: message.sid, communication_id: communicationId, to, from, status: message.status };
+        const response = { history_status:history.status, messageSid: message.sid, communication_id: communicationId, to, from, status: message.status };
         await markOutbound(operationDb, operation.id, { status: 'completed', response, completed_at: new Date().toISOString() });
         return reply.code(201).send(response);
     } catch (error) {
@@ -571,13 +595,15 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
 
     let tenantId;
     try {
-        tenantId = await resolveTenantForPhoneLine(to);
+        tenantId = (await resolvePhoneLine(getDatabase(),to,{channel:'sms'})).tenant_id;
     } catch (error) {
         console.warn(`Rejected inbound SMS tenant resolution: ${error.message}`);
         return reply.code(503).type('text/xml').send('<Response></Response>');
     }
+    if (!messageSid) return reply.code(400).type('text/xml').send('<Response/>');
     await ensureContact(from, tenantId).catch((error) => console.warn(error.message));
     const stored = await recordMessage({
+        communicationId: 'comm_' + createHash('sha256').update(tenantId + ':' + messageSid).digest('hex').slice(0,32),
         otherParty: from,
         twilioNumber: to,
         direction: 'inbound',
@@ -587,33 +613,36 @@ fastify.all('/incoming-sms', twilioWebhook, async (request, reply) => {
         tenantId,
     });
 
-    if (stored) {
-        await enqueueEvent({
-            tenantId,
-            type: 'communication.created', communicationId: stored.communicationId,
-            purpose: stored.purpose, correlation: stored.correlation,
-            destination: stored.callbackUrl,
-            payload: { channel: 'sms', direction: 'inbound' },
-        }).catch((error) => console.warn(`Could not enqueue communication event: ${error.message}`));
-        await enqueueEvent({
-            tenantId,
-            type: 'communication.received', communicationId: stored.communicationId,
-            purpose: stored.purpose, correlation: stored.correlation,
-            destination: stored.callbackUrl,
-            payload: { channel: 'sms', direction: 'inbound', content: body },
-        }).catch((error) => console.warn(`Could not enqueue inbound SMS event: ${error.message}`));
+    if (!stored) return reply.code(503).type('text/xml').send('<Response/>');
+    const history = E164.test(from) ? await readLineHistory(getDatabase(),{tenantId,line:to,client:from,limit:1,beforeCommunication:stored.communicationId}) : {status:'unavailable'};
+    await enqueueEvent({
+        tenantId, dedupeKey:'sms-created:' + messageSid,
+        type: 'communication.created', communicationId: stored.communicationId,
+        purpose: stored.purpose, correlation: stored.correlation,
+        destination: stored.callbackUrl,
+        payload: { channel: 'sms', direction: 'inbound' },
+    });
+    await enqueueEvent({
+        tenantId,
+        dedupeKey:'sms-received:' + messageSid,
+        type: 'communication.received', communicationId: stored.communicationId,
+        purpose: stored.purpose, correlation: stored.correlation,
+        destination: stored.callbackUrl,
+        payload: { channel: 'sms', direction: 'inbound', content: body, service_identity:to, client_number:from,
+            history_status:history.status, before_communication:stored.communicationId },
+    });
 
-        // This is a candidate response, never a resolution. Hyperflow decides
-        // whether it answers the Ask and explicitly calls /v1/asks/:id/resolve.
-        if (stored.purpose?.type === 'human_ask') {
-            await enqueueEvent({
-                tenantId,
-                type: 'ask.response.received', communicationId: stored.communicationId,
-                purpose: stored.purpose, correlation: stored.correlation,
-                destination: stored.callbackUrl,
-                payload: { ask_id: stored.purpose.ask_id, channel: 'sms', content: body },
-            }).catch((error) => console.warn(`Could not enqueue Ask response event: ${error.message}`));
-        }
+    // This is a candidate response, never a resolution. Hyperflow decides
+    // whether it answers the Ask and explicitly calls /v1/asks/:id/resolve.
+    if (stored.purpose?.type === 'human_ask') {
+        await enqueueEvent({
+            tenantId,
+            dedupeKey:'sms-ask-response:' + messageSid,
+            type: 'ask.response.received', communicationId: stored.communicationId,
+            purpose: stored.purpose, correlation: stored.correlation,
+            destination: stored.callbackUrl,
+            payload: { ask_id: stored.purpose.ask_id, channel: 'sms', content: body },
+        });
     }
 
     reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?>\n<Response/>');
@@ -693,7 +722,10 @@ fastify.all('/outbound-answer', twilioWebhook, async (request, reply) => {
         if (params.tenant_id) return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>The configured call is unavailable. Please try again later.</Say><Hangup/></Response>');
         // Only if /outbound-call somehow didn't store one — re-resolve and
         // store so the media stream gets the same config (minus overrides).
-        config = await resolveConfig({ from: params.From, to: params.To, direction: 'outbound' });
+        const tenantId = process.env.LEGACY_TENANT_ID;
+        const line = await resolvePhoneLine(getDatabase(),params.From,{tenantId,channel:'voice'});
+        config = await resolveConfig({from:params.From,to:params.To,direction:'outbound',tenantId,clientLine:line.line_role==='client'});
+        if (line.line_role === 'client') config = await prepareClientVoice(getDatabase(),config,line,params.To);
         storeCallConfig(params.CallSid, config);
     }
 
@@ -1235,7 +1267,8 @@ fastify.register(async (fastify) => {
             // CallSid; the webhook recorded who that is.
             const { output, error, durationMs } = await executeTool(name, args, {
                 callSid,
-                phoneNumber: partyFor(callSid),
+                phoneNumber: config.clientNumber || partyFor(callSid),
+                clientLine: config.lineRole === 'client',
                 tenantId: config.tenantId || null,
                 personId: config.personId || null,
                 threadId: config.threadId || null,
@@ -1707,7 +1740,7 @@ fastify.register(async (fastify) => {
     });
 });
 
-fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     if (err) {
         console.error(err);
         process.exit(1);

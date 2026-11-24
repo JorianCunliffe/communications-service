@@ -798,6 +798,74 @@
           }
         }
       }
+    },
+    "/v1/phone-lines": {
+      "get": {
+        "summary": "List configured lines for the authenticated organization",
+        "responses": {
+          "200": {
+            "description": "Line numbers, roles and channel switches"
+          }
+        }
+      }
+    },
+    "/v1/phone-lines/{line}/activity": {
+      "get": {
+        "summary": "Read activity for one Twilio line or the history of one client on that line",
+        "parameters": [
+          {
+            "name": "line",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "client",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before_communication",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History status, items and next cursor"
+          },
+          "400": {
+            "description": "Invalid number or cursor"
+          },
+          "403": {
+            "description": "Line unavailable to this organization"
+          }
+        }
+      }
     }
   },
   "components": {

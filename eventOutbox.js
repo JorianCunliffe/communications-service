@@ -71,8 +71,7 @@ export async function enqueueEvent({
     return event;
 }
 
-export async function callbackForThread(tenantId, threadId = null) {
-    const db = getDatabase();
+export async function callbackForThread(tenantId, threadId = null, db = getDatabase()) {
     if (threadId === null) {
         threadId = tenantId;
         tenantId = process.env.LEGACY_TENANT_ID;

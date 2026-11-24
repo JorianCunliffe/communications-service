@@ -9,6 +9,7 @@
 // message must never fail or delay sending one.
 
 import { normaliseCorrelation, normalisePurpose, prefixedId, resolveCommunicationThread } from './communicationModel.js';
+import { callbackForThread } from './eventOutbox.js';
 import { getDatabase } from './database.js';
 
 const WRITE_TIMEOUT_MS = 2500;
@@ -92,8 +93,9 @@ export async function recordMessage({
     callbackUrl = null,
     tenantId = null,
     strict = false,
+    database = getClient(),
 }) {
-    const db = getClient();
+    const db = database;
     if (!db || !otherParty || !twilioNumber) {
         if (strict) throw new Error('Communications persistence is not configured');
         return null;
@@ -102,6 +104,19 @@ export async function recordMessage({
     try {
         const scopedTenant = tenantId || correlation?.tenant_id || db?.tenantId || process.env.LEGACY_TENANT_ID;
         if (!scopedTenant) throw new Error('tenant_id is required for SMS persistence');
+        const existingMessage = async () => {
+            const result = await db.from('sms_messages').select('communication_id,communication_thread_id,purpose,correlation')
+                .eq('tenant_id',scopedTenant).eq('twilio_message_sid',messageSid).maybeSingle();
+            if (result.error) throw Error(result.error.message);
+            const row = result.data;
+            if (!row) return null;
+            return {communicationId:row.communication_id,threadId:row.communication_thread_id,purpose:row.purpose,
+                correlation:row.correlation,callbackUrl:row.communication_thread_id ? await callbackForThread(scopedTenant,row.communication_thread_id,db) : null};
+        };
+        if (messageSid && direction === 'inbound') {
+            const replay = await existingMessage();
+            if (replay) return replay;
+        }
         const canonicalPurpose = normalisePurpose(purpose);
         if(canonicalPurpose?.type==='reception_verification')body='Reception verification challenge sent. Code redacted.';
         if(canonicalPurpose?.type==='briefing_verification')body='Briefing verification challenge sent. Code redacted.';
@@ -142,6 +157,10 @@ export async function recordMessage({
             'SMS message insert'
         );
 
+        if (error?.code === '23505' && messageSid) {
+            const replay = await existingMessage();
+            if (replay) return replay;
+        }
         if (error) throw new Error(error.message);
         const resolution = await withTimeout(
             db.from('communications').update({ resolution: semantic.resolution, ...(['reception_verification','briefing_verification'].includes(canonicalPurpose?.type)?{memory_eligible:false}:{}) })
