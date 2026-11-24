@@ -191,6 +191,13 @@ const TOOLS = {
         },
         handler: async ({ about = null, since = null, until = null, limit = null } = {}, context = {}) => {
             const phoneNumber = context.phoneNumber ?? null;
+            if (context.clientLine) {
+                const { readLineHistory } = await import('./phoneLines.js');
+                const { getDatabase } = await import('./database.js');
+                if (!phoneNumber) return {error:'No client number available'};
+                return readLineHistory(getDatabase(),{tenantId:context.tenantId,line:context.serviceIdentity,
+                    client:phoneNumber,about,since:normaliseSince(since),until:normaliseSince(until),limit:Math.max(1,Math.min(20,Number(limit)||5))});
+            }
             if (!phoneNumber) {
                 // Better an explicit failure than a confident "we have never
                 // spoken": the description tells the model not to guess, and
@@ -394,6 +401,7 @@ export async function executeTool(name, args, context = {}) {
 
     const done = (result) => ({ ...result, durationMs: Date.now() - started });
 
+    if (context.clientLine && !['recall_conversations','end_call','get_current_time'].includes(name)) return done({error:'Tool unavailable on this line'});
     if (!tool) return done({ error: `Unknown tool "${name}"` });
     if (!isAvailable(name)) return done({ error: `Tool "${name}" is not configured` });
 

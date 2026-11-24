@@ -192,21 +192,22 @@ export function renderTemplate(text, values = {}) {
 // `contact` is the row from public.contacts, or null for an unknown caller;
 // every placeholder degrades to a readable fallback rather than leaking braces.
 //
-export function personaliseConfig(config, contact, { scopedHistory = false } = {}) {
+export function personaliseConfig(config, contact, { scopedHistory = false, clientLine = false } = {}) {
     const needsRender = TEMPLATED_FIELDS.some((field) => {
         PLACEHOLDER.lastIndex = 0; // the regex is global; reset before testing
         return PLACEHOLDER.test(config[field] ?? '');
     });
     if (!needsRender) return config;
 
+    const notice = clientLine ? 'Use the history supplied for this phone line.' : SCOPED_HISTORY_NOTICE;
     const values = {
         name: contact?.name ?? null,
         assistant: config.assistantName ?? DEFAULT_CONFIG.assistantName,
-        combined_history: scopedHistory ? SCOPED_HISTORY_NOTICE : contact?.combined_history ?? null,
+        combined_history: scopedHistory ? notice : contact?.combined_history ?? null,
         // Deliberately never a value: {{history}} always renders to the notice
         // (or to whatever fallback the prompt supplies), because the record
         // itself does not travel in the prompt.
-        history: scopedHistory ? SCOPED_HISTORY_NOTICE : null,
+        history: scopedHistory ? notice : null,
     };
 
     const personalised = { ...config };
@@ -306,7 +307,7 @@ export function buildGreetingResponse(config) {
     return {
         type: 'response.create',
         response: {
-            instructions: [persona, direction].filter(Boolean).join('\n\n'),
+            instructions: [persona, config.lineHistoryPrompt, direction].filter(Boolean).join('\n\n'),
         },
     };
 }
@@ -321,7 +322,7 @@ export function buildSessionUpdate(config) {
             input: { format: { type: 'audio/pcmu' }, turn_detection: { type: "server_vad" } },
             output: { format: { type: 'audio/pcmu' }, voice: config.voice },
         },
-        instructions: config.systemMessage,
+        instructions: [config.systemMessage, config.lineHistoryPrompt].filter(Boolean).join('\n\n'),
     };
 
     if (config.effort) {

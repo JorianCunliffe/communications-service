@@ -10,14 +10,15 @@ Runtime requirement: Node.js `22.12.0` or newer.
 
 The canonical API is `/v1`. Provider identifiers such as Twilio `SM…` and `CA…` SIDs are retained for traceability, but callers address communications with provider-independent `comm_…` IDs.
 
-> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply migrations `000` through `041`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
+> Implementation status: the source, migrations, and tests are present in this repository. A deployment must set `LEGACY_TENANT_ID`, apply all numbered migrations through `043`, and configure either Supabase or PostgreSQL before `/v1` can persist or retrieve communications memory. Resend delivery remains off until `EMAIL_ENABLED=true`; connected Gmail and Outlook sync and provider-native drafts use separate OAuth configuration and never expose a send operation.
 
 ## Documentation
 
 - [Complete API reference](docs/API_REFERENCE.md)
 - [Threading model, correction workflow and verification](docs/THREADING.md)
 - [Environment template](.env.example)
-- [Latest database migration](migrations/041_mailbox_outlook_change_key.sql)
+- [Multi-number calling, texting and rollout](docs/API_REFERENCE.md#phone-lines-and-client-history)
+- [Latest database migration](migrations/043_phone_line_history.sql)
 
 ## Architecture
 
@@ -190,6 +191,7 @@ The runner applies every numbered SQL file once and refuses to continue if an al
 40. `migrations/039_promise_publish_constraint.sql`
 41. `migrations/040_contact_phone_identity.sql`
 42. `migrations/041_mailbox_outlook_change_key.sql`
+43. `migrations/043_phone_line_history.sql`
 
 Choose one runtime provider. Replit Database is direct PostgreSQL:
 
@@ -660,7 +662,7 @@ Focused verification: `node --test test/ambientCapture.test.js test/tools.test.j
 
 A working result means a small billable request was accepted at `checkedAt`; it does not expose or guarantee a remaining account balance. Credit/quota exhaustion, throttling, authentication, missing models, timeouts and provider outages remain separate failures. Stale or checking results are not current readiness evidence. The inventory covers service defaults and environment overrides; per-contact voice overrides and HyperFlow's separately hosted Gemini integration are outside its scope. No call, SMS, email, or diary operation is created by a check. See [health semantics](docs/API_REFERENCE.md#health).
 
-Production startup applies all numbered migrations through `041`. Migrations `026`-`041` add draft review/version recovery, promise evidence and publication constraints, operational review, contact identity, and Outlook change keys. Keep the Replit checkout and published fingerprint aligned with GitHub before resuming held operations.
+Production startup applies all numbered migrations through `043`. Migrations `026`-`041` add draft review/version recovery, promise evidence and publication constraints, operational review, contact identity, and Outlook change keys. Keep the Replit checkout and published fingerprint aligned with GitHub before resuming held operations.
 
 ### Twilio account readiness
 

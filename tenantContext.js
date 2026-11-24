@@ -26,6 +26,7 @@ export const TENANT_TABLES = new Set([
 ]);
 
 const TENANT_RPCS = new Set([
+    'phone_line_history',
     'store_review_sources',
     'configure_review_owner', 'refresh_review_session', 'create_review_session', 'record_review_action_result', 'queue_review_action', 'store_operational_classification', 'respond_operational_review', 'transition_operational_promise',
     'mutate_promise', 'reconcile_promise_jobs', 'commit_promise_job', 'review_promise', 'configure_promise_ledger',

@@ -1605,3 +1605,24 @@ Before a new voice/SMS reservation, the service reads fresh Twilio account and b
 A structured Twilio 4xx rejection is persisted as a failed operation and returns `422 OUTBOUND_PROVIDER_REJECTED`; the same key will not dispatch again. A network timeout, provider 5xx or uncertain result returns `409 IDEMPOTENCY_RECONCILIATION_REQUIRED`. A young reservation returns `409 IDEMPOTENCY_IN_PROGRESS`; reservations older than two minutes require reconciliation. No timeout releases a reservation or substitutes a new key.
 
 `GET /v1/calls/operations/:key` retrieves the exact original voice receipt using its URL-encoded idempotency key. It requires authenticated tenant scope and `voice:call` capability. Returns 404 if absent, 503 for unavailable persistence, and a private no-store response with operation state, provider/communication IDs, response and timestamps. It never places or retries a call.
+
+## Phone lines and client history
+
+The console at `/console` uses the same authenticated endpoints as API clients. Select the configured Twilio number, then an entry in recent activity or a client phone number. The timeline combines calls and texts in reverse chronological order. Replies use the selected line. Incoming SMS is recorded for the operator to handle.
+
+| Request | Result |
+| --- | --- |
+| `GET /v1/phone-lines` | Configured numbers in the authenticated organization, with name, role, voice and SMS switches. |
+| `GET /v1/phone-lines/:line/activity` | Recent phone activity on that line. Supply `client` for one client's eligible history, `limit` (1–100, default 25), and the returned `next` as `cursor` for older entries. Encode international numbers, including their leading plus sign. |
+| `POST /v1/calls`, `POST /v1/messages` | Existing send contracts with an international `from` and `to` and a stable `Idempotency-Key`. SMS receipts and client-line voice receipts also report `history_status`. |
+
+Both reads require `communications:read`. The history result has `status` (`available`, `empty`, or `unavailable`), `items`, and `next`. Items identify the communication, timestamp, client number, channel, direction, provider status, and eligible summary or content excerpt. Ineligible call attempts may appear as status-only entries in the line activity list. Client history excludes private briefings, verification messages and other ineligible material.
+
+The incoming SMS event identifies `service_identity` (the Twilio line), `client_number`, and `before_communication`. Pass the latter as a query parameter together with the client to read exchanges preceding that SMS. On a client-facing call, the service uses the phone number match to supply recent history before the AI speaks. The configured history window and budget bound the opening prompt. The recall tool can search older eligible exchanges for that line and client. A history outage permits delivery and is reported separately from an empty result.
+
+### Enable a client-facing line
+
+1. From the updated checkout with the service's database and Twilio account credentials, run `node scripts/phone-lines.js --inventory` **before deploying the new sender checks**. Review historical senders, database line ownership, channel switches, and Twilio's effective voice, SMS and call-status URLs, including TwiML applications and Messaging Services. Associate each active sender with its actual organization in `phone_configs` and set its channel switches to match the provider capabilities. Resolve every `unmappedSenders` entry before release. After migration, mark personal caller configuration rows with `node scripts/phone-lines.js --caller-override TENANT +NUMBER`. They remain available for legacy caller personalization and are excluded from the line directory and sending.
+2. Apply migration `043_phone_line_history.sql` via the existing migration runner. Existing line roles default to `existing`. Eligible older calls derive their line from the recorded Twilio leg and SMS derives it from the native SMS thread. Unattributable records stay outside the line timeline.
+3. Set the selected number's voice webhook to `/incoming-call`, incoming SMS webhook to `/incoming-sms`, and incoming call status callback to `/call-status` on the public service. Outbound operations supply their own delivery callback. Run `node scripts/phone-lines.js --enable-client TENANT +NUMBER` to verify ownership, both channel capabilities and callback configuration before switching the role. The command changes the selected database row. It does not configure Twilio.
+4. Using one designated test phone, send and receive a text and a call on the first line. Verify the originating number, incoming receipt, delivery status and spoken recall. Repeat with a distinct phrase on a second line and the same client. Check existing briefing and reception routes before enabling additional numbers. To revert one line's role, run `node scripts/phone-lines.js --restore-existing TENANT +NUMBER`.

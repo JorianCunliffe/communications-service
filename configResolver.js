@@ -9,6 +9,7 @@
 // Answering a call must never depend on persistence being reachable: every failure
 // path here returns DEFAULT_CONFIG.
 
+import { resolvePhoneLine } from './phoneLines.js';
 import { DEFAULT_CONFIG, personaliseConfig } from './config.js';
 import { databaseProvider, getDatabase } from './database.js';
 import { tenantDatabase } from './tenantContext.js';
@@ -230,15 +231,16 @@ export async function warmUp() {
 // `createContact` exists for the management API's preview route: asking what
 // would happen on a call must not be the thing that creates a contact record.
 // The call path leaves it on.
-export async function resolveConfig({ from, to, direction, createContact = true, tenantId = process.env.LEGACY_TENANT_ID }) {
+export async function resolveConfig({ from, to, direction, createContact = true, tenantId = process.env.LEGACY_TENANT_ID, clientLine = false }) {
+    const scope = {scopedHistory: direction === 'inbound' || clientLine, clientLine};
     const client = getClient(tenantId);
-    if (!client) return { ...personaliseConfig(DEFAULT_CONFIG, null, {scopedHistory: direction === 'inbound'}), tenantId: tenantId || null, personId: null };
+    if (!client) return { ...personaliseConfig(DEFAULT_CONFIG, null, scope), tenantId: tenantId || null, personId: null };
 
     const outbound = direction === 'outbound';
 
     // Inbound: the caller's own config wins, else the line they dialled.
     // Outbound: we are the caller, so `from` is our line.
-    const candidates = (outbound ? [from] : [from, to]).filter(Boolean);
+    const candidates = (outbound ? [from] : clientLine ? [to] : [from, to]).filter(Boolean);
 
     // Whose record personalises the call: always the person on the other end,
     // which is `to` when we placed the call and `from` when they did. Keying
@@ -246,7 +248,7 @@ export async function resolveConfig({ from, to, direction, createContact = true,
     // so the callee's settings and name are never found.
     const otherParty = outbound ? to : from;
 
-    if (candidates.length === 0 && !otherParty) return personaliseConfig(DEFAULT_CONFIG, null, {scopedHistory: direction === 'inbound'});
+    if (candidates.length === 0 && !otherParty) return personaliseConfig(DEFAULT_CONFIG, null, scope);
 
     let config = DEFAULT_CONFIG;
     let contact = null;
@@ -284,7 +286,7 @@ export async function resolveConfig({ from, to, direction, createContact = true,
         }
     } catch (error) {
         console.error('Config lookup failed, using defaults:', error.message);
-        return { ...personaliseConfig(DEFAULT_CONFIG, contact, {scopedHistory: direction === 'inbound'}), tenantId, personId: contact?.id || null, callerName: contact?.name || null };
+        return { ...personaliseConfig(DEFAULT_CONFIG, contact, scope), tenantId, personId: contact?.id || null, callerName: contact?.name || null };
     }
 
     // Note what this deliberately does not do: fetch conversation history.
@@ -292,7 +294,7 @@ export async function resolveConfig({ from, to, direction, createContact = true,
     // started separately by startHistory() in realtimeSessions.js, runs while
     // the call is still being set up, and reaches the model after it has
     // already begun speaking.
-    return { ...personaliseConfig(config, contact, {scopedHistory: direction === 'inbound'}), tenantId, personId: contact?.id || null, callerName: contact?.name || null };
+    return { ...personaliseConfig(config, contact, scope), tenantId, personId: contact?.id || null, callerName: contact?.name || null };
 }
 
 // Twilio authenticates the webhook, but it does not supply a tenant. Resolve
@@ -300,23 +302,13 @@ export async function resolveConfig({ from, to, direction, createContact = true,
 // maps to zero or multiple tenants is unsafe and must not fall back to the
 // legacy tenant.
 export async function resolveTenantForPhoneLine(to) {
-    const database = getDatabase();
-    if (!database || !to) throw new Error('Inbound call tenant resolution is unavailable');
-    const result = await database.from('phone_configs')
-        .select('tenant_id')
-        .eq('twilio_number', to)
-        .limit(2);
-    if (result.error) throw new Error(`Inbound call tenant lookup failed: ${result.error.message}`);
-    const matches = Array.isArray(result.data) ? result.data : [];
-    if (matches.length !== 1 || !matches[0]?.tenant_id) {
-        throw new Error('Dialled number did not resolve to exactly one tenant');
-    }
-    return matches[0].tenant_id;
+    return (await resolvePhoneLine(getDatabase(),to)).tenant_id;
 }
 
 export async function resolveInboundCall({ from, to, createContact = true }) {
-    const tenantId = await resolveTenantForPhoneLine(to);
-    return resolveConfig({ from, to, direction: 'inbound', createContact, tenantId });
+    const line = await resolvePhoneLine(getDatabase(),to,{channel:'voice'});
+    const config = await resolveConfig({from,to,direction:'inbound',createContact,tenantId:line.tenant_id,clientLine:line.line_role==='client'});
+    return {...config, lineRole:line.line_role, tenantId:line.tenant_id, serviceIdentity:to};
 }
 
 // --- CallSid → config handoff ----------------------------------------------

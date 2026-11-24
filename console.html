@@ -39,7 +39,7 @@
   }
   label { display:block; font-size:13px; color:var(--dim); margin:0 0 5px; }
   .field { margin-bottom:13px; }
-  input, textarea {
+  input, select, textarea {
     width:100%; padding:9px 11px; font-family:var(--mono); font-size:14px;
     background:var(--paper); color:var(--text);
     border:1px solid var(--line); border-radius:4px;
@@ -77,139 +77,185 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Assistant test console</h1>
+  <h1>Communications console</h1>
   <p class="sub">Place a call or send a message through this server. Your key stays in this browser. Calls and messages may be stored by this service.</p>
 
   <div class="status" id="status"><span class="chip">checking&hellip;</span></div>
 
   <div class="card">
-    <h2>Credentials</h2>
-    <div class="field">
-      <label for="key">API key <span style="opacity:.7">(X-API-Key, saved in this browser only)</span></label>
-      <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="paste your API_KEY">
-    </div>
-    <div class="field">
-      <label for="from">From &mdash; your Twilio number</label>
-      <input id="from" type="tel" inputmode="tel" spellcheck="false" placeholder="+61468271148">
-    </div>
+    <h2>Connection</h2>
+    <label for="key">API key</label>
+    <input id="key" type="password" autocomplete="off">
+    <label for="tenant">Organization ID (for scoped API keys)</label>
+    <input id="tenant" autocomplete="off">
+    <div class="actions"><button id="connect">Load phone lines</button></div>
+    <div class="out" id="connection" role="status"></div>
   </div>
-
   <div class="card">
-    <h2>Place a call</h2>
-    <div class="field">
-      <label for="callTo">Number to call</label>
-      <input id="callTo" type="tel" inputmode="tel" spellcheck="false" placeholder="+61415828522">
-    </div>
-    <div class="actions">
-      <button id="callBtn" type="button">Call this number</button>
-    </div>
-    <p class="hint">The assistant opens the conversation in its configured voice.</p>
-    <div class="out" id="callOut" role="status" aria-live="polite"></div>
+    <h2>Phone line</h2>
+    <label for="from">Configured number</label>
+    <select id="from" disabled></select>
+    <h3>Recent activity</h3>
+    <div id="activity" aria-live="polite"></div>
+    <button id="refresh" class="ghost" disabled>Refresh activity</button>
   </div>
-
   <div class="card">
-    <h2>Send a message</h2>
-    <div class="field">
-      <label for="smsTo">Number to text</label>
-      <input id="smsTo" type="tel" inputmode="tel" spellcheck="false" placeholder="+61415828522">
-    </div>
-    <div class="field">
-      <label for="smsBody">Message</label>
-      <textarea id="smsBody" maxlength="1600" placeholder="Type the message to send"></textarea>
-    </div>
-    <div class="actions">
-      <button id="smsBtn" type="button" class="ghost">Send message</button>
-    </div>
-    <p class="hint">Sends immediately via Twilio and records the message when persistence is enabled.</p>
-    <div class="out" id="smsOut" role="status" aria-live="polite"></div>
+    <label for="client">Client phone number (international format)</label>
+    <input id="client" type="tel" placeholder="+61400000000">
+    <h3>Calls and texts on this line</h3>
+    <div id="history" class="out" role="status"></div>
+    <button id="older" class="ghost" hidden>Earlier exchanges</button>
+    <div class="actions"><button id="callBtn" disabled>Call with AI voice</button></div>
+    <label for="smsBody">Text message</label>
+    <textarea id="smsBody" maxlength="1600"></textarea>
+    <div class="actions"><button id="smsBtn" disabled>Send SMS</button></div>
+    <div class="out" id="result" role="status"></div>
   </div>
 </div>
 
 <script>
-  const $ = (id) => document.getElementById(id);
+  const $ = id => document.getElementById(id);
+  const validPhone = /^\+[1-9]\d{1,14}$/;
+  let lines = [], generation = 0, activityGeneration = 0, connectionGeneration = 0;
+  let next = null, previewReady = false, sending = false;
+  const pending = new Map();
   const STORE = 'assistant-console';
+  const oldSettings = JSON.parse(localStorage.getItem(STORE) || '{}');
+  $('tenant').value = oldSettings.tenant || '';
+  $('key').value = oldSettings.key || '';
 
-  // Remember everything except the message body. The key lives in this
-  // browser's localStorage and is never sent anywhere but this server.
-  const saved = JSON.parse(localStorage.getItem(STORE) || '{}');
-  for (const id of ['key', 'from', 'callTo', 'smsTo']) {
-    if (saved[id]) $(id).value = saved[id];
-    $(id).addEventListener('input', () => {
-      const next = JSON.parse(localStorage.getItem(STORE) || '{}');
-      next[id] = $(id).value.trim();
-      localStorage.setItem(STORE, JSON.stringify(next));
-    });
+  function headers() {
+    const h = {'X-API-Key':$('key').value.trim()};
+    if ($('tenant').value.trim()) h['X-Tenant-Id'] = $('tenant').value.trim();
+    return h;
   }
-
-  const E164 = /^\+[1-9]\d{1,14}$/;
-
-  function show(el, ok, text) {
-    el.className = 'out ' + (ok ? 'good' : 'bad');
-    el.textContent = text;
+  async function read(path) {
+    const response = await fetch(path,{headers:headers(),cache:'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw Error(data.error || 'Request failed');
+    return data;
   }
-
-  async function post(path, payload, out, button, label) {
-    const key = $('key').value.trim();
-    if (!key) return show(out, false, 'Enter your API key first.');
-
-    button.disabled = true;
-    const original = button.textContent;
-    button.textContent = label;
-    show(out, true, 'Working…');
-
-    try {
-      const res = await fetch(path, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': key,
-          // Each button click is a new user-authorised outbound operation.
-          // A retry performed by fetch or an intermediary retains this value,
-          // while a later deliberate click receives a fresh key.
-          'Idempotency-Key': `console-${path.replace(/\W+/g, '-')}-${crypto.randomUUID()}`,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      let data = null;
-      try { data = await res.json(); } catch (_) {}
-
-      if (res.ok) {
-        show(out, true, res.status + ' ' + JSON.stringify(data, null, 2));
-      } else if (res.status === 401) {
-        show(out, false, '401 — that API key was rejected. Check it matches API_KEY on the server.');
-      } else if (res.status === 503) {
-        show(out, false, '503 — the server is missing Twilio credentials or API_KEY. Check /health.');
-      } else if (res.status === 404) {
-        show(out, false, '404 — this endpoint does not exist on the running deployment yet.');
-      } else {
-        show(out, false, res.status + ' ' + JSON.stringify(data, null, 2));
-      }
-    } catch (error) {
-      show(out, false, 'Could not reach the server: ' + error.message);
-    } finally {
-      button.disabled = false;
-      button.textContent = original;
+  function linePath() {
+    return '/v1/phone-lines/' + encodeURIComponent($('from').value) + '/activity';
+  }
+  function updateActions() {
+    const line = lines.find(item => item.twilio_number === $('from').value);
+    $('callBtn').disabled = sending || !previewReady || !line?.call_enabled;
+    $('smsBtn').disabled = sending || !previewReady || !line?.sms_enabled || !$('smsBody').value.trim();
+  }
+  async function history(append = false) {
+    const version = ++generation;
+    const client = $('client').value.trim();
+    if (!append) {
+      previewReady = false;
+      $('history').textContent = '';
+      $('result').textContent = '';
+      next = null;
     }
+    $('older').hidden = true;
+    updateActions();
+    if (!validPhone.test(client) || !$('from').value) return;
+    const params = new URLSearchParams({client});
+    if (append && next) params.set('cursor',next);
+    if (!append) $('history').textContent = 'Loading history...';
+    try {
+      const data = await read(linePath() + '?' + params);
+      if (version !== generation) return;
+      if (data.status === 'unavailable') throw Error();
+      const text = data.items.map(item => new Date(item.occurred_at).toLocaleString() + '  ' + item.direction + ' ' + item.channel + '\n' + (item.content || item.status || '')).join('\n\n');
+      $('history').textContent = append ? $('history').textContent + '\n\n' + text : text || 'No eligible previous exchanges on this line.';
+      next = data.next;
+      $('older').hidden = !next;
+    } catch {
+      if (version !== generation) return;
+      const notice = 'History temporarily unavailable.';
+      $('history').textContent = append ? $('history').textContent + '\n' + notice : notice;
+      $('older').hidden = !next;
+    }
+    previewReady = true;
+    updateActions();
   }
-
-  $('callBtn').addEventListener('click', () => {
-    const to = $('callTo').value.trim();
-    const from = $('from').value.trim();
-    if (!E164.test(to))   return show($('callOut'), false, 'Number to call must be E.164, like +61415828522.');
-    if (!E164.test(from)) return show($('callOut'), false, 'Your Twilio number must be E.164, like +61468271148.');
-    post('/outbound-call', { to, from }, $('callOut'), $('callBtn'), 'Calling…');
-  });
-
-  $('smsBtn').addEventListener('click', () => {
-    const to = $('smsTo').value.trim();
-    const from = $('from').value.trim();
-    const body = $('smsBody').value.trim();
-    if (!E164.test(to))   return show($('smsOut'), false, 'Number to text must be E.164, like +61415828522.');
-    if (!E164.test(from)) return show($('smsOut'), false, 'Your Twilio number must be E.164, like +61468271148.');
-    if (!body)            return show($('smsOut'), false, 'Type a message to send.');
-    post('/sms', { to, from, body }, $('smsOut'), $('smsBtn'), 'Sending…');
-  });
+  async function activity() {
+    const version = ++activityGeneration;
+    if (!$('from').value) return;
+    try {
+      const data = await read(linePath());
+      if (version !== activityGeneration) return;
+      $('activity').replaceChildren();
+      if (!data.items.length) $('activity').textContent = data.status === 'unavailable' ? 'Activity unavailable.' : 'No recent activity.';
+      for (const item of data.items) {
+        const button = document.createElement('button');
+        button.className = 'ghost';
+        button.textContent = item.client + ' / ' + item.direction + ' ' + item.channel + ' / ' + new Date(item.occurred_at).toLocaleString();
+        button.onclick = () => { if ($('client').value !== item.client) $('smsBody').value = ''; $('client').value = item.client; history(); };
+        $('activity').append(button);
+      }
+    } catch { if (version === activityGeneration) $('activity').textContent = 'Activity unavailable.'; }
+  }
+  function resetConnection() {
+    connectionGeneration++;
+    activityGeneration++;
+    lines = [];
+    $('from').replaceChildren();
+    $('from').disabled = $('refresh').disabled = true;
+    $('activity').replaceChildren();
+    $('connection').textContent = '';
+    history();
+  }
+  async function connect() {
+    resetConnection();
+    const version = connectionGeneration;
+    try {
+      const data = await read('/v1/phone-lines');
+      if (version !== connectionGeneration) return;
+      lines = data.items;
+      if (lines.length > 1) $('from').add(new Option('Choose a phone line',''));
+      for (const line of lines) $('from').add(new Option([line.name,line.twilio_number].filter(Boolean).join(' / '),line.twilio_number));
+      if (lines.some(line=>line.twilio_number === oldSettings.from) && oldSettings.tenant === $('tenant').value) $('from').value = oldSettings.from;
+      $('from').disabled = $('refresh').disabled = !lines.length;
+      oldSettings.key = $('key').value;
+      oldSettings.tenant = $('tenant').value;
+      localStorage.setItem(STORE,JSON.stringify(oldSettings));
+      $('connection').textContent = lines.length ? '' : 'No configured lines for this organization.';
+      activity(); history();
+    } catch (error) { if (version === connectionGeneration) $('connection').textContent = error.message; }
+  }
+  async function send(channel) {
+    if (sending || !previewReady) return;
+    const version = generation, path = '/v1/' + (channel === 'voice' ? 'calls' : 'messages');
+    const payload = {from:$('from').value,to:$('client').value.trim()};
+    if (channel === 'sms') payload.body = $('smsBody').value;
+    const signature = JSON.stringify([$('tenant').value,$('key').value,path,payload]);
+    const key = pending.get(signature) || crypto.randomUUID();
+    pending.set(signature,key);
+    sending = true; updateActions();
+    $('result').textContent = 'Submitting...';
+    try {
+      const response = await fetch(path,{method:'POST',headers:{...headers(),'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(payload)});
+      const data = await response.json();
+      if (response.ok || data.dispatched === false) pending.delete(signature);
+      if (version !== generation) return;
+      if (!response.ok) throw Error(data.error || 'Request failed');
+      const message = (channel === 'voice' ? 'Call accepted' : 'SMS accepted') + ' / ' + data.communication_id
+        + (data.history_status === 'unavailable' ? ' / History was unavailable at dispatch.' : '');
+      if (channel === 'sms') $('smsBody').value = '';
+      activity();
+      const refreshed = history();
+      $('result').textContent = message;
+      await refreshed;
+    } catch (error) { if (version === generation) $('result').textContent = error.message; }
+    finally { sending = false; updateActions(); }
+  }
+  $('connect').onclick = connect;
+  $('key').oninput = $('tenant').oninput = resetConnection;
+  $('from').onchange = () => { oldSettings.from = $('from').value; localStorage.setItem(STORE,JSON.stringify(oldSettings)); $('activity').replaceChildren(); $('smsBody').value=''; activity(); history(); };
+  $('client').oninput = () => { $('smsBody').value = ''; history(); };
+  $('older').onclick = () => history(true);
+  $('refresh').onclick = () => { activity(); history(); };
+  $('smsBody').oninput = updateActions;
+  $('callBtn').onclick = () => send('voice');
+  $('smsBtn').onclick = () => send('sms');
+  if ($('key').value) connect();
 
   // Report what the server can actually do, so a 503 is never a surprise.
   fetch('/health')
