@@ -6,6 +6,7 @@ import { safeFetch } from './safeFetch.js';
 import { hyperflowProtectionHeaders } from './vercelProtection.js';
 import { DEFAULT_CONFIG } from './config.js';
 import { VOICE_CONTEXT_TIMEOUT_MS } from './voiceContextDeadline.js';
+import { startVoiceContextTelemetry } from './voiceContextTelemetry.js';
 
 function contextUrl() {
     const configured = String(process.env.HYPERFLOW_AGENT_CONTEXT_URL || '').trim();
@@ -52,6 +53,7 @@ export async function requestHyperFlowVoiceContext({
         .split(',').map((host) => host.trim().toLowerCase()).filter(Boolean);
     const allowedHosts = configuredHosts.length ? configuredHosts : [new URL(url).hostname.toLowerCase()];
     const started = Date.now();
+    const telemetry = startVoiceContextTelemetry({ requestId: payload.request_id, body });
     try {
         const response = await fetchContext(url, {
             method: 'POST',
@@ -64,7 +66,10 @@ export async function requestHyperFlowVoiceContext({
             body,
             signal: signal || AbortSignal.timeout(VOICE_CONTEXT_TIMEOUT_MS),
         }, { scope: 'HYPERFLOW_AGENT_CONTEXT', allowedHosts, maxRedirects: 0 });
-        const text = (await response.text()).slice(0, 128 * 1024);
+        telemetry?.headers(response.status);
+        const responseText = await response.text();
+        telemetry?.body(responseText);
+        const text = responseText.slice(0, 128 * 1024);
         let parsed;
         try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
         if (!response.ok) throw new Error(`HyperFlow voice context returned HTTP ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
@@ -72,8 +77,10 @@ export async function requestHyperFlowVoiceContext({
             throw new Error('HyperFlow voice context returned an invalid response');
         }
         console.info('HyperFlow voice lookup', { requestId: payload.request_id, durationMs: Date.now() - started, status: 'ok' });
+        telemetry?.finish('ok');
         return parsed;
     } catch (error) {
+        telemetry?.finish(error?.name === 'TimeoutError' || signal?.reason?.name === 'TimeoutError' ? 'timeout' : signal?.aborted || error?.name === 'AbortError' ? 'cancelled' : 'failed');
         console.warn('HyperFlow voice lookup', { requestId: payload.request_id, durationMs: Date.now() - started, status: signal?.aborted || error?.name === 'TimeoutError' ? 'timeout' : 'failed' });
         throw error;
     }
